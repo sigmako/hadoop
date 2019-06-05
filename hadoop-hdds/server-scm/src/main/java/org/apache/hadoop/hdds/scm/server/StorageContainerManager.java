@@ -40,8 +40,9 @@ import org.apache.hadoop.hdds.scm.block.BlockManager;
 import org.apache.hadoop.hdds.scm.block.BlockManagerImpl;
 import org.apache.hadoop.hdds.scm.block.DeletedBlockLogImpl;
 import org.apache.hadoop.hdds.scm.block.PendingDeleteHandler;
-import org.apache.hadoop.hdds.scm.chillmode.ChillModeHandler;
-import org.apache.hadoop.hdds.scm.chillmode.SCMChillModeManager;
+import org.apache.hadoop.hdds.scm.container.ReplicationManager.ReplicationManagerConfiguration;
+import org.apache.hadoop.hdds.scm.safemode.SafeModeHandler;
+import org.apache.hadoop.hdds.scm.safemode.SCMSafeModeManager;
 import org.apache.hadoop.hdds.scm.command.CommandStatusReportHandler;
 import org.apache.hadoop.hdds.scm.container.CloseContainerEventHandler;
 import org.apache.hadoop.hdds.scm.container.ContainerActionsHandler;
@@ -55,8 +56,7 @@ import org.apache.hadoop.hdds.scm.container.placement.algorithms.ContainerPlacem
 import org.apache.hadoop.hdds.scm.container.placement.algorithms.SCMContainerPlacementCapacity;
 import org.apache.hadoop.hdds.scm.container.placement.metrics.ContainerStat;
 import org.apache.hadoop.hdds.scm.container.placement.metrics.SCMMetrics;
-import org.apache.hadoop.hdds.scm.container.replication.ReplicationActivityStatus;
-import org.apache.hadoop.hdds.scm.container.replication.ReplicationManager;
+import org.apache.hadoop.hdds.scm.container.ReplicationManager;
 import org.apache.hadoop.hdds.scm.events.SCMEvents;
 import org.apache.hadoop.hdds.scm.exceptions.SCMException;
 import org.apache.hadoop.hdds.scm.exceptions.SCMException.ResultCodes;
@@ -90,6 +90,7 @@ import org.apache.hadoop.ozone.OzoneSecurityUtil;
 import org.apache.hadoop.ozone.common.Storage.StorageState;
 import org.apache.hadoop.ozone.common.StorageInfo;
 import org.apache.hadoop.ozone.lease.LeaseManager;
+import org.apache.hadoop.ozone.lock.LockManager;
 import org.apache.hadoop.ozone.protocol.commands.RetriableDatanodeEventWatcher;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -161,7 +162,7 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
   private final SCMDatanodeProtocolServer datanodeProtocolServer;
   private final SCMBlockProtocolServer blockProtocolServer;
   private final SCMClientProtocolServer clientProtocolServer;
-  private  SCMSecurityProtocolServer securityProtocolServer;
+  private SCMSecurityProtocolServer securityProtocolServer;
 
   /*
    * State Managers of SCM.
@@ -197,13 +198,13 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
 
   private final LeaseManager<Long> commandWatcherLeaseManager;
 
-  private final ReplicationActivityStatus replicationStatus;
-  private SCMChillModeManager scmChillModeManager;
+  private SCMSafeModeManager scmSafeModeManager;
   private CertificateServer certificateServer;
 
   private JvmPauseMonitor jvmPauseMonitor;
   private final OzoneConfiguration configuration;
-  private final ChillModeHandler chillModeHandler;
+  private final SafeModeHandler safeModeHandler;
+  private SCMContainerMetrics scmContainerMetrics;
 
   /**
    * Creates a new StorageContainerManager. Configuration will be
@@ -237,7 +238,7 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
     Objects.requireNonNull(conf, "configuration cannot not be null");
 
     configuration = conf;
-    StorageContainerManager.initMetrics();
+    initMetrics();
     initContainerReportCache(conf);
     /**
      * It is assumed the scm --init command creates the SCM Storage Config.
@@ -284,14 +285,13 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
     commandWatcherLeaseManager = new LeaseManager<>("CommandWatcher",
         watcherTimeout);
     initalizeSystemManagers(conf, configurator);
-    replicationStatus = new ReplicationActivityStatus();
 
     CloseContainerEventHandler closeContainerHandler =
         new CloseContainerEventHandler(pipelineManager, containerManager);
     NodeReportHandler nodeReportHandler =
         new NodeReportHandler(scmNodeManager);
     PipelineReportHandler pipelineReportHandler =
-        new PipelineReportHandler(scmChillModeManager, pipelineManager, conf);
+        new PipelineReportHandler(scmSafeModeManager, pipelineManager, conf);
     CommandStatusReportHandler cmdStatusReportHandler =
         new CommandStatusReportHandler();
 
@@ -299,7 +299,7 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
     StaleNodeHandler staleNodeHandler =
         new StaleNodeHandler(scmNodeManager, pipelineManager, conf);
     DeadNodeHandler deadNodeHandler = new DeadNodeHandler(scmNodeManager,
-        containerManager);
+        pipelineManager, containerManager);
     NonHealthyToHealthyNodeHandler nonHealthyToHealthyNodeHandler =
         new NonHealthyToHealthyNodeHandler(pipelineManager, conf);
     ContainerActionsHandler actionsHandler = new ContainerActionsHandler();
@@ -307,12 +307,10 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
         new PendingDeleteHandler(scmBlockManager.getSCMBlockDeletingService());
 
     ContainerReportHandler containerReportHandler =
-        new ContainerReportHandler(scmNodeManager, pipelineManager,
-            containerManager, replicationStatus);
+        new ContainerReportHandler(scmNodeManager, containerManager);
 
     IncrementalContainerReportHandler incrementalContainerReportHandler =
-        new IncrementalContainerReportHandler(
-            pipelineManager, containerManager);
+        new IncrementalContainerReportHandler(containerManager);
 
     PipelineActionHandler pipelineActionHandler =
         new PipelineActionHandler(pipelineManager, conf);
@@ -338,8 +336,9 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
     clientProtocolServer = new SCMClientProtocolServer(conf, this);
     httpServer = new StorageContainerManagerHttpServer(conf);
 
-    chillModeHandler = new ChillModeHandler(configuration,
-        clientProtocolServer, scmBlockManager, replicationStatus);
+    safeModeHandler = new SafeModeHandler(configuration,
+        clientProtocolServer, scmBlockManager, replicationManager,
+        pipelineManager);
 
     eventQueue.addHandler(SCMEvents.DATANODE_COMMAND, scmNodeManager);
     eventQueue.addHandler(SCMEvents.RETRIABLE_DATANODE_COMMAND, scmNodeManager);
@@ -361,8 +360,9 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
         (DeletedBlockLogImpl) scmBlockManager.getDeletedBlockLog());
     eventQueue.addHandler(SCMEvents.PIPELINE_ACTIONS, pipelineActionHandler);
     eventQueue.addHandler(SCMEvents.PIPELINE_REPORT, pipelineReportHandler);
-    eventQueue.addHandler(SCMEvents.CHILL_MODE_STATUS, chillModeHandler);
+    eventQueue.addHandler(SCMEvents.SAFE_MODE_STATUS, safeModeHandler);
     registerMXBean();
+    registerMetricsSource(this);
   }
 
   /**
@@ -374,7 +374,7 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
    *  Container Manager
    *  Block Manager
    *  Replication Manager
-   *  Chill Mode Manager
+   *  Safe Mode Manager
    *
    * @param conf - Ozone Configuration.
    * @param configurator - A customizer which allows different managers to be
@@ -402,14 +402,14 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
           new SCMPipelineManager(conf, scmNodeManager, eventQueue);
     }
 
-    if(configurator.getContainerManager() != null) {
+    if (configurator.getContainerManager() != null) {
       containerManager = configurator.getContainerManager();
     } else {
       containerManager = new SCMContainerManager(
           conf, scmNodeManager, pipelineManager, eventQueue);
     }
 
-    if(configurator.getScmBlockManager() != null) {
+    if (configurator.getScmBlockManager() != null) {
       scmBlockManager = configurator.getScmBlockManager();
     } else {
       scmBlockManager = new BlockManagerImpl(conf, this);
@@ -417,13 +417,17 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
     if (configurator.getReplicationManager() != null) {
       replicationManager = configurator.getReplicationManager();
     }  else {
-      replicationManager = new ReplicationManager(containerPlacementPolicy,
-          containerManager, eventQueue, commandWatcherLeaseManager);
+      replicationManager = new ReplicationManager(
+          conf.getObject(ReplicationManagerConfiguration.class),
+          containerManager,
+          containerPlacementPolicy,
+          eventQueue,
+          new LockManager<>(conf));
     }
-    if(configurator.getScmChillModeManager() != null) {
-      scmChillModeManager = configurator.getScmChillModeManager();
+    if(configurator.getScmSafeModeManager() != null) {
+      scmSafeModeManager = configurator.getScmSafeModeManager();
     } else {
-      scmChillModeManager = new SCMChillModeManager(conf,
+      scmSafeModeManager = new SCMSafeModeManager(conf,
           containerManager.getContainers(), pipelineManager, eventQueue);
     }
   }
@@ -838,6 +842,10 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
         jmxProperties, this);
   }
 
+  private void registerMetricsSource(SCMMXBean scmMBean) {
+    scmContainerMetrics = SCMContainerMetrics.create(scmMBean);
+  }
+
   private void unregisterMXBean() {
     if (this.scmInfoBeanName != null) {
       MBeans.unregister(this.scmInfoBeanName);
@@ -908,8 +916,6 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
 
     httpServer.start();
     scmBlockManager.start();
-    replicationStatus.start();
-    replicationManager.start();
 
     // Start jvm monitor
     jvmPauseMonitor = new JvmPauseMonitor();
@@ -923,14 +929,6 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
    * Stop service.
    */
   public void stop() {
-
-    try {
-      LOG.info("Stopping Replication Activity Status tracker.");
-      replicationStatus.close();
-    } catch (Exception ex) {
-      LOG.error("Replication Activity Status tracker stop failed.", ex);
-    }
-
 
     try {
       LOG.info("Stopping Replication Manager Service.");
@@ -996,6 +994,10 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
     }
 
     unregisterMXBean();
+    if (scmContainerMetrics != null) {
+      scmContainerMetrics.unRegister();
+    }
+
     // Event queue must be stopped before the DB store is closed at the end.
     try {
       LOG.info("Stopping SCM Event Queue.");
@@ -1015,6 +1017,8 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
     } catch (Exception ex) {
       LOG.error("SCM Metadata store stop failed", ex);
     }
+
+    scmSafeModeManager.stop();
   }
 
   /**
@@ -1078,8 +1082,18 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
   }
 
   @VisibleForTesting
-  public ChillModeHandler getChillModeHandler() {
-    return chillModeHandler;
+  public SafeModeHandler getSafeModeHandler() {
+    return safeModeHandler;
+  }
+
+  @VisibleForTesting
+  public SCMSafeModeManager getScmSafeModeManager() {
+    return scmSafeModeManager;
+  }
+
+  @VisibleForTesting
+  public ReplicationManager getReplicationManager() {
+    return replicationManager;
   }
 
   public void checkAdminAccess(String remoteUser) throws IOException {
@@ -1143,22 +1157,22 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
   }
 
   /**
-   * Returns live chill mode container threshold.
+   * Returns live safe mode container threshold.
    *
    * @return String
    */
   @Override
-  public double getChillModeCurrentContainerThreshold() {
+  public double getSafeModeCurrentContainerThreshold() {
     return getCurrentContainerThreshold();
   }
 
   /**
-   * Returns chill mode status.
+   * Returns safe mode status.
    * @return boolean
    */
   @Override
-  public boolean isInChillMode() {
-    return scmChillModeManager.getInChillMode();
+  public boolean isInSafeMode() {
+    return scmSafeModeManager.getInSafeMode();
   }
 
   /**
@@ -1169,24 +1183,24 @@ public final class StorageContainerManager extends ServiceRuntimeInfoImpl
   }
 
   /**
-   * Force SCM out of chill mode.
+   * Force SCM out of safe mode.
    */
-  public boolean exitChillMode() {
-    scmChillModeManager.exitChillMode(eventQueue);
+  public boolean exitSafeMode() {
+    scmSafeModeManager.exitSafeMode(eventQueue);
     return true;
   }
 
   @VisibleForTesting
   public double getCurrentContainerThreshold() {
-    return scmChillModeManager.getCurrentContainerThreshold();
+    return scmSafeModeManager.getCurrentContainerThreshold();
   }
 
   @Override
   public Map<String, Integer> getContainerStateCount() {
     Map<String, Integer> nodeStateCount = new HashMap<>();
     for (HddsProtos.LifeCycleState state : HddsProtos.LifeCycleState.values()) {
-      nodeStateCount.put(state.toString(), containerManager.getContainers(
-          state).size());
+      nodeStateCount.put(state.toString(),
+          containerManager.getContainerCountByState(state));
     }
     return nodeStateCount;
   }

@@ -24,6 +24,8 @@ import org.apache.hadoop.hdds.security.x509.SecurityConfig;
 import org.apache.hadoop.hdds.security.x509.certificate.client.CertificateClient;
 import org.apache.hadoop.hdds.security.x509.exceptions.CertificateException;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.ozone.om.S3SecretManager;
+import org.apache.hadoop.ozone.om.S3SecretManagerImpl;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.security.OzoneSecretStore.OzoneManagerSecretState;
 import org.apache.hadoop.ozone.security.OzoneTokenIdentifier.TokenInfo;
@@ -38,12 +40,13 @@ import org.slf4j.LoggerFactory;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
-import java.security.PrivateKey;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.TOKEN_EXPIRED;
+import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMTokenProto.Type.S3TOKEN;
 
 /**
  * SecretManager for Ozone Master. Responsible for signing identifiers with
@@ -58,6 +61,7 @@ public class OzoneDelegationTokenSecretManager
       .getLogger(OzoneDelegationTokenSecretManager.class);
   private final Map<OzoneTokenIdentifier, TokenInfo> currentTokens;
   private final OzoneSecretStore store;
+  private final S3SecretManagerImpl s3SecretManager;
   private Thread tokenRemoverThread;
   private final long tokenRemoverScanInterval;
   private String omCertificateSerialId;
@@ -80,12 +84,15 @@ public class OzoneDelegationTokenSecretManager
    */
   public OzoneDelegationTokenSecretManager(OzoneConfiguration conf,
       long tokenMaxLifetime, long tokenRenewInterval,
-      long dtRemoverScanInterval, Text service) throws IOException {
+      long dtRemoverScanInterval, Text service,
+      S3SecretManager s3SecretManager) throws IOException {
     super(new SecurityConfig(conf), tokenMaxLifetime, tokenRenewInterval,
         service, LOG);
     currentTokens = new ConcurrentHashMap();
     this.tokenRemoverScanInterval = dtRemoverScanInterval;
-    this.store = new OzoneSecretStore(conf);
+    this.s3SecretManager = (S3SecretManagerImpl) s3SecretManager;
+    this.store = new OzoneSecretStore(conf,
+        this.s3SecretManager.getOmMetadataManager());
     loadTokenSecretState(store.loadState());
   }
 
@@ -123,15 +130,12 @@ public class OzoneDelegationTokenSecretManager
 
     byte[] password = createPassword(identifier.getBytes(),
         getCurrentKey().getPrivateKey());
-    addToTokenStore(identifier, password);
+    long expiryTime = identifier.getIssueDate() + getTokenRenewInterval();
+    addToTokenStore(identifier, password, expiryTime);
     Token<OzoneTokenIdentifier> token = new Token<>(identifier.getBytes(),
-        password,
-        identifier.getKind(), getService());
-    if (LOG.isTraceEnabled()) {
-      long expiryTime = identifier.getIssueDate() + getTokenRenewInterval();
-      String tokenId = identifier.toStringStable();
-      LOG.trace("Issued delegation token -> expiryTime:{},tokenId:{}",
-          expiryTime, tokenId);
+        password, identifier.getKind(), getService());
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Created delegation token: {}", token);
     }
     return token;
   }
@@ -143,10 +147,11 @@ public class OzoneDelegationTokenSecretManager
    * @param password
    * @throws IOException
    */
-  private void addToTokenStore(OzoneTokenIdentifier identifier, byte[] password)
+  private void addToTokenStore(OzoneTokenIdentifier identifier,
+      byte[] password, long renewTime)
       throws IOException {
-    TokenInfo tokenInfo = new TokenInfo(identifier.getIssueDate()
-        + getTokenRenewInterval(), password, identifier.getTrackingId());
+    TokenInfo tokenInfo = new TokenInfo(renewTime, password,
+        identifier.getTrackingId());
     currentTokens.put(identifier, tokenInfo);
     store.storeToken(identifier, tokenInfo.getRenewDate());
   }
@@ -158,12 +163,12 @@ public class OzoneDelegationTokenSecretManager
    */
   private void updateIdentifierDetails(OzoneTokenIdentifier identifier) {
     int sequenceNum;
-    long now = Time.monotonicNow();
+    long now = Time.now();
     sequenceNum = incrementDelegationTokenSeqNum();
     identifier.setIssueDate(now);
     identifier.setMasterKeyId(getCurrentKey().getKeyId());
     identifier.setSequenceNumber(sequenceNum);
-    identifier.setMaxDate(Time.monotonicNow() + getTokenMaxLifetime());
+    identifier.setMaxDate(now + getTokenMaxLifetime());
     identifier.setOmCertSerialId(getOmCertificateSerialId());
   }
 
@@ -198,7 +203,7 @@ public class OzoneDelegationTokenSecretManager
           formatTokenId(id), currentTokens.size());
     }
 
-    long now = Time.monotonicNow();
+    long now = Time.now();
     if (id.getMaxDate() < now) {
       throw new OMException(renewer + " tried to renew an expired token "
           + formatTokenId(id) + " max expiration date: "
@@ -216,20 +221,10 @@ public class OzoneDelegationTokenSecretManager
           + " tries to renew a token " + formatTokenId(id)
           + " with non-matching renewer " + id.getRenewer());
     }
-    OzoneSecretKey key = allKeys.get(id.getMasterKeyId());
-    if (key == null) {
-      throw new InvalidToken("Unable to find master key for keyId="
-          + id.getMasterKeyId()
-          + " from cache. Failed to renew an unexpired token "
-          + formatTokenId(id) + " with sequenceNumber="
-          + id.getSequenceNumber());
-    }
-    byte[] password = createPassword(token.getIdentifier(),
-        key.getPrivateKey());
 
     long renewTime = Math.min(id.getMaxDate(), now + getTokenRenewInterval());
     try {
-      addToTokenStore(id, password);
+      addToTokenStore(id, token.getPassword(),  renewTime);
     } catch (IOException e) {
       LOG.error("Unable to update token " + id.getSequenceNumber(), e);
     }
@@ -279,6 +274,9 @@ public class OzoneDelegationTokenSecretManager
   @Override
   public byte[] retrievePassword(OzoneTokenIdentifier identifier)
       throws InvalidToken {
+    if(identifier.getTokenType().equals(S3TOKEN)) {
+      return validateS3Token(identifier);
+    }
     return validateToken(identifier).getPassword();
   }
 
@@ -286,14 +284,14 @@ public class OzoneDelegationTokenSecretManager
    * Checks if TokenInfo for the given identifier exists in database and if the
    * token is expired.
    */
-  public TokenInfo validateToken(OzoneTokenIdentifier identifier)
+  private TokenInfo validateToken(OzoneTokenIdentifier identifier)
       throws InvalidToken {
     TokenInfo info = currentTokens.get(identifier);
     if (info == null) {
       throw new InvalidToken("token " + formatTokenId(identifier)
           + " can't be found in cache");
     }
-    long now = Time.monotonicNow();
+    long now = Time.now();
     if (info.getRenewDate() < now) {
       throw new InvalidToken("token " + formatTokenId(identifier) + " is " +
           "expired, current time: " + Time.formatTime(now) +
@@ -314,70 +312,63 @@ public class OzoneDelegationTokenSecretManager
   public boolean verifySignature(OzoneTokenIdentifier identifier,
       byte[] password) {
     try {
-      if (identifier.getOmCertSerialId().equals(getOmCertificateSerialId())) {
-        return getCertClient().verifySignature(identifier.getBytes(), password,
-            getCertClient().getCertificate());
-      } else {
-        // TODO: This delegation token was issued by other OM instance. Fetch
-        // certificate from SCM using certificate serial.
-        return false;
-      }
+      return getCertClient().verifySignature(identifier.getBytes(), password,
+          getCertClient().getCertificate(identifier.getOmCertSerialId()));
     } catch (CertificateException e) {
       return false;
     }
   }
 
-  // TODO: handle roll private key/certificate
-  private synchronized void removeExpiredKeys() {
-    long now = Time.monotonicNow();
-    for (Iterator<Map.Entry<Integer, OzoneSecretKey>> it = allKeys.entrySet()
-        .iterator(); it.hasNext();) {
-      Map.Entry<Integer, OzoneSecretKey> e = it.next();
-      OzoneSecretKey key = e.getValue();
-      if (key.getExpiryDate() < now && key.getExpiryDate() != -1) {
-        if (!key.equals(getCurrentKey())) {
-          it.remove();
-          try {
-            store.removeTokenMasterKey(key);
-          } catch (IOException ex) {
-            LOG.error("Unable to remove master key " + key.getKeyId(), ex);
-          }
-        }
-      }
+  /**
+   * Validates if a S3 identifier is valid or not.
+   * */
+  private byte[] validateS3Token(OzoneTokenIdentifier identifier)
+      throws InvalidToken {
+    LOG.trace("Validating S3Token for identifier:{}", identifier);
+    String awsSecret;
+    try {
+      awsSecret = s3SecretManager.getS3UserSecretString(identifier
+          .getAwsAccessId());
+    } catch (IOException e) {
+      LOG.error("Error while validating S3 identifier:{}",
+          identifier, e);
+      throw new InvalidToken("No S3 secret found for S3 identifier:"
+          + identifier);
     }
+
+    if (awsSecret == null) {
+      throw new InvalidToken("No S3 secret found for S3 identifier:"
+          + identifier);
+    }
+
+    if (AWSV4AuthValidator.validateRequest(identifier.getStrToSign(),
+        identifier.getSignature(), awsSecret)) {
+      return identifier.getSignature().getBytes(UTF_8);
+    }
+    throw new InvalidToken("Invalid S3 identifier:"
+        + identifier);
+
   }
 
   private void loadTokenSecretState(
       OzoneManagerSecretState<OzoneTokenIdentifier> state) throws IOException {
     LOG.info("Loading token state into token manager.");
-    for (OzoneSecretKey key : state.ozoneManagerSecretState()) {
-      allKeys.putIfAbsent(key.getKeyId(), key);
-      incrementCurrentKeyId();
-    }
     for (Map.Entry<OzoneTokenIdentifier, Long> entry :
         state.getTokenState().entrySet()) {
       addPersistedDelegationToken(entry.getKey(), entry.getValue());
     }
   }
 
-  private void addPersistedDelegationToken(
-      OzoneTokenIdentifier identifier, long renewDate)
-      throws IOException {
+  private void addPersistedDelegationToken(OzoneTokenIdentifier identifier,
+      long renewDate) throws IOException {
     if (isRunning()) {
       // a safety check
       throw new IOException(
           "Can't add persisted delegation token to a running SecretManager.");
     }
-    int keyId = identifier.getMasterKeyId();
-    OzoneSecretKey dKey = allKeys.get(keyId);
-    if (dKey == null) {
-      LOG.warn("No KEY found for persisted identifier "
-          + formatTokenId(identifier));
-      return;
-    }
 
-    PrivateKey privateKey = dKey.getPrivateKey();
-    byte[] password = createPassword(identifier.getBytes(), privateKey);
+    byte[] password = createPassword(identifier.getBytes(),
+        getCertClient().getPrivateKey());
     if (identifier.getSequenceNumber() > getDelegationTokenSeqNum()) {
       setDelegationTokenSeqNum(identifier.getSequenceNumber());
     }
@@ -397,17 +388,8 @@ public class OzoneDelegationTokenSecretManager
   public synchronized void start(CertificateClient certClient)
       throws IOException {
     super.start(certClient);
-    storeKey(getCurrentKey());
-    removeExpiredKeys();
     tokenRemoverThread = new Daemon(new ExpiredTokenRemover());
     tokenRemoverThread.start();
-  }
-
-  private void storeKey(OzoneSecretKey key) throws IOException {
-    store.storeTokenMasterKey(key);
-    if (!allKeys.containsKey(key.getKeyId())) {
-      allKeys.put(key.getKeyId(), key);
-    }
   }
 
   public void stopThreads() {
@@ -447,7 +429,7 @@ public class OzoneDelegationTokenSecretManager
    * Remove expired delegation tokens from cache and persisted store.
    */
   private void removeExpiredToken() {
-    long now = Time.monotonicNow();
+    long now = Time.now();
     synchronized (this) {
       Iterator<Map.Entry<OzoneTokenIdentifier,
           TokenInfo>> i = currentTokens.entrySet().iterator();
@@ -480,7 +462,7 @@ public class OzoneDelegationTokenSecretManager
           / (60 * 1000) + " min(s)");
       try {
         while (isRunning()) {
-          long now = Time.monotonicNow();
+          long now = Time.now();
           if (lastTokenCacheCleanup + getTokenRemoverScanInterval()
               < now) {
             removeExpiredToken();

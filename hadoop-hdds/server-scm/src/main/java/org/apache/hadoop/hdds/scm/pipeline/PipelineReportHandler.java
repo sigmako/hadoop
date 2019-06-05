@@ -26,7 +26,7 @@ import org.apache.hadoop.hdds.protocol.proto
     .StorageContainerDatanodeProtocolProtos.PipelineReport;
 import org.apache.hadoop.hdds.protocol.proto
     .StorageContainerDatanodeProtocolProtos.PipelineReportsProto;
-import org.apache.hadoop.hdds.scm.chillmode.SCMChillModeManager;
+import org.apache.hadoop.hdds.scm.safemode.SCMSafeModeManager;
 import org.apache.hadoop.hdds.scm.events.SCMEvents;
 import org.apache.hadoop.hdds.scm.server
     .SCMDatanodeHeartbeatDispatcher.PipelineReportFromDatanode;
@@ -48,20 +48,20 @@ public class PipelineReportHandler implements
       .getLogger(PipelineReportHandler.class);
   private final PipelineManager pipelineManager;
   private final Configuration conf;
-  private final SCMChillModeManager scmChillModeManager;
+  private final SCMSafeModeManager scmSafeModeManager;
   private final boolean pipelineAvailabilityCheck;
 
-  public PipelineReportHandler(SCMChillModeManager scmChillModeManager,
+  public PipelineReportHandler(SCMSafeModeManager scmSafeModeManager,
       PipelineManager pipelineManager,
       Configuration conf) {
     Preconditions.checkNotNull(pipelineManager);
-    Objects.requireNonNull(scmChillModeManager);
-    this.scmChillModeManager = scmChillModeManager;
+    Objects.requireNonNull(scmSafeModeManager);
+    this.scmSafeModeManager = scmSafeModeManager;
     this.pipelineManager = pipelineManager;
     this.conf = conf;
     this.pipelineAvailabilityCheck = conf.getBoolean(
-        HddsConfigKeys.HDDS_SCM_CHILLMODE_PIPELINE_AVAILABILITY_CHECK,
-        HddsConfigKeys.HDDS_SCM_CHILLMODE_PIPELINE_AVAILABILITY_CHECK_DEFAULT);
+        HddsConfigKeys.HDDS_SCM_SAFEMODE_PIPELINE_AVAILABILITY_CHECK,
+        HddsConfigKeys.HDDS_SCM_SAFEMODE_PIPELINE_AVAILABILITY_CHECK_DEFAULT);
 
   }
 
@@ -83,7 +83,7 @@ public class PipelineReportHandler implements
             report, dn, e);
       }
     }
-    if (pipelineAvailabilityCheck && scmChillModeManager.getInChillMode()) {
+    if (pipelineAvailabilityCheck && scmSafeModeManager.getInSafeMode()) {
       publisher.fireEvent(SCMEvents.PROCESSED_PIPELINE_REPORT,
           pipelineReportFromDatanode);
     }
@@ -107,15 +107,6 @@ public class PipelineReportHandler implements
       if (pipeline.isHealthy()) {
         // if all the dns have reported, pipeline can be moved to OPEN state
         pipelineManager.openPipeline(pipelineID);
-      }
-    } else if (pipeline.isClosed()) {
-      int numContainers = pipelineManager.getNumberOfContainers(pipelineID);
-      if (numContainers == 0) {
-        // since all the containers have been closed the pipeline can be
-        // destroyed
-        LOGGER.info("Destroying pipeline {} as all containers are closed",
-            pipeline);
-        RatisPipelineUtils.destroyPipeline(pipelineManager, pipeline, conf);
       }
     } else {
       // In OPEN state case just report the datanode

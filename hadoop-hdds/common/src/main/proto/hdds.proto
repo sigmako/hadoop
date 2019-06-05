@@ -33,6 +33,7 @@ message DatanodeDetailsProto {
     required string ipAddress = 2;     // IP address
     required string hostName = 3;      // hostname
     repeated Port ports = 4;
+    optional string certSerialId = 5;   // Certificate serial id.
 }
 
 /**
@@ -168,7 +169,7 @@ message GetScmInfoRequestProto {
     optional string traceID = 1;
 }
 
-message GetScmInfoRespsonseProto {
+message GetScmInfoResponseProto {
     required string clusterId = 1;
     required string scmId = 2;
 }
@@ -221,8 +222,8 @@ message ContainerBlockID {
  */
 message BlockTokenSecretProto {
     /**
- * File access permissions mode.
- */
+     * File access permissions mode.
+     */
     enum AccessModeProto {
         READ = 1;
         WRITE = 2;

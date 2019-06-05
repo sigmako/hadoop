@@ -18,6 +18,7 @@
 
 package org.apache.hadoop.yarn.appcatalog.application;
 
+import org.apache.hadoop.yarn.appcatalog.model.AppEntry;
 import org.apache.hadoop.yarn.appcatalog.model.AppStoreEntry;
 import org.apache.hadoop.yarn.appcatalog.model.Application;
 import org.apache.solr.client.solrj.SolrClient;
@@ -104,9 +105,45 @@ public class TestAppCatalogSolrClient {
 
   @Test
   public void testGetRecommendedApps() throws Exception {
-    List<AppStoreEntry> expected = spy.getRecommendedApps();
+    AppStoreEntry example = new AppStoreEntry();
+    example.setOrg("jenkins-ci.org");
+    example.setName("jenkins");
+    example.setDesc("World leading open source automation system.");
+    example.setIcon("/css/img/feather.png");
+    example.setDownload(100);
+    spy.register(example);
+    AppStoreEntry example2 = new AppStoreEntry();
+    example2.setOrg("Apache");
+    example2.setName("httpd");
+    example2.setDesc("Apache webserver");
+    example2.setIcon("/css/img/feather.png");
+    example2.setDownload(1);
+    spy.register(example2);
     List<AppStoreEntry> actual = spy.getRecommendedApps();
-    assertEquals(expected, actual);
+    long previous = 1000L;
+    for (AppStoreEntry app: actual) {
+      assertTrue("Recommend app is not sort by download count.",
+          previous > app.getDownload());
+      previous = app.getDownload();
+    }
   }
 
+  @Test
+  public void testUpgradeApp() throws Exception {
+    Application example = new Application();
+    String expected = "2.0";
+    String actual = "";
+    example.setOrganization("jenkins-ci.org");
+    example.setVersion("1.0");
+    example.setName("jenkins");
+    example.setDescription("World leading open source automation system.");
+    example.setIcon("/css/img/feather.png");
+    spy.register(example);
+    spy.deployApp("test", example);
+    example.setVersion("2.0");
+    spy.upgradeApp(example);
+    List<AppEntry> appEntries = spy.listAppEntries();
+    actual = appEntries.get(appEntries.size() -1).getYarnfile().getVersion();
+    assertEquals(expected, actual);
+  }
 }

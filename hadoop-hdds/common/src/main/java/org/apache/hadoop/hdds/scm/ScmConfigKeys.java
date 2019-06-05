@@ -126,7 +126,7 @@ public final class ScmConfigKeys {
       "dfs.ratis.client.request.retry.interval";
   public static final TimeDuration
       DFS_RATIS_CLIENT_REQUEST_RETRY_INTERVAL_DEFAULT =
-      TimeDuration.valueOf(100, TimeUnit.MILLISECONDS);
+      TimeDuration.valueOf(1000, TimeUnit.MILLISECONDS);
   public static final String DFS_RATIS_SERVER_RETRY_CACHE_TIMEOUT_DURATION_KEY =
       "dfs.ratis.server.retry-cache.timeout.duration";
   public static final TimeDuration
@@ -260,7 +260,7 @@ public final class ScmConfigKeys {
   public static final String OZONE_SCM_STALENODE_INTERVAL =
       "ozone.scm.stale.node.interval";
   public static final String OZONE_SCM_STALENODE_INTERVAL_DEFAULT =
-      "90s";
+      "5m";
 
   public static final String OZONE_SCM_HEARTBEAT_RPC_TIMEOUT =
       "ozone.scm.heartbeat.rpc-timeout";
@@ -296,11 +296,10 @@ public final class ScmConfigKeys {
 
   public static final int OZONE_SCM_DEFAULT_PORT =
       OZONE_SCM_DATANODE_PORT_DEFAULT;
-  // File Name and path where datanode ID is to written to.
+  // The path where datanode ID is to be written to.
   // if this value is not set then container startup will fail.
-  public static final String OZONE_SCM_DATANODE_ID = "ozone.scm.datanode.id";
-
-  public static final String OZONE_SCM_DATANODE_ID_PATH_DEFAULT = "datanode.id";
+  public static final String OZONE_SCM_DATANODE_ID_DIR =
+      "ozone.scm.datanode.id.dir";
 
   public static final String OZONE_SCM_DB_CACHE_SIZE_MB =
       "ozone.scm.db.cache.size.mb";
@@ -331,7 +330,7 @@ public final class ScmConfigKeys {
       "ozone.scm.pipeline.destroy.timeout";
 
   public static final String OZONE_SCM_PIPELINE_DESTROY_TIMEOUT_DEFAULT =
-      "300s";
+      "66s";
 
   public static final String OZONE_SCM_PIPELINE_CREATION_INTERVAL =
       "ozone.scm.pipeline.creation.interval";
@@ -353,7 +352,17 @@ public final class ScmConfigKeys {
       "hdds.scm.http.kerberos.principal";
   public static final String
       HDDS_SCM_HTTP_KERBEROS_KEYTAB_FILE_KEY =
-      "hdds.scm.http.kerberos.keytab";
+      "hdds.scm.http.kerberos.keytab.file";
+
+  // Network topology
+  public static final String OZONE_SCM_NETWORK_TOPOLOGY_SCHEMA_FILE =
+      "ozone.scm.network.topology.schema.file";
+  public static final String OZONE_SCM_NETWORK_TOPOLOGY_SCHEMA_FILE_DEFAULT =
+      "network-topology-default.xml";
+
+  public static final String HDDS_TRACING_ENABLED = "hdds.tracing.enabled";
+  public static final boolean HDDS_TRACING_ENABLED_DEFAULT = true;
+
   /**
    * Never constructed.
    */

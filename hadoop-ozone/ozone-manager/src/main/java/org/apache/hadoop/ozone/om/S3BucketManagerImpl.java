@@ -32,7 +32,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
 import static org.apache.hadoop.ozone.OzoneConsts.OM_S3_VOLUME_PREFIX;
@@ -50,6 +49,7 @@ public class S3BucketManagerImpl implements S3BucketManager {
   private final OMMetadataManager omMetadataManager;
   private final VolumeManager volumeManager;
   private final BucketManager bucketManager;
+  private final boolean isRatisEnabled;
 
   /**
    * Construct an S3 Bucket Manager Object.
@@ -66,6 +66,9 @@ public class S3BucketManagerImpl implements S3BucketManager {
     this.omMetadataManager = omMetadataManager;
     this.volumeManager = volumeManager;
     this.bucketManager = bucketManager;
+    isRatisEnabled = configuration.getBoolean(
+        OMConfigKeys.OZONE_OM_RATIS_ENABLE_KEY,
+        OMConfigKeys.OZONE_OM_RATIS_ENABLE_DEFAULT);
   }
 
   @Override
@@ -100,9 +103,8 @@ public class S3BucketManagerImpl implements S3BucketManager {
 
     omMetadataManager.getLock().acquireS3Lock(bucketName);
     try {
-      byte[] bucket =
-          omMetadataManager.getS3Table().get(
-              bucketName.getBytes(StandardCharsets.UTF_8));
+      String bucket =
+          omMetadataManager.getS3Table().get(bucketName);
 
       if (bucket != null) {
         LOG.debug("Bucket already exists. {}", bucketName);
@@ -115,9 +117,7 @@ public class S3BucketManagerImpl implements S3BucketManager {
       String finalName = String.format("%s/%s", ozoneVolumeName,
           ozoneBucketName);
 
-      omMetadataManager.getS3Table().put(
-              bucketName.getBytes(StandardCharsets.UTF_8),
-              finalName.getBytes(StandardCharsets.UTF_8));
+      omMetadataManager.getS3Table().put(bucketName, finalName);
     } finally {
       omMetadataManager.getLock().releaseS3Lock(bucketName);
     }
@@ -130,15 +130,15 @@ public class S3BucketManagerImpl implements S3BucketManager {
 
     omMetadataManager.getLock().acquireS3Lock(bucketName);
     try {
-      byte[] bucket = bucketName.getBytes(StandardCharsets.UTF_8);
-      byte[] map = omMetadataManager.getS3Table().get(bucket);
+      String map = omMetadataManager.getS3Table().get(bucketName);
 
       if (map == null) {
         throw new OMException("No such S3 bucket. " + bucketName,
             OMException.ResultCodes.S3_BUCKET_NOT_FOUND);
       }
+
       bucketManager.deleteBucket(getOzoneVolumeName(bucketName), bucketName);
-      omMetadataManager.getS3Table().delete(bucket);
+      omMetadataManager.getS3Table().delete(bucketName);
     } catch(IOException ex) {
       throw ex;
     } finally {
@@ -166,7 +166,12 @@ public class S3BucketManagerImpl implements S3BucketManager {
               .setVolume(ozoneVolumeName)
               .setQuotaInBytes(OzoneConsts.MAX_QUOTA_IN_BYTES)
               .build();
-      volumeManager.createVolume(args);
+      if (isRatisEnabled) {
+        // When ratis is enabled we need to call apply also.
+        volumeManager.applyCreateVolume(args, volumeManager.createVolume(args));
+      } else {
+        volumeManager.createVolume(args);
+      }
     } catch (OMException exp) {
       newVolumeCreate = false;
       if (exp.getResult().compareTo(VOLUME_ALREADY_EXISTS) == 0) {
@@ -204,11 +209,9 @@ public class S3BucketManagerImpl implements S3BucketManager {
         "Length of the S3 Bucket is not correct.");
     omMetadataManager.getLock().acquireS3Lock(s3BucketName);
     try {
-      byte[] mapping =
-          omMetadataManager.getS3Table().get(
-              s3BucketName.getBytes(StandardCharsets.UTF_8));
+      String mapping = omMetadataManager.getS3Table().get(s3BucketName);
       if (mapping != null) {
-        return new String(mapping, StandardCharsets.UTF_8);
+        return mapping;
       }
       throw new OMException("No such S3 bucket.",
           OMException.ResultCodes.S3_BUCKET_NOT_FOUND);

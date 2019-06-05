@@ -154,10 +154,9 @@ public class TestOzoneContainerWithTLS {
       conf.setBoolean(
           OzoneConfigKeys.DFS_CONTAINER_IPC_RANDOM_PORT, false);
 
-      container = new OzoneContainer(dn, conf, getContext(dn));
-      //Setting scmId, as we start manually ozone container.
-      container.getDispatcher().setScmId(UUID.randomUUID().toString());
-      container.start();
+      container = new OzoneContainer(dn, conf, getContext(dn), null);
+      //Set scmId and manually start ozone container.
+      container.start(UUID.randomUUID().toString());
 
       XceiverClientGrpc client = new XceiverClientGrpc(pipeline, conf);
       client.connect();
@@ -178,7 +177,6 @@ public class TestOzoneContainerWithTLS {
     ContainerProtos.ContainerCommandResponseProto response =
         client.sendCommand(request);
     Assert.assertNotNull(response);
-    Assert.assertTrue(request.getTraceID().equals(response.getTraceID()));
   }
 
   private StateContext getContext(DatanodeDetails datanodeDetails) {

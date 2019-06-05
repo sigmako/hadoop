@@ -20,7 +20,6 @@ package org.apache.hadoop.hdfs.qjournal.server;
 import com.google.protobuf.ByteString;
 import java.io.Closeable;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStreamWriter;
@@ -1058,7 +1057,7 @@ public class Journal implements Closeable {
       return null;
     }
     
-    InputStream in = new FileInputStream(f);
+    InputStream in = Files.newInputStream(f.toPath());
     try {
       PersistedRecoveryPaxosData ret = PersistedRecoveryPaxosData.parseDelimitedFrom(in);
       Preconditions.checkState(ret != null &&
@@ -1084,11 +1083,12 @@ public class Journal implements Closeable {
       fos.write('\n');
       // Write human-readable data after the protobuf. This is only
       // to assist in debugging -- it's not parsed at all.
-      OutputStreamWriter writer = new OutputStreamWriter(fos, Charsets.UTF_8);
-      
-      writer.write(String.valueOf(newData));
-      writer.write('\n');
-      writer.flush();
+      try(OutputStreamWriter writer =
+          new OutputStreamWriter(fos, Charsets.UTF_8)) {
+        writer.write(String.valueOf(newData));
+        writer.write('\n');
+        writer.flush();
+      }
       
       fos.flush();
       success = true;

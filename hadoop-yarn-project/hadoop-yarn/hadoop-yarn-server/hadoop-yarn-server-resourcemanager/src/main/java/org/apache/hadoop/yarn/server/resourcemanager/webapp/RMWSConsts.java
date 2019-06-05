@@ -189,6 +189,12 @@ public final class RMWSConsts {
   public static final String CHECK_USER_ACCESS_TO_QUEUE =
       "/queues/{queue}/access";
 
+  /**
+   * Path for {@code RMWebServiceProtocol#signalContainer}.
+   */
+  public static final String SIGNAL_TO_CONTAINER =
+      "/containers/{containerid}/signal/{command}";
+
   // ----------------QueryParams for RMWebServiceProtocol----------------
 
   public static final String TIME = "time";
@@ -226,9 +232,22 @@ public final class RMWSConsts {
   public static final String DESELECTS = "deSelects";
   public static final String CONTAINERS = "containers";
   public static final String QUEUE_ACL_TYPE = "queue-acl-type";
+  public static final String REQUEST_PRIORITIES = "requestPriorities";
+  public static final String ALLOCATION_REQUEST_IDS = "allocationRequestIds";
+  public static final String GROUP_BY = "groupBy";
+  public static final String SIGNAL = "signal";
+  public static final String COMMAND = "command";
 
   private RMWSConsts() {
     // not called
   }
 
+  /**
+   * Defines the groupBy types of activities, currently only support
+   * DIAGNOSTIC with which user can query aggregated activities
+   * grouped by allocation state and diagnostic.
+   */
+  public enum ActivitiesGroupBy {
+    DIAGNOSTIC
+  }
 }

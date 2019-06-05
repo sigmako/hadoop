@@ -77,7 +77,7 @@ import picocli.CommandLine.Option;
         + "operations.",
     versionProvider = HddsVersionProvider.class,
     subcommands = {
-        ChillModeCommands.class,
+        SafeModeCommands.class,
         ListSubcommand.class,
         InfoSubcommand.class,
         DeleteSubcommand.class,
@@ -143,7 +143,7 @@ public class SCMCLI extends GenericCli {
                 scmAddress, UserGroupInformation.getCurrentUser(), ozoneConf,
                 NetUtils.getDefaultSocketFactory(ozoneConf),
                 Client.getRpcTimeout(ozoneConf))),
-            StorageContainerLocationProtocol.class);
+            StorageContainerLocationProtocol.class, ozoneConf);
     return new ContainerOperationClient(
         client, new XceiverClientManager(ozoneConf));
   }

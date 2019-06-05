@@ -27,7 +27,9 @@ import org.apache.hadoop.hdds.scm.ScmConfigKeys;
 import org.apache.ratis.proto.RaftProtos.ReplicationLevel;
 import org.apache.ratis.util.TimeDuration;
 
-/**
+import java.util.concurrent.TimeUnit;
+
+ /**
  * This class contains constants for configuration keys used in Ozone.
  */
 @InterfaceAudience.Public
@@ -54,7 +56,7 @@ public final class OzoneConfigKeys {
 
   public static final String DFS_CONTAINER_CHUNK_WRITE_SYNC_KEY =
       "dfs.container.chunk.write.sync";
-  public static final boolean DFS_CONTAINER_CHUNK_WRITE_SYNC_DEFAULT = true;
+  public static final boolean DFS_CONTAINER_CHUNK_WRITE_SYNC_DEFAULT = false;
   /**
    * Ratis Port where containers listen to.
    */
@@ -94,6 +96,11 @@ public final class OzoneConfigKeys {
   public static final String OZONE_METADATA_STORE_ROCKSDB_STATISTICS_OFF =
       "OFF";
 
+  public static final String OZONE_UNSAFEBYTEOPERATIONS_ENABLED =
+      "ozone.UnsafeByteOperations.enabled";
+  public static final boolean OZONE_UNSAFEBYTEOPERATIONS_ENABLED_DEFAULT
+      = true;
+
   public static final String OZONE_CONTAINER_CACHE_SIZE =
       "ozone.container.cache.size";
   public static final int OZONE_CONTAINER_CACHE_DEFAULT = 1024;
@@ -132,6 +139,14 @@ public final class OzoneConfigKeys {
 
   public static final String OZONE_CLIENT_WATCH_REQUEST_TIMEOUT_DEFAULT =
       "30s";
+
+  public static final String OZONE_CLIENT_MAX_RETRIES =
+      "ozone.client.max.retries";
+  public static final int OZONE_CLIENT_MAX_RETRIES_DEFAULT = 100;
+  public static final String OZONE_CLIENT_RETRY_INTERVAL =
+      "ozone.client.retry.interval";
+  public static final TimeDuration OZONE_CLIENT_RETRY_INTERVAL_DEFAULT =
+      TimeDuration.valueOf(0, TimeUnit.MILLISECONDS);
 
   // This defines the overall connection limit for the connection pool used in
   // RestClient.
@@ -198,10 +213,10 @@ public final class OzoneConfigKeys {
   public static final String OZONE_BLOCK_DELETING_SERVICE_TIMEOUT_DEFAULT
       = "300s"; // 300s for default
 
-  public static final String OZONE_KEY_PREALLOCATION_MAXSIZE =
-      "ozone.key.preallocation.maxsize";
-  public static final long OZONE_KEY_PREALLOCATION_MAXSIZE_DEFAULT
-      = 128 * OzoneConsts.MB;
+  public static final String OZONE_KEY_PREALLOCATION_BLOCKS_MAX =
+      "ozone.key.preallocation.max.blocks";
+  public static final int OZONE_KEY_PREALLOCATION_BLOCKS_MAX_DEFAULT
+      = 64;
 
   public static final String OZONE_BLOCK_DELETING_LIMIT_PER_CONTAINER =
       "ozone.block.deleting.limit.per.task";
@@ -373,7 +388,9 @@ public final class OzoneConfigKeys {
       "ozone.acl.enabled";
   public static final boolean OZONE_ACL_ENABLED_DEFAULT =
       false;
-
+  public static final String OZONE_S3_TOKEN_MAX_LIFETIME_KEY =
+      "ozone.s3.token.max.lifetime";
+  public static final String OZONE_S3_TOKEN_MAX_LIFETIME_KEY_DEFAULT = "3m";
   //For technical reasons this is unused and hardcoded to the
   // OzoneFileSystem.initialize.
   public static final String OZONE_FS_ISOLATED_CLASSLOADER =

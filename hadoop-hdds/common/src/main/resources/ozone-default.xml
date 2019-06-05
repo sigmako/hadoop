@@ -54,7 +54,7 @@
   </property>
   <property>
     <name>dfs.container.chunk.write.sync</name>
-    <value>true</value>
+    <value>false</value>
     <tag>OZONE, CONTAINER, MANAGEMENT</tag>
     <description>Determines whether the chunk writes in the container happen as
       sync I/0 or buffered I/O operation.
@@ -231,7 +231,9 @@
     <name>dfs.ratis.client.request.timeout.duration</name>
     <value>3s</value>
     <tag>OZONE, RATIS, MANAGEMENT</tag>
-    <description>The timeout duration for ratis client request.</description>
+    <description>The timeout duration for ratis client request.It should be
+        set greater than leader election timeout in Ratis.
+    </description>
   </property>
   <property>
     <name>dfs.ratis.client.request.max.retries</name>
@@ -241,7 +243,7 @@
   </property>
   <property>
     <name>dfs.ratis.client.request.retry.interval</name>
-    <value>100ms</value>
+    <value>1000ms</value>
     <tag>OZONE, RATIS, MANAGEMENT</tag>
     <description>Interval between successive retries for a ratis client request.
     </description>
@@ -385,6 +387,14 @@
     </description>
   </property>
   <property>
+    <name>ozone.UnsafeByteOperations.enabled</name>
+    <value>true</value>
+    <tag>OZONE, PERFORMANCE, CLIENT</tag>
+    <description>It specifies whether to use unsafe or safe buffer to byteString
+      copy.
+    </description>
+  </property>
+  <property>
     <name>ozone.client.connection.timeout</name>
     <value>5000ms</value>
     <tag>OZONE, PERFORMANCE, CLIENT</tag>
@@ -415,6 +425,23 @@
     <tag>OZONE, CLIENT</tag>
     <description>Timeout for the watch API in Ratis client to acknowledge
       a particular request getting replayed to all servers.
+    </description>
+  </property>
+  <property>
+    <name>ozone.client.max.retries</name>
+    <value>100</value>
+    <tag>OZONE, CLIENT</tag>
+    <description>Maximum number of retries by Ozone Client on encountering
+      exception while writing a key.
+    </description>
+  </property>
+  <property>
+    <name>ozone.client.retry.interval</name>
+    <value>0ms</value>
+    <tag>OZONE, CLIENT</tag>
+    <description>Indicates the time duration a client will wait before
+      retrying a write key request on encountering an exception. By default
+      there is no wait.
     </description>
   </property>
   <property>
@@ -514,14 +541,6 @@
     </description>
   </property>
   <property>
-    <name>ozone.om.group.rights</name>
-    <value>READ_WRITE</value>
-    <tag>OM, SECURITY</tag>
-    <description>
-      Default group permissions in Ozone OM.
-    </description>
-  </property>
-  <property>
     <name>ozone.om.handler.count.key</name>
     <value>20</value>
     <tag>OM, PERFORMANCE</tag>
@@ -614,14 +633,6 @@
     </description>
   </property>
   <property>
-    <name>ozone.om.user.rights</name>
-    <value>READ_WRITE</value>
-    <tag>OM, SECURITY</tag>
-    <description>
-      Default user permissions used in OM.
-    </description>
-  </property>
-  <property>
     <name>ozone.om.db.dirs</name>
     <value/>
     <tag>OZONE, OM, STORAGE, PERFORMANCE</tag>
@@ -631,17 +642,18 @@
       exist then the OM will attempt to create it.
 
       If undefined, then the OM will log a warning and fallback to
-      ozone.metadata.dirs.
+      ozone.metadata.dirs. This fallback approach is not recommended for
+      production environments.
     </description>
   </property>
   <property>
     <name>ozone.metadata.dirs</name>
     <value/>
-    <tag>OZONE, OM, SCM, CONTAINER, STORAGE</tag>
+    <tag>OZONE, OM, SCM, CONTAINER, STORAGE, REQUIRED</tag>
     <description>
       This setting is the fallback location for SCM, OM and DataNodes
-      to store their metadata. This setting may be used in test/PoC clusters
-      to simplify configuration.
+      to store their metadata. This setting may be used only in test/PoC
+      clusters to simplify configuration.
 
       For production clusters or any time you care about performance, it is
       recommended that ozone.om.db.dirs, ozone.scm.db.dirs and
@@ -683,7 +695,8 @@
       does not exist then the SCM will attempt to create it.
 
       If undefined, then the SCM will log a warning and fallback to
-      ozone.metadata.dirs.
+      ozone.metadata.dirs. This fallback approach is not recommended for
+      production environments.
     </description>
   </property>
   <property>
@@ -856,7 +869,7 @@
     </description>
   </property>
   <property>
-    <name>ozone.scm.datanode.id</name>
+    <name>ozone.scm.datanode.id.dir</name>
     <value/>
     <tag>OZONE, MANAGEMENT</tag>
     <description>The path that datanodes will use to store the datanode ID.
@@ -1025,7 +1038,7 @@
   </property>
   <property>
     <name>ozone.scm.stale.node.interval</name>
-    <value>90s</value>
+    <value>5m</value>
     <tag>OZONE, MANAGEMENT</tag>
     <description>
       The interval for stale node flagging. Please
@@ -1089,13 +1102,14 @@
   </property>
 
   <property>
-    <name>ozone.key.preallocation.maxsize</name>
-    <value>134217728</value>
+    <name>ozone.key.preallocation.max.blocks</name>
+    <value>64</value>
     <tag>OZONE, OM, PERFORMANCE</tag>
     <description>
-      When a new key write request is sent to OM, if a size is requested, at most
-      128MB of size is allocated at request time. If client needs more space for the
-      write, separate block allocation requests will be made.
+      While allocating blocks from OM, this configuration limits the maximum
+      number of blocks being allocated. This configuration ensures that the
+      allocated block response do not exceed rpc payload limit. If client needs
+      more space for the write, separate block allocation requests will be made.
     </description>
   </property>
 
@@ -1263,7 +1277,7 @@
   </property>
   <property>
     <name>ozone.scm.pipeline.destroy.timeout</name>
-    <value>300s</value>
+    <value>66s</value>
     <tag>OZONE, SCM, PIPELINE</tag>
     <description>
       Once a pipeline is closed, SCM should wait for the above configured time
@@ -1281,52 +1295,52 @@
   </property>
 
   <property>
-    <name>hdds.scm.chillmode.threshold.pct</name>
+    <name>hdds.scm.safemode.threshold.pct</name>
     <value>0.99</value>
     <tag>HDDS,SCM,OPERATION</tag>
     <description> % of containers which should have at least one
-      reported replica before SCM comes out of chill mode.
+      reported replica before SCM comes out of safe mode.
     </description>
   </property>
 
   <property>
-    <name>hdds.scm.wait.time.after.chillmode.exit</name>
+    <name>hdds.scm.wait.time.after.safemode.exit</name>
     <value>5m</value>
     <tag>HDDS,SCM,OPERATION</tag>
-    <description> After exiting chillmode, wait for configured interval of
+    <description> After exiting safemode, wait for configured interval of
       time to start replication monitor and cleanup activities of unhealthy
       pipelines.
     </description>
   </property>
 
   <property>
-    <name>hdds.scm.chillmode.enabled</name>
+    <name>hdds.scm.safemode.enabled</name>
     <value>true</value>
     <tag>HDDS,SCM,OPERATION</tag>
-    <description>Boolean value to enable or disable SCM chill mode.
+    <description>Boolean value to enable or disable SCM safe mode.
     </description>
   </property>
 
   <property>
-    <name>hdds.scm.chillmode.min.datanode</name>
+    <name>hdds.scm.safemode.min.datanode</name>
     <value>1</value>
     <tag>HDDS,SCM,OPERATION</tag>
     <description>Minimum DataNodes which should be registered to get SCM out of
-      chill mode.
+      safe mode.
     </description>
   </property>
 
   <property>
-    <name>hdds.scm.chillmode.pipeline-availability.check</name>
+    <name>hdds.scm.safemode.pipeline-availability.check</name>
     <value>false</value>
     <tag>HDDS,SCM,OPERATION</tag>
     <description>
-      Boolean value to enable pipeline availability check during SCM chill mode.
+      Boolean value to enable pipeline availability check during SCM safe mode.
     </description>
   </property>
 
   <property>
-    <name>hdds.scm.chillmode.healthy.pipelie.pct</name>
+    <name>hdds.scm.safemode.healthy.pipelie.pct</name>
     <value>0.10</value>
     <tag>HDDS,SCM,OPERATION</tag>
     <description>
@@ -1336,12 +1350,22 @@
   </property>
 
   <property>
-    <name>hdds.scm.chillmode.atleast.one.node.reported.pipeline.pct</name>
+    <name>hdds.scm.safemode.atleast.one.node.reported.pipeline.pct</name>
     <value>0.90</value>
     <tag>HDDS,SCM,OPERATION</tag>
     <description>
       Percentage of pipelines, where at least one datanode is reported in the
       pipeline.
+    </description>
+  </property>
+
+  <property>
+    <name>hdds.containerscrub.enabled</name>
+    <value>false</value>
+    <tag>DATANODE</tag>
+    <description>
+      Boolean value to enable data and metadata scrubbing in the containers
+      running on each datanode.
     </description>
   </property>
 
@@ -1582,15 +1606,24 @@
   <property>
     <name>ozone.om.ratis.log.appender.queue.num-elements</name>
     <value>1024</value>
-    <tag>OZONE, DEBUG, CONTAINER, RATIS</tag>
+    <tag>OZONE, DEBUG, OM, RATIS</tag>
     <description>Number of operation pending with Raft's Log Worker.
     </description>
   </property>
   <property>
     <name>ozone.om.ratis.log.appender.queue.byte-limit</name>
     <value>32MB</value>
-    <tag>OZONE, DEBUG, CONTAINER, RATIS</tag>
+    <tag>OZONE, DEBUG, OM, RATIS</tag>
     <description>Byte limit for Raft's Log Worker queue.
+    </description>
+  </property>
+
+  <property>
+    <name>ozone.om.ratis.snapshot.auto.trigger.threshold</name>
+    <value>400000</value>
+    <tag>OZONE, DEBUG, OM, RATIS</tag>
+    <description>The log index threshold after ratis will auto trigger
+      snapshot on the OM state machine.
     </description>
   </property>
 
@@ -1717,7 +1750,7 @@
     <value>HTTP/_HOST@EXAMPLE.COM</value>
   </property>
   <property>
-    <name>hdds.scm.http.kerberos.keytab</name>
+    <name>hdds.scm.http.kerberos.keytab.file</name>
     <value>/etc/security/keytabs/HTTP.keytab</value>
   </property>
 
@@ -1762,7 +1795,7 @@
       assumed.
     </description>
   </property>
-  
+
   <property>
     <name>hdds.block.token.enabled</name>
     <value>false</value>
@@ -1927,7 +1960,7 @@
       an isolated classloader.
 
       Default depends from the used jar. true for ozone-filesystem-lib-legacy
-      jar and false for the ozone-filesystem-lib.jar
+      jar and false for the ozone-filesystem-lib-current.jar
     </description>
   </property>
   <property>
@@ -2237,15 +2270,220 @@
     </description>
   </property>
   <property>
-    <name>ozone.recon.db.dirs</name>
+    <name>ozone.recon.db.dir</name>
     <value/>
     <tag>OZONE, RECON, STORAGE, PERFORMANCE</tag>
     <description>
       Directory where the Recon Server stores its metadata. This should
       be specified as a single directory. If the directory does not
       exist then the Recon will attempt to create it.
+
       If undefined, then the Recon will log a warning and fallback to
-      ozone.metadata.dirs.
+      ozone.metadata.dirs. This fallback approach is not recommended for
+      production environments.
+    </description>
+  </property>
+  <property>
+    <name>ozone.scm.network.topology.schema.file</name>
+    <value>network-topology-default.xml</value>
+    <tag>OZONE, MANAGEMENT</tag>
+    <description>
+      The schema file defines the ozone network topology. We currently support
+      xml(default) and yaml format. Refer to the samples in the topology
+      awareness document for xml and yaml topology definition samples.
+    </description>
+  </property>
+  <property>
+    <name>ozone.recon.container.db.impl</name>
+    <value>RocksDB</value>
+    <tag>OZONE, RECON, STORAGE</tag>
+    <description>
+      Ozone Recon container DB store implementation.Supported value is either
+      LevelDB or RocksDB.
+    </description>
+  </property>
+  <property>
+    <name>ozone.recon.om.db.dir</name>
+  <value/>
+  <tag>OZONE, RECON, STORAGE</tag>
+  <description>
+    Directory where the Recon Server stores its OM snapshot DB. This should
+    be specified as a single directory. If the directory does not
+    exist then the Recon will attempt to create it.
+
+    If undefined, then the Recon will log a warning and fallback to
+    ozone.metadata.dirs. This fallback approach is not recommended for
+    production environments.
+  </description>
+</property>
+  <property>
+    <name>recon.om.connection.request.timeout</name>
+    <value>5000</value>
+    <tag>OZONE, RECON, OM</tag>
+    <description>
+      Connection request timeout in milliseconds for HTTP call made by Recon to
+      request OM DB snapshot.
+    </description>
+  </property>
+  <property>
+    <name>recon.om.connection.timeout</name>
+    <value>5s</value>
+    <tag>OZONE, RECON, OM</tag>
+    <description>
+      Connection timeout for HTTP call in milliseconds made by Recon to request
+      OM snapshot.
+    </description>
+  </property>
+  <property>
+    <name>recon.om.socket.timeout</name>
+    <value>5s</value>
+    <tag>OZONE, RECON, OM</tag>
+    <description>
+      Socket timeout in milliseconds for HTTP call made by Recon to request
+      OM snapshot.
+    </description>
+  </property>
+  <property>
+    <name>recon.om.socket.timeout</name>
+    <value>5s</value>
+    <tag>OZONE, RECON, OM</tag>
+    <description>
+      Socket timeout for HTTP call made by Recon to request OM snapshot.
+    </description>
+  </property>
+  <property>
+    <name>recon.om.snapshot.task.initial.delay</name>
+    <value>1m</value>
+    <tag>OZONE, RECON, OM</tag>
+    <description>
+      Initial delay in MINUTES by Recon to request OM DB Snapshot.
+    </description>
+  </property>
+  <property>
+    <name>recon.om.snapshot.task.interval.delay</name>
+    <value>10m</value>
+    <tag>OZONE, RECON, OM</tag>
+    <description>
+      Interval in MINUTES by Recon to request OM DB Snapshot.
+    </description>
+  </property>
+  <property>
+    <name>recon.om.snapshot.task.flush.param</name>
+    <value>false</value>
+    <tag>OZONE, RECON, OM</tag>
+    <description>
+      Request to flush the OM DB before taking checkpoint snapshot.
+    </description>
+  </property>
+  <property>
+    <name>hdds.tracing.enabled</name>
+    <value>true</value>
+    <tag>OZONE, HDDS</tag>
+    <description>
+      If enabled, tracing information is sent to tracing server.
+    </description>
+  </property>
+  <property>
+    <name>ozone.recon.sql.db.driver</name>
+    <value>org.sqlite.JDBC</value>
+    <tag>OZONE, RECON</tag>
+    <description>
+      Database driver class name available on the
+      Ozone Recon classpath.
+    </description>
+  </property>
+  <property>
+    <name>ozone.recon.sql.db.jdbc.url</name>
+    <value>jdbc:sqlite:/${ozone.recon.db.dir}/ozone_recon_sqlite.db</value>
+    <tag>OZONE, RECON</tag>
+    <description>
+      Ozone Recon SQL database jdbc url.
+    </description>
+  </property>
+  <property>
+    <name>ozone.recon.sql.db.username</name>
+    <value/>
+    <tag>OZONE, RECON</tag>
+    <description>
+      Ozone Recon SQL database username.
+    </description>
+  </property>
+  <property>
+    <name>ozone.recon.sql.db.password</name>
+    <value/>
+    <tag>OZONE, RECON</tag>
+    <description>
+      Ozone Recon datbase password.
+    </description>
+  </property>
+  <property>
+    <name>ozone.recon.sql.db.auto.commit</name>
+    <value>false</value>
+    <tag>OZONE, RECON</tag>
+    <description>
+      Sets the Ozone Recon database connection property of auto-commit to
+      true/false.
+    </description>
+  </property>
+  <property>
+    <name>ozone.recon.sql.db.conn.timeout</name>
+    <value>30000</value>
+    <tag>OZONE, RECON</tag>
+    <description>
+      Sets time in milliseconds before call to getConnection is timed out.
+    </description>
+  </property>
+  <property>
+    <name>ozone.recon.sql.db.conn.max.active</name>
+    <value>1</value>
+    <tag>OZONE, RECON</tag>
+    <description>
+      The max active connections to the SQL database. The default SQLite
+      database only allows single active connection, set this to a
+      resonable value like 10, for external production database.
+    </description>
+  </property>
+  <property>
+    <name>ozone.recon.sql.db.conn.max.age</name>
+    <value>1800</value>
+    <tag>OZONE, RECON</tag>
+    <description>
+      Sets maximum time a connection can be active in seconds.
+    </description>
+  </property>
+  <property>
+    <name>ozone.recon.sql.db.conn.idle.max.age</name>
+    <value>3600</value>
+    <tag>OZONE, RECON</tag>
+    <description>
+      Sets maximum time to live for idle connection in seconds.
+    </description>
+  </property>
+  <property>
+    <name>ozone.recon.sql.db.conn.idle.test.period</name>
+    <value>60</value>
+    <tag>OZONE, RECON</tag>
+    <description>
+      This sets the time (in seconds), for a connection to remain idle before
+      sending a test query to the DB. This is useful to prevent a DB from
+      timing out connections on its end.
+    </description>
+  </property>
+  <property>
+    <name>ozone.recon.sql.db.conn.idle.test</name>
+    <value>SELECT 1</value>
+    <tag>OZONE, RECON</tag>
+    <description>
+      The query to send to the DB to maintain keep-alives and test for dead
+      connections.
+    </description>
+  </property>
+  <property>
+    <name>ozone.recon.task.thread.count</name>
+    <value>1</value>
+    <tag>OZONE, RECON</tag>
+    <description>
+      The number of Recon Tasks that are waiting on updates from OM.
     </description>
   </property>
 </configuration>

@@ -19,6 +19,9 @@ package org.apache.hadoop.ozone.security.acl;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.ozone.OzoneConsts;
+import org.apache.hadoop.ozone.om.exceptions.OMException;
+
+import java.util.BitSet;
 
 /**
  * Public API for Ozone ACLs. Security providers providing support for Ozone
@@ -33,11 +36,11 @@ public interface IAccessAuthorizer {
    *
    * @param ozoneObject object for which access needs to be checked.
    * @param context Context object encapsulating all user related information.
-   * @throws OzoneAclException
+   * @throws org.apache.hadoop.ozone.om.exceptions.OMException
    * @return true if user has access else false.
    */
   boolean checkAccess(IOzoneObj ozoneObject, RequestContext context)
-      throws OzoneAclException;
+      throws OMException;
 
   /**
    * ACL rights.
@@ -52,6 +55,11 @@ public interface IAccessAuthorizer {
     WRITE_ACL,
     ALL,
     NONE;
+    private static int length = ACLType.values().length;
+
+    public static int getNoOfAcls() {
+      return length;
+    }
 
     /**
      * Returns the ACL rights based on passed in String.
@@ -84,7 +92,8 @@ public interface IAccessAuthorizer {
       case OzoneConsts.OZONE_ACL_NONE:
         return ACLType.NONE;
       default:
-        throw new IllegalArgumentException("ACL right is not recognized");
+        throw new IllegalArgumentException("[" + type + "] ACL right is not " +
+            "recognized");
       }
 
     }
@@ -92,10 +101,18 @@ public interface IAccessAuthorizer {
     /**
      * Returns String representation of ACL rights.
      *
-     * @param acl ACLType
+     * @param acls ACLType
      * @return String representation of acl
      */
-    public static String getACLRightsString(ACLType acl) {
+    public static String getACLString(BitSet acls) {
+      StringBuffer sb = new StringBuffer();
+      acls.stream().forEach(acl -> {
+        sb.append(getAclString(ACLType.values()[acl]));
+      });
+      return sb.toString();
+    }
+
+    public static String getAclString(ACLType acl) {
       switch (acl) {
       case READ:
         return OzoneConsts.OZONE_ACL_READ;
@@ -129,7 +146,8 @@ public interface IAccessAuthorizer {
     USER(OzoneConsts.OZONE_ACL_USER_TYPE),
     GROUP(OzoneConsts.OZONE_ACL_GROUP_TYPE),
     CLIENT_IP(OzoneConsts.OZONE_ACL_IP_TYPE),
-    WORLD(OzoneConsts.OZONE_ACL_WORLD_TYPE);
+    WORLD(OzoneConsts.OZONE_ACL_WORLD_TYPE),
+    ANONYMOUS(OzoneConsts.OZONE_ACL_ANONYMOUS_TYPE);
 
     @Override
     public String toString() {

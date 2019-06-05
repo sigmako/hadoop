@@ -33,6 +33,7 @@ import org.apache.hadoop.hdds.scm.container.common.helpers
     .InvalidContainerStateException;
 import org.apache.hadoop.hdds.scm.container.common.helpers
     .StorageContainerException;
+import org.apache.hadoop.hdds.tracing.TracingUtil;
 import org.apache.hadoop.ozone.audit.AuditAction;
 import org.apache.hadoop.ozone.audit.AuditEventStatus;
 import org.apache.hadoop.ozone.audit.AuditLogger;
@@ -61,9 +62,12 @@ import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.
     ContainerDataProto.State;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.Result;
 import org.apache.hadoop.ozone.container.common.interfaces.ContainerDispatcher;
+
+import io.opentracing.Scope;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -137,9 +141,18 @@ public class HddsDispatcher implements ContainerDispatcher, Auditor {
     containerSet.buildMissingContainerSet(createdContainerSet);
   }
 
-  @SuppressWarnings("methodlength")
   @Override
   public ContainerCommandResponseProto dispatch(
+      ContainerCommandRequestProto msg, DispatcherContext dispatcherContext) {
+    String spanName = "HddsDispatcher." + msg.getCmdType().name();
+    try (Scope scope = TracingUtil
+        .importAndCreateScope(spanName, msg.getTraceID())) {
+      return dispatchRequest(msg, dispatcherContext);
+    }
+  }
+
+  @SuppressWarnings("methodlength")
+  private ContainerCommandResponseProto dispatchRequest(
       ContainerCommandRequestProto msg, DispatcherContext dispatcherContext) {
     Preconditions.checkNotNull(msg);
     LOG.trace("Command {}, trace ID: {} ", msg.getCmdType().toString(),
@@ -287,8 +300,18 @@ public class HddsDispatcher implements ContainerDispatcher, Auditor {
         State containerState = container.getContainerData().getState();
         Preconditions.checkState(
             containerState == State.OPEN || containerState == State.CLOSING);
-        container.getContainerData()
-            .setState(ContainerDataProto.State.UNHEALTHY);
+        // mark and persist the container state to be unhealthy
+        try {
+          handler.markContainerUhealthy(container);
+        } catch (IOException ioe) {
+          // just log the error here in case marking the container fails,
+          // Return the actual failure response to the client
+          LOG.error("Failed to mark container " + containerID + " UNHEALTHY. ",
+              ioe);
+        }
+        // in any case, the in memory state of the container should be unhealthy
+        Preconditions.checkArgument(
+            container.getContainerData().getState() == State.UNHEALTHY);
         sendCloseContainerActionIfNeeded(container);
       }
 

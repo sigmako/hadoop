@@ -4,6 +4,7 @@ menu:
    main:
       parent: Client
       weight: 1
+      identifier: OzoneShell
 ---
 <!---
   Licensed to the Apache Software Foundation (ASF) under one or more
@@ -30,6 +31,7 @@ The commands supported by ozone are:
 
    * **classpath** - Prints the class path needed to get the hadoop jar and the
     required libraries.
+   * **dtutil**    - Operations related to delegation tokens
    * **fs** - Runs a command on ozone file system.
    * **datanode** - Via daemon command, the HDDS data nodes can be started or
    stopped.

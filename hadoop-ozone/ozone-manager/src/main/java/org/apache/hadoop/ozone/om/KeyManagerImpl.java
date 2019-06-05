@@ -17,6 +17,8 @@
 package org.apache.hadoop.ozone.om;
 
 import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
@@ -30,6 +32,7 @@ import java.util.concurrent.TimeUnit;
 import java.security.GeneralSecurityException;
 import java.security.PrivilegedExceptionAction;
 
+import com.google.common.base.Strings;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.hadoop.conf.StorageUnit;
 import org.apache.hadoop.crypto.key.KeyProviderCryptoExtension;
@@ -42,12 +45,14 @@ import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationType;
 import org.apache.hadoop.hdds.scm.container.common.helpers.AllocatedBlock;
+import org.apache.hadoop.hdds.scm.container.common.helpers.ContainerWithPipeline;
 import org.apache.hadoop.hdds.scm.container.common.helpers.ExcludeList;
 import org.apache.hadoop.hdds.scm.exceptions.SCMException;
 import org.apache.hadoop.hdds.scm.protocol.ScmBlockLocationProtocol;
 import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.BlockTokenSecretProto.AccessModeProto;
+import org.apache.hadoop.ozone.om.helpers.OzoneFileStatus;
 import org.apache.hadoop.ozone.om.helpers.BucketEncryptionKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyArgs;
@@ -62,6 +67,13 @@ import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadList;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadListParts;
 import org.apache.hadoop.ozone.om.helpers.OmPartInfo;
 import org.apache.hadoop.ozone.om.helpers.OpenKeySession;
+import org.apache.hadoop.ozone.om.helpers.OzoneFSUtils;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
+    .KeyArgs;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
+    .KeyInfo;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
+    .KeyLocation;
 import org.apache.hadoop.ozone.security.OzoneBlockTokenSecretManager;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -72,8 +84,13 @@ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
     .PartKeyInfo;
 import org.apache.hadoop.util.Time;
 import org.apache.hadoop.utils.BackgroundService;
+import org.apache.hadoop.utils.UniqueId;
 import org.apache.hadoop.utils.db.BatchOperation;
 import org.apache.hadoop.utils.db.DBStore;
+import org.apache.hadoop.utils.db.CodecRegistry;
+import org.apache.hadoop.utils.db.RDBStore;
+import org.apache.hadoop.utils.db.TableIterator;
+import org.apache.hadoop.utils.db.Table;
 
 import com.google.common.base.Preconditions;
 
@@ -85,11 +102,12 @@ import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_BLOCK_DELETING_SERVI
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_BLOCK_DELETING_SERVICE_INTERVAL_DEFAULT;
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_BLOCK_DELETING_SERVICE_TIMEOUT;
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_BLOCK_DELETING_SERVICE_TIMEOUT_DEFAULT;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_KEY_PREALLOCATION_MAXSIZE;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_KEY_PREALLOCATION_MAXSIZE_DEFAULT;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_KEY_PREALLOCATION_BLOCKS_MAX;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_KEY_PREALLOCATION_BLOCKS_MAX_DEFAULT;
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_SCM_BLOCK_SIZE;
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_SCM_BLOCK_SIZE_DEFAULT;
 import static org.apache.hadoop.ozone.OzoneConsts.OM_MULTIPART_MIN_SIZE;
+import static org.apache.hadoop.ozone.OzoneConsts.OZONE_URI_DELIMITER;
 import static org.apache.hadoop.util.Time.monotonicNow;
 
 import org.slf4j.Logger;
@@ -105,12 +123,12 @@ public class KeyManagerImpl implements KeyManager {
   /**
    * A SCM block client, used to talk to SCM to allocate block during putKey.
    */
-  private final ScmBlockLocationProtocol scmBlockClient;
+  private final ScmClient scmClient;
   private final OMMetadataManager metadataManager;
   private final long scmBlockSize;
   private final boolean useRatis;
 
-  private final long preallocateMax;
+  private final int preallocateBlocksMax;
   private final String omId;
   private final OzoneBlockTokenSecretManager secretManager;
   private final boolean grpcBlockTokenEnabled;
@@ -119,26 +137,29 @@ public class KeyManagerImpl implements KeyManager {
 
   private final KeyProviderCryptoExtension kmsProvider;
 
-  public KeyManagerImpl(ScmBlockLocationProtocol scmBlockClient,
-      OMMetadataManager metadataManager, OzoneConfiguration conf, String omId,
-      OzoneBlockTokenSecretManager secretManager) {
-    this(scmBlockClient, metadataManager, conf, omId, secretManager, null);
-  }
+  private final boolean isRatisEnabled;
 
   public KeyManagerImpl(ScmBlockLocationProtocol scmBlockClient,
       OMMetadataManager metadataManager, OzoneConfiguration conf, String omId,
+      OzoneBlockTokenSecretManager secretManager) {
+    this(new ScmClient(scmBlockClient, null), metadataManager,
+        conf, omId, secretManager, null);
+  }
+
+  public KeyManagerImpl(ScmClient scmClient,
+      OMMetadataManager metadataManager, OzoneConfiguration conf, String omId,
       OzoneBlockTokenSecretManager secretManager,
       KeyProviderCryptoExtension kmsProvider) {
-    this.scmBlockClient = scmBlockClient;
+    this.scmClient = scmClient;
     this.metadataManager = metadataManager;
     this.scmBlockSize = (long) conf
         .getStorageSize(OZONE_SCM_BLOCK_SIZE, OZONE_SCM_BLOCK_SIZE_DEFAULT,
             StorageUnit.BYTES);
     this.useRatis = conf.getBoolean(DFS_CONTAINER_RATIS_ENABLED_KEY,
         DFS_CONTAINER_RATIS_ENABLED_DEFAULT);
-    this.preallocateMax = conf.getLong(
-        OZONE_KEY_PREALLOCATION_MAXSIZE,
-        OZONE_KEY_PREALLOCATION_MAXSIZE_DEFAULT);
+    this.preallocateBlocksMax = conf.getInt(
+        OZONE_KEY_PREALLOCATION_BLOCKS_MAX,
+        OZONE_KEY_PREALLOCATION_BLOCKS_MAX_DEFAULT);
     this.omId = omId;
     start(conf);
     this.secretManager = secretManager;
@@ -146,6 +167,9 @@ public class KeyManagerImpl implements KeyManager {
         HDDS_BLOCK_TOKEN_ENABLED,
         HDDS_BLOCK_TOKEN_ENABLED_DEFAULT);
     this.kmsProvider = kmsProvider;
+    this.isRatisEnabled = conf.getBoolean(
+        OMConfigKeys.OZONE_OM_RATIS_ENABLE_KEY,
+        OMConfigKeys.OZONE_OM_RATIS_ENABLE_DEFAULT);
   }
 
   @Override
@@ -159,8 +183,8 @@ public class KeyManagerImpl implements KeyManager {
           OZONE_BLOCK_DELETING_SERVICE_TIMEOUT,
           OZONE_BLOCK_DELETING_SERVICE_TIMEOUT_DEFAULT,
           TimeUnit.MILLISECONDS);
-      keyDeletingService = new KeyDeletingService(scmBlockClient, this,
-          blockDeleteInterval, serviceTimeout, configuration);
+      keyDeletingService = new KeyDeletingService(scmClient.getBlockClient(),
+          this, blockDeleteInterval, serviceTimeout, configuration);
       keyDeletingService.start();
     }
   }
@@ -185,17 +209,20 @@ public class KeyManagerImpl implements KeyManager {
 
   private void validateBucket(String volumeName, String bucketName)
       throws IOException {
-    String volumeKey = metadataManager.getVolumeKey(volumeName);
     String bucketKey = metadataManager.getBucketKey(volumeName, bucketName);
-
-    //Check if the volume exists
-    if (metadataManager.getVolumeTable().get(volumeKey) == null) {
-      LOG.error("volume not found: {}", volumeName);
-      throw new OMException("Volume not found",
-          OMException.ResultCodes.VOLUME_NOT_FOUND);
-    }
-    //Check if bucket already exists
+    // Check if bucket exists
     if (metadataManager.getBucketTable().get(bucketKey) == null) {
+      String volumeKey = metadataManager.getVolumeKey(volumeName);
+      // If the volume also does not exist, we should throw volume not found
+      // exception
+      if (metadataManager.getVolumeTable().get(volumeKey) == null) {
+        LOG.error("volume not found: {}", volumeName);
+        throw new OMException("Volume not found",
+            OMException.ResultCodes.VOLUME_NOT_FOUND);
+      }
+
+      // if the volume exists but bucket does not exist, throw bucket not found
+      // exception
       LOG.error("bucket not found: {}/{} ", volumeName, bucketName);
       throw new OMException("Bucket not found",
           OMException.ResultCodes.BUCKET_NOT_FOUND);
@@ -221,10 +248,41 @@ public class KeyManagerImpl implements KeyManager {
   }
 
   @Override
-  public OmKeyLocationInfo allocateBlock(OmKeyArgs args, long clientID,
-      ExcludeList excludeList)
-      throws IOException {
+  public OmKeyLocationInfo addAllocatedBlock(OmKeyArgs args, long clientID,
+      KeyLocation keyLocation) throws IOException {
     Preconditions.checkNotNull(args);
+    Preconditions.checkNotNull(keyLocation);
+
+
+    String volumeName = args.getVolumeName();
+    String bucketName = args.getBucketName();
+    String keyName = args.getKeyName();
+    validateBucket(volumeName, bucketName);
+    String openKey = metadataManager.getOpenKey(
+        volumeName, bucketName, keyName, clientID);
+
+    OmKeyInfo keyInfo = metadataManager.getOpenKeyTable().get(openKey);
+    if (keyInfo == null) {
+      LOG.error("Allocate block for a key not in open status in meta store" +
+          " /{}/{}/{} with ID {}", volumeName, bucketName, keyName, clientID);
+      throw new OMException("Open Key not found",
+          OMException.ResultCodes.KEY_NOT_FOUND);
+    }
+
+    OmKeyLocationInfo omKeyLocationInfo =
+        OmKeyLocationInfo.getFromProtobuf(keyLocation);
+    keyInfo.appendNewBlocks(Collections.singletonList(omKeyLocationInfo));
+    keyInfo.updateModifcationTime();
+    metadataManager.getOpenKeyTable().put(openKey, keyInfo);
+    return omKeyLocationInfo;
+  }
+
+  @Override
+  public OmKeyLocationInfo allocateBlock(OmKeyArgs args, long clientID,
+      ExcludeList excludeList) throws IOException {
+    Preconditions.checkNotNull(args);
+
+
     String volumeName = args.getVolumeName();
     String bucketName = args.getBucketName();
     String keyName = args.getKeyName();
@@ -244,43 +302,58 @@ public class KeyManagerImpl implements KeyManager {
     // the same version
     List<OmKeyLocationInfo> locationInfos =
         allocateBlock(keyInfo, excludeList, scmBlockSize);
-    keyInfo.appendNewBlocks(locationInfos);
-    keyInfo.updateModifcationTime();
-    metadataManager.getOpenKeyTable().put(openKey,
-        keyInfo);
+
+    // If om is not managing via ratis, write to db, otherwise write to DB
+    // will happen via ratis apply transaction.
+    if (!isRatisEnabled) {
+      keyInfo.appendNewBlocks(locationInfos);
+      keyInfo.updateModifcationTime();
+      metadataManager.getOpenKeyTable().put(openKey, keyInfo);
+    }
     return locationInfos.get(0);
+
   }
 
+  /**
+   * This methods avoids multiple rpc calls to SCM by allocating multiple blocks
+   * in one rpc call.
+   * @param keyInfo - key info for key to be allocated.
+   * @param requestedSize requested length for allocation.
+   * @param excludeList exclude list while allocating blocks.
+   * @param requestedSize requested size to be allocated.
+   * @return
+   * @throws IOException
+   */
   private List<OmKeyLocationInfo> allocateBlock(OmKeyInfo keyInfo,
       ExcludeList excludeList, long requestedSize) throws IOException {
-    int numBlocks = (int) ((requestedSize - 1) / scmBlockSize + 1);
+    int numBlocks = Math.min((int) ((requestedSize - 1) / scmBlockSize + 1),
+        preallocateBlocksMax);
     List<OmKeyLocationInfo> locationInfos = new ArrayList<>(numBlocks);
-    while (requestedSize > 0) {
-      long allocateSize = Math.min(requestedSize, scmBlockSize);
-      AllocatedBlock allocatedBlock;
-      try {
-        allocatedBlock = scmBlockClient
-            .allocateBlock(allocateSize, keyInfo.getType(), keyInfo.getFactor(),
-                omId, excludeList);
-      } catch (SCMException ex) {
-        if (ex.getResult()
-            .equals(SCMException.ResultCodes.CHILL_MODE_EXCEPTION)) {
-          throw new OMException(ex.getMessage(), ResultCodes.SCM_IN_CHILL_MODE);
-        }
-        throw ex;
+    String remoteUser = getRemoteUser().getShortUserName();
+    List<AllocatedBlock> allocatedBlocks;
+    try {
+      allocatedBlocks = scmClient.getBlockClient()
+          .allocateBlock(scmBlockSize, numBlocks, keyInfo.getType(),
+              keyInfo.getFactor(), omId, excludeList);
+    } catch (SCMException ex) {
+      if (ex.getResult()
+          .equals(SCMException.ResultCodes.SAFE_MODE_EXCEPTION)) {
+        throw new OMException(ex.getMessage(), ResultCodes.SCM_IN_SAFE_MODE);
       }
+      throw ex;
+    }
+    for (AllocatedBlock allocatedBlock : allocatedBlocks) {
       OmKeyLocationInfo.Builder builder = new OmKeyLocationInfo.Builder()
           .setBlockID(new BlockID(allocatedBlock.getBlockID()))
           .setLength(scmBlockSize)
-          .setOffset(0);
+          .setOffset(0)
+          .setPipeline(allocatedBlock.getPipeline());
       if (grpcBlockTokenEnabled) {
-        String remoteUser = getRemoteUser().getShortUserName();
         builder.setToken(secretManager
             .generateToken(remoteUser, allocatedBlock.getBlockID().toString(),
                 getAclForUser(remoteUser), scmBlockSize));
       }
       locationInfos.add(builder.build());
-      requestedSize -= allocateSize;
     }
     return locationInfos;
   }
@@ -326,144 +399,172 @@ public class KeyManagerImpl implements KeyManager {
     return edek;
   }
 
-  @SuppressWarnings("checkstyle:methodlength")
   @Override
   public OpenKeySession openKey(OmKeyArgs args) throws IOException {
     Preconditions.checkNotNull(args);
     String volumeName = args.getVolumeName();
     String bucketName = args.getBucketName();
+    String keyName = args.getKeyName();
     validateBucket(volumeName, bucketName);
 
-    metadataManager.getLock().acquireBucketLock(volumeName, bucketName);
-    String keyName = args.getKeyName();
-    ReplicationFactor factor = args.getFactor();
-    ReplicationType type = args.getType();
-    long currentTime = Time.monotonicNowNanos();
-    long requestedSize = Math.min(preallocateMax, args.getDataSize());
+    long currentTime = UniqueId.next();
     OmKeyInfo keyInfo;
-    String openKey;
     long openVersion;
+    // NOTE size of a key is not a hard limit on anything, it is a value that
+    // client should expect, in terms of current size of key. If client sets
+    // a value, then this value is used, otherwise, we allocate a single
+    // block which is the current size, if read by the client.
+    final long size = args.getDataSize() >= 0 ?
+        args.getDataSize() : scmBlockSize;
+    final List<OmKeyLocationInfo> locations = new ArrayList<>();
 
-    FileEncryptionInfo encInfo = null;
-    OmBucketInfo bucketInfo = getBucketInfo(volumeName, bucketName);
-    BucketEncryptionKeyInfo ezInfo = bucketInfo.getEncryptionKeyInfo();
-    if (ezInfo != null) {
-      if (getKMSProvider() == null) {
-        throw new OMException("Invalid KMS provider, check configuration " +
-            CommonConfigurationKeys.HADOOP_SECURITY_KEY_PROVIDER_PATH,
-            OMException.ResultCodes.INVALID_KMS_PROVIDER);
-      }
-
-      final String ezKeyName = ezInfo.getKeyName();
-      EncryptedKeyVersion edek = generateEDEK(ezKeyName);
-      encInfo = new FileEncryptionInfo(ezInfo.getSuite(), ezInfo.getVersion(),
-            edek.getEncryptedKeyVersion().getMaterial(),
-            edek.getEncryptedKeyIv(),
-            ezKeyName, edek.getEncryptionKeyVersionName());
+    ReplicationFactor factor = args.getFactor();
+    if (factor == null) {
+      factor = useRatis ? ReplicationFactor.THREE : ReplicationFactor.ONE;
     }
 
+    ReplicationType type = args.getType();
+    if (type == null) {
+      type = useRatis ? ReplicationType.RATIS : ReplicationType.STAND_ALONE;
+    }
+
+    String dbKeyName = metadataManager.getOzoneKey(
+        args.getVolumeName(), args.getBucketName(), args.getKeyName());
+
+    FileEncryptionInfo encInfo;
+
     try {
-      if (args.getIsMultipartKey()) {
-        Preconditions.checkArgument(args.getMultipartUploadPartNumber() > 0,
-            "PartNumber Should be greater than zero");
-        // When key is multipart upload part key, we should take replication
-        // type and replication factor from original key which has done
-        // initiate multipart upload. If we have not found any such, we throw
-        // error no such multipart upload.
-        String uploadID = args.getMultipartUploadID();
-        Preconditions.checkNotNull(uploadID);
-        String multipartKey = metadataManager.getMultipartKey(volumeName,
-            bucketName, keyName, uploadID);
-        OmKeyInfo partKeyInfo = metadataManager.getOpenKeyTable().get(
-            multipartKey);
-        if (partKeyInfo == null) {
-          throw new OMException("No such Multipart upload is with specified " +
-              "uploadId " + uploadID,
-              ResultCodes.NO_SUCH_MULTIPART_UPLOAD_ERROR);
-        } else {
-          factor = partKeyInfo.getFactor();
-          type = partKeyInfo.getType();
-        }
-      } else {
-        // If user does not specify a replication strategy or
-        // replication factor, OM will use defaults.
-        if (factor == null) {
-          factor = useRatis ? ReplicationFactor.THREE : ReplicationFactor.ONE;
-        }
-        if (type == null) {
-          type = useRatis ? ReplicationType.RATIS : ReplicationType.STAND_ALONE;
-        }
-      }
-      List<OmKeyLocationInfo> locations = new ArrayList<>();
-      String objectKey = metadataManager.getOzoneKey(
-          volumeName, bucketName, keyName);
-      // NOTE size of a key is not a hard limit on anything, it is a value that
-      // client should expect, in terms of current size of key. If client sets a
-      // value, then this value is used, otherwise, we allocate a single block
-      // which is the current size, if read by the client.
-      long size = args.getDataSize() >= 0 ? args.getDataSize() : scmBlockSize;
-
-      if (args.getIsMultipartKey()) {
-        // For this upload part we don't need to check in KeyTable. As this
-        // is not an actual key, it is a part of the key.
-        keyInfo = createKeyInfo(args, locations, factor, type, size, encInfo);
-        //TODO args.getMetadata
-        openVersion = 0;
-      } else {
-        keyInfo = metadataManager.getKeyTable().get(objectKey);
-        if (keyInfo != null) {
-          // the key already exist, the new blocks will be added as new version
-          // when locations.size = 0, the new version will have identical blocks
-          // as its previous version
-          openVersion = keyInfo.addNewVersion(locations);
-          keyInfo.setDataSize(size + keyInfo.getDataSize());
-        } else {
-          // the key does not exist, create a new object, the new blocks are the
-          // version 0
-          keyInfo = createKeyInfo(args, locations, factor, type, size, encInfo);
-          openVersion = 0;
-        }
-      }
-      openKey = metadataManager.getOpenKey(
-          volumeName, bucketName, keyName, currentTime);
-      if (metadataManager.getOpenKeyTable().get(openKey) != null) {
-        // This should not happen. If this condition is satisfied, it means
-        // that we have generated a same openKeyId (i.e. currentTime) for two
-        // different client who are trying to write the same key at the same
-        // time. The chance of this happening is very, very minimal.
-
-        // Do we really need this check? Can we avoid this to gain some
-        // minor performance improvement?
-        LOG.warn("Cannot allocate key. The generated open key id is already" +
-            "used for the same key which is currently being written.");
-        throw new OMException("Cannot allocate key. Not able to get a valid" +
-            "open key id.", ResultCodes.KEY_ALLOCATION_ERROR);
-      }
-      LOG.debug("Key {} allocated in volume {} bucket {}",
-          keyName, volumeName, bucketName);
+      metadataManager.getLock().acquireBucketLock(volumeName, bucketName);
+      OmBucketInfo bucketInfo = getBucketInfo(volumeName, bucketName);
+      encInfo = getFileEncryptionInfo(bucketInfo);
+      keyInfo = prepareKeyInfo(args, dbKeyName, size, locations, encInfo);
     } catch (OMException e) {
       throw e;
     } catch (IOException ex) {
       LOG.error("Key open failed for volume:{} bucket:{} key:{}",
+          volumeName, bucketName, keyName, ex);
+      throw new OMException(ex.getMessage(), ResultCodes.KEY_ALLOCATION_ERROR);
+    } finally {
+      metadataManager.getLock().releaseBucketLock(volumeName, bucketName);
+    }
+    if (keyInfo == null) {
+      // the key does not exist, create a new object, the new blocks are the
+      // version 0
+      keyInfo = createKeyInfo(args, locations, factor, type, size, encInfo);
+    }
+    openVersion = keyInfo.getLatestVersionLocations().getVersion();
+    LOG.debug("Key {} allocated in volume {} bucket {}",
+        keyName, volumeName, bucketName);
+    allocateBlockInKey(keyInfo, args.getDataSize(), currentTime);
+    return new OpenKeySession(currentTime, keyInfo, openVersion);
+  }
+
+  private void allocateBlockInKey(OmKeyInfo keyInfo, long size, long sessionId)
+      throws IOException {
+    String openKey = metadataManager
+        .getOpenKey(keyInfo.getVolumeName(), keyInfo.getBucketName(),
+            keyInfo.getKeyName(), sessionId);
+    // requested size is not required but more like a optimization:
+    // SCM looks at the requested, if it 0, no block will be allocated at
+    // the point, if client needs more blocks, client can always call
+    // allocateBlock. But if requested size is not 0, OM will preallocate
+    // some blocks and piggyback to client, to save RPC calls.
+    if (size > 0) {
+      List<OmKeyLocationInfo> locationInfos =
+          allocateBlock(keyInfo, new ExcludeList(), size);
+      keyInfo.appendNewBlocks(locationInfos);
+    }
+
+    // When OM is not managed via ratis we should write in to Om db in
+    // openKey call.
+    if (!isRatisEnabled) {
+      metadataManager.getOpenKeyTable().put(openKey, keyInfo);
+    }
+  }
+
+  private OmKeyInfo prepareKeyInfo(
+      OmKeyArgs keyArgs, String dbKeyName, long size,
+      List<OmKeyLocationInfo> locations, FileEncryptionInfo encInfo)
+      throws IOException {
+    OmKeyInfo keyInfo = null;
+    if (keyArgs.getIsMultipartKey()) {
+      keyInfo = prepareMultipartKeyInfo(keyArgs, size, locations, encInfo);
+      //TODO args.getMetadata
+    } else if (metadataManager.getKeyTable().isExist(dbKeyName)) {
+      keyInfo = metadataManager.getKeyTable().get(dbKeyName);
+      // the key already exist, the new blocks will be added as new version
+      // when locations.size = 0, the new version will have identical blocks
+      // as its previous version
+      keyInfo.addNewVersion(locations);
+      keyInfo.setDataSize(size + keyInfo.getDataSize());
+    }
+    return keyInfo;
+  }
+
+  private OmKeyInfo prepareMultipartKeyInfo(OmKeyArgs args, long size,
+      List<OmKeyLocationInfo> locations, FileEncryptionInfo encInfo)
+      throws IOException {
+    ReplicationFactor factor;
+    ReplicationType type;
+
+    Preconditions.checkArgument(args.getMultipartUploadPartNumber() > 0,
+        "PartNumber Should be greater than zero");
+    // When key is multipart upload part key, we should take replication
+    // type and replication factor from original key which has done
+    // initiate multipart upload. If we have not found any such, we throw
+    // error no such multipart upload.
+    String uploadID = args.getMultipartUploadID();
+    Preconditions.checkNotNull(uploadID);
+    String multipartKey = metadataManager
+        .getMultipartKey(args.getVolumeName(), args.getBucketName(),
+            args.getKeyName(), uploadID);
+    OmKeyInfo partKeyInfo = metadataManager.getOpenKeyTable().get(
+        multipartKey);
+    if (partKeyInfo == null) {
+      throw new OMException("No such Multipart upload is with specified " +
+          "uploadId " + uploadID,
+          ResultCodes.NO_SUCH_MULTIPART_UPLOAD_ERROR);
+    } else {
+      factor = partKeyInfo.getFactor();
+      type = partKeyInfo.getType();
+    }
+    // For this upload part we don't need to check in KeyTable. As this
+    // is not an actual key, it is a part of the key.
+    return createKeyInfo(args, locations, factor, type, size, encInfo);
+  }
+
+  public void applyOpenKey(KeyArgs omKeyArgs,
+      KeyInfo keyInfo, long clientID) throws IOException {
+    Preconditions.checkNotNull(omKeyArgs);
+    String volumeName = omKeyArgs.getVolumeName();
+    String bucketName = omKeyArgs.getBucketName();
+
+    // Do we need to call again validateBucket, as this is just called after
+    // start Transaction from applyTransaction. Can we remove this double
+    // check?
+    validateBucket(volumeName, bucketName);
+
+    metadataManager.getLock().acquireBucketLock(volumeName, bucketName);
+    String keyName = omKeyArgs.getKeyName();
+
+    // TODO: here if on OM machines clocks are skewed and there is a chance
+    //  for override of the openKey entries.
+    try {
+      String openKey = metadataManager.getOpenKey(
+          volumeName, bucketName, keyName, clientID);
+
+      OmKeyInfo omKeyInfo = OmKeyInfo.getFromProtobuf(keyInfo);
+
+      metadataManager.getOpenKeyTable().put(openKey,
+          omKeyInfo);
+    } catch (IOException ex) {
+      LOG.error("Apply Open Key failed for volume:{} bucket:{} key:{}",
           volumeName, bucketName, keyName, ex);
       throw new OMException(ex.getMessage(),
           ResultCodes.KEY_ALLOCATION_ERROR);
     } finally {
       metadataManager.getLock().releaseBucketLock(volumeName, bucketName);
     }
-
-    // requested size is not required but more like a optimization:
-    // SCM looks at the requested, if it 0, no block will be allocated at
-    // the point, if client needs more blocks, client can always call
-    // allocateBlock. But if requested size is not 0, OM will preallocate
-    // some blocks and piggyback to client, to save RPC calls.
-    if (requestedSize > 0) {
-      List<OmKeyLocationInfo> locationInfos =
-          allocateBlock(keyInfo, new ExcludeList(), requestedSize);
-      keyInfo.appendNewBlocks(locationInfos);
-    }
-    metadataManager.getOpenKeyTable().put(openKey, keyInfo);
-    return new OpenKeySession(currentTime, keyInfo, openVersion);
   }
 
   /**
@@ -502,13 +603,15 @@ public class KeyManagerImpl implements KeyManager {
     String volumeName = args.getVolumeName();
     String bucketName = args.getBucketName();
     String keyName = args.getKeyName();
-    metadataManager.getLock().acquireBucketLock(volumeName, bucketName);
+    List<OmKeyLocationInfo> locationInfoList = args.getLocationInfoList();
+    String objectKey = metadataManager
+        .getOzoneKey(volumeName, bucketName, keyName);
+    String openKey = metadataManager
+        .getOpenKey(volumeName, bucketName, keyName, clientID);
+    Preconditions.checkNotNull(locationInfoList);
     try {
+      metadataManager.getLock().acquireBucketLock(volumeName, bucketName);
       validateBucket(volumeName, bucketName);
-      String openKey = metadataManager.getOpenKey(volumeName, bucketName,
-          keyName, clientID);
-      String objectKey = metadataManager.getOzoneKey(
-          volumeName, bucketName, keyName);
       OmKeyInfo keyInfo = metadataManager.getOpenKeyTable().get(openKey);
       if (keyInfo == null) {
         throw new OMException("Commit a key without corresponding entry " +
@@ -516,8 +619,6 @@ public class KeyManagerImpl implements KeyManager {
       }
       keyInfo.setDataSize(args.getDataSize());
       keyInfo.setModificationTime(Time.now());
-      List<OmKeyLocationInfo> locationInfoList = args.getLocationInfoList();
-      Preconditions.checkNotNull(locationInfoList);
 
       //update the block length for each block
       keyInfo.updateLocationInfoList(locationInfoList);
@@ -564,6 +665,33 @@ public class KeyManagerImpl implements KeyManager {
                 k.getBlockID().getContainerBlockID().toString(),
                 getAclForUser(remoteUser),
                 k.getLength()));
+          });
+        }
+      }
+      // Refresh container pipeline info from SCM
+      // based on OmKeyArgs.refreshPipeline flag
+      // 1. Client send initial read request OmKeyArgs.refreshPipeline = false
+      // and uses the pipeline cached in OM to access datanode
+      // 2. If succeeded, done.
+      // 3. If failed due to pipeline does not exist or invalid pipeline state
+      //    exception, client should retry lookupKey with
+      //    OmKeyArgs.refreshPipeline = true
+      if (args.getRefreshPipeline()) {
+        for (OmKeyLocationInfoGroup key : value.getKeyLocationVersions()) {
+          key.getLocationList().forEach(k -> {
+            // TODO: fix Some tests that may not initialize container client
+            // The production should always have containerClient initialized.
+            if (scmClient.getContainerClient() != null) {
+              try {
+                ContainerWithPipeline cp = scmClient.getContainerClient()
+                    .getContainerWithPipeline(k.getContainerID());
+                if (!cp.getPipeline().equals(k.getPipeline())) {
+                  k.setPipeline(cp.getPipeline());
+                }
+              } catch (IOException e) {
+                LOG.debug("Unable to update pipeline for container");
+              }
+            }
           });
         }
       }
@@ -743,17 +871,22 @@ public class KeyManagerImpl implements KeyManager {
   @Override
   public OmMultipartInfo initiateMultipartUpload(OmKeyArgs omKeyArgs) throws
       IOException {
-    Preconditions.checkNotNull(omKeyArgs);
-    String volumeName = omKeyArgs.getVolumeName();
-    String bucketName = omKeyArgs.getBucketName();
-    String keyName = omKeyArgs.getKeyName();
+    long time = Time.monotonicNowNanos();
+    String uploadID = UUID.randomUUID().toString() + "-" + time;
+    return applyInitiateMultipartUpload(omKeyArgs, uploadID);
+  }
+
+  public OmMultipartInfo applyInitiateMultipartUpload(OmKeyArgs keyArgs,
+      String multipartUploadID) throws IOException {
+    Preconditions.checkNotNull(keyArgs);
+    Preconditions.checkNotNull(multipartUploadID);
+    String volumeName = keyArgs.getVolumeName();
+    String bucketName = keyArgs.getBucketName();
+    String keyName = keyArgs.getKeyName();
 
     metadataManager.getLock().acquireBucketLock(volumeName, bucketName);
     validateS3Bucket(volumeName, bucketName);
     try {
-      long time = Time.monotonicNowNanos();
-      String uploadID = UUID.randomUUID().toString() + "-" + Long.toString(
-          time);
 
       // We are adding uploadId to key, because if multiple users try to
       // perform multipart upload on the same key, each will try to upload, who
@@ -769,24 +902,24 @@ public class KeyManagerImpl implements KeyManager {
       // new uploadId is returned.
 
       String multipartKey = metadataManager.getMultipartKey(volumeName,
-          bucketName, keyName, uploadID);
+          bucketName, keyName, multipartUploadID);
 
       // Not checking if there is an already key for this in the keyTable, as
       // during final complete multipart upload we take care of this.
 
 
       Map<Integer, PartKeyInfo> partKeyInfoMap = new HashMap<>();
-      OmMultipartKeyInfo multipartKeyInfo = new OmMultipartKeyInfo(uploadID,
-          partKeyInfoMap);
+      OmMultipartKeyInfo multipartKeyInfo = new OmMultipartKeyInfo(
+          multipartUploadID, partKeyInfoMap);
       List<OmKeyLocationInfo> locations = new ArrayList<>();
       OmKeyInfo omKeyInfo = new OmKeyInfo.Builder()
-          .setVolumeName(omKeyArgs.getVolumeName())
-          .setBucketName(omKeyArgs.getBucketName())
-          .setKeyName(omKeyArgs.getKeyName())
+          .setVolumeName(keyArgs.getVolumeName())
+          .setBucketName(keyArgs.getBucketName())
+          .setKeyName(keyArgs.getKeyName())
           .setCreationTime(Time.now())
           .setModificationTime(Time.now())
-          .setReplicationType(omKeyArgs.getType())
-          .setReplicationFactor(omKeyArgs.getFactor())
+          .setReplicationType(keyArgs.getType())
+          .setReplicationFactor(keyArgs.getFactor())
           .setOmKeyLocationInfos(Collections.singletonList(
               new OmKeyLocationInfoGroup(0, locations)))
           .build();
@@ -799,11 +932,12 @@ public class KeyManagerImpl implements KeyManager {
         metadataManager.getOpenKeyTable().putWithBatch(batch,
             multipartKey, omKeyInfo);
         store.commitBatchOperation(batch);
-        return new OmMultipartInfo(volumeName, bucketName, keyName, uploadID);
+        return new OmMultipartInfo(volumeName, bucketName, keyName,
+            multipartUploadID);
       }
     } catch (IOException ex) {
       LOG.error("Initiate Multipart upload Failed for volume:{} bucket:{} " +
-              "key:{}", volumeName, bucketName, keyName, ex);
+          "key:{}", volumeName, bucketName, keyName, ex);
       throw new OMException(ex.getMessage(),
           ResultCodes.INITIATE_MULTIPART_UPLOAD_ERROR);
     } finally {
@@ -1194,6 +1328,388 @@ public class KeyManagerImpl implements KeyManager {
     } finally {
       metadataManager.getLock().releaseBucketLock(volumeName, bucketName);
     }
+  }
+
+  /**
+   * OzoneFS api to get file status for an entry.
+   *
+   * @param args Key args
+   * @throws OMException if file does not exist
+   *                     if bucket does not exist
+   * @throws IOException if there is error in the db
+   *                     invalid arguments
+   */
+  public OzoneFileStatus getFileStatus(OmKeyArgs args) throws IOException {
+    Preconditions.checkNotNull(args, "Key args can not be null");
+    String volumeName = args.getVolumeName();
+    String bucketName = args.getBucketName();
+    String keyName = args.getKeyName();
+
+    metadataManager.getLock().acquireBucketLock(volumeName, bucketName);
+    try {
+      // Check if this is the root of the filesystem.
+      if (keyName.length() == 0) {
+        validateBucket(volumeName, bucketName);
+        return new OzoneFileStatus(OZONE_URI_DELIMITER);
+      }
+
+      // Check if the key is a file.
+      String fileKeyBytes = metadataManager.getOzoneKey(
+          volumeName, bucketName, keyName);
+      OmKeyInfo fileKeyInfo = metadataManager.getKeyTable().get(fileKeyBytes);
+      if (fileKeyInfo != null) {
+        // this is a file
+        return new OzoneFileStatus(fileKeyInfo, scmBlockSize, false);
+      }
+
+      String dirKey = OzoneFSUtils.addTrailingSlashIfNeeded(keyName);
+      String dirKeyBytes = metadataManager.getOzoneKey(
+          volumeName, bucketName, dirKey);
+      OmKeyInfo dirKeyInfo = metadataManager.getKeyTable().get(dirKeyBytes);
+      if (dirKeyInfo != null) {
+        return new OzoneFileStatus(dirKeyInfo, scmBlockSize, true);
+      }
+
+      List<OmKeyInfo> keys = metadataManager.listKeys(volumeName, bucketName,
+          null, dirKey, 1);
+      if (keys.iterator().hasNext()) {
+        return new OzoneFileStatus(keyName);
+      }
+
+      LOG.debug("Unable to get file status for the key: volume:" + volumeName +
+          " bucket:" + bucketName + " key:" + keyName + " with error no " +
+          "such file exists:");
+      throw new OMException("Unable to get file status: volume: " +
+          volumeName + " bucket: " + bucketName + " key: " + keyName,
+          ResultCodes.FILE_NOT_FOUND);
+    } finally {
+      metadataManager.getLock().releaseBucketLock(volumeName, bucketName);
+    }
+  }
+
+  /**
+   * Ozone FS api to create a directory. Parent directories if do not exist
+   * are created for the input directory.
+   *
+   * @param args Key args
+   * @throws OMException if any entry in the path exists as a file
+   *                     if bucket does not exist
+   * @throws IOException if there is error in the db
+   *                     invalid arguments
+   */
+  public void createDirectory(OmKeyArgs args) throws IOException {
+    Preconditions.checkNotNull(args, "Key args can not be null");
+    String volumeName = args.getVolumeName();
+    String bucketName = args.getBucketName();
+    String keyName = args.getKeyName();
+
+    metadataManager.getLock().acquireBucketLock(volumeName, bucketName);
+    try {
+
+      // Check if this is the root of the filesystem.
+      if (keyName.length() == 0) {
+        return;
+      }
+
+      Path keyPath = Paths.get(keyName);
+      OzoneFileStatus status =
+          verifyNoFilesInPath(volumeName, bucketName, keyPath, false);
+      if (status != null && OzoneFSUtils.pathToKey(status.getPath())
+          .equals(keyName)) {
+        // if directory already exists
+        return;
+      }
+      OmKeyInfo dirDbKeyInfo =
+          createDirectoryKey(volumeName, bucketName, keyName);
+      String dirDbKey = metadataManager
+          .getOzoneKey(volumeName, bucketName, dirDbKeyInfo.getKeyName());
+      metadataManager.getKeyTable().put(dirDbKey, dirDbKeyInfo);
+    } finally {
+      metadataManager.getLock().releaseBucketLock(volumeName, bucketName);
+    }
+  }
+
+  private OmKeyInfo createDirectoryKey(String volumeName, String bucketName,
+      String keyName) throws IOException {
+    // verify bucket exists
+    OmBucketInfo bucketInfo = getBucketInfo(volumeName, bucketName);
+
+    String dir = OzoneFSUtils.addTrailingSlashIfNeeded(keyName);
+    FileEncryptionInfo encInfo = getFileEncryptionInfo(bucketInfo);
+    return new OmKeyInfo.Builder()
+        .setVolumeName(volumeName)
+        .setBucketName(bucketName)
+        .setKeyName(dir)
+        .setOmKeyLocationInfos(Collections.singletonList(
+            new OmKeyLocationInfoGroup(0, new ArrayList<>())))
+        .setCreationTime(Time.now())
+        .setModificationTime(Time.now())
+        .setDataSize(0)
+        .setReplicationType(ReplicationType.RATIS)
+        .setReplicationFactor(ReplicationFactor.ONE)
+        .setFileEncryptionInfo(encInfo)
+        .build();
+  }
+
+  /**
+   * OzoneFS api to creates an output stream for a file.
+   *
+   * @param args        Key args
+   * @param isOverWrite if true existing file at the location will be
+   *                    overwritten
+   * @param isRecursive if true file would be created even if parent
+   *                    directories do not exist
+   * @throws OMException if given key is a directory
+   *                     if file exists and isOverwrite flag is false
+   *                     if an ancestor exists as a file
+   *                     if bucket does not exist
+   * @throws IOException if there is error in the db
+   *                     invalid arguments
+   */
+  @Override
+  public OpenKeySession createFile(OmKeyArgs args, boolean isOverWrite,
+      boolean isRecursive) throws IOException {
+    Preconditions.checkNotNull(args, "Key args can not be null");
+    String volumeName = args.getVolumeName();
+    String bucketName = args.getBucketName();
+    String keyName = args.getKeyName();
+    OpenKeySession keySession;
+
+    metadataManager.getLock().acquireBucketLock(volumeName, bucketName);
+    try {
+      OzoneFileStatus fileStatus;
+      try {
+        fileStatus = getFileStatus(args);
+        if (fileStatus.isDirectory()) {
+          throw new OMException("Can not write to directory: " + keyName,
+              ResultCodes.NOT_A_FILE);
+        } else if (fileStatus.isFile()) {
+          if (!isOverWrite) {
+            throw new OMException("File " + keyName + " already exists",
+                ResultCodes.FILE_ALREADY_EXISTS);
+          }
+        }
+      } catch (OMException ex) {
+        if (ex.getResult() != ResultCodes.FILE_NOT_FOUND) {
+          throw ex;
+        }
+      }
+
+      verifyNoFilesInPath(volumeName, bucketName,
+          Paths.get(keyName).getParent(), !isRecursive);
+      // TODO: Optimize call to openKey as keyInfo is already available in the
+      // filestatus. We can avoid some operations in openKey call.
+      keySession = openKey(args);
+    } finally {
+      metadataManager.getLock().releaseBucketLock(volumeName, bucketName);
+    }
+
+    return keySession;
+  }
+
+  /**
+   * OzoneFS api to lookup for a file.
+   *
+   * @param args Key args
+   * @throws OMException if given key is not found or it is not a file
+   *                     if bucket does not exist
+   * @throws IOException if there is error in the db
+   *                     invalid arguments
+   */
+  @Override
+  public OmKeyInfo lookupFile(OmKeyArgs args) throws IOException {
+    Preconditions.checkNotNull(args, "Key args can not be null");
+    String volumeName = args.getVolumeName();
+    String bucketName = args.getBucketName();
+    String keyName = args.getKeyName();
+
+    metadataManager.getLock().acquireBucketLock(volumeName, bucketName);
+    try {
+      OzoneFileStatus fileStatus = getFileStatus(args);
+      if (fileStatus.isFile()) {
+        return fileStatus.getKeyInfo();
+      }
+      //if key is not of type file or if key is not found we throw an exception
+    } finally {
+      metadataManager.getLock().releaseBucketLock(volumeName, bucketName);
+    }
+
+    throw new OMException("Can not write to directory: " + keyName,
+        ResultCodes.NOT_A_FILE);
+  }
+
+  /**
+   * List the status for a file or a directory and its contents.
+   *
+   * @param args       Key args
+   * @param recursive  For a directory if true all the descendants of a
+   *                   particular directory are listed
+   * @param startKey   Key from which listing needs to start. If startKey exists
+   *                   its status is included in the final list.
+   * @param numEntries Number of entries to list from the start key
+   * @return list of file status
+   */
+  public List<OzoneFileStatus> listStatus(OmKeyArgs args, boolean recursive,
+      String startKey, long numEntries) throws IOException {
+    Preconditions.checkNotNull(args, "Key args can not be null");
+    String volumeName = args.getVolumeName();
+    String bucketName = args.getBucketName();
+    String keyName = args.getKeyName();
+
+    List<OzoneFileStatus> fileStatusList = new ArrayList<>();
+    metadataManager.getLock().acquireBucketLock(volumeName, bucketName);
+    try {
+      if (Strings.isNullOrEmpty(startKey)) {
+        OzoneFileStatus fileStatus = getFileStatus(args);
+        if (fileStatus.isFile()) {
+          return Collections.singletonList(fileStatus);
+        }
+        startKey = OzoneFSUtils.addTrailingSlashIfNeeded(keyName);
+      }
+
+      String seekKeyInDb =
+          metadataManager.getOzoneKey(volumeName, bucketName, startKey);
+      String keyInDb = OzoneFSUtils.addTrailingSlashIfNeeded(
+          metadataManager.getOzoneKey(volumeName, bucketName, keyName));
+      TableIterator<String, ? extends Table.KeyValue<String, OmKeyInfo>>
+          iterator = metadataManager.getKeyTable().iterator();
+      iterator.seek(seekKeyInDb);
+
+      if (!iterator.hasNext()) {
+        return Collections.emptyList();
+      }
+
+      if (iterator.key().equals(keyInDb)) {
+        // skip the key which needs to be listed
+        iterator.next();
+      }
+
+      while (iterator.hasNext() && numEntries - fileStatusList.size() > 0) {
+        String entryInDb = iterator.key();
+        OmKeyInfo value = iterator.value().getValue();
+        if (entryInDb.startsWith(keyInDb)) {
+          String entryKeyName = value.getKeyName();
+          if (recursive) {
+            // for recursive list all the entries
+            fileStatusList.add(new OzoneFileStatus(value, scmBlockSize,
+                !OzoneFSUtils.isFile(entryKeyName)));
+            iterator.next();
+          } else {
+            // get the child of the directory to list from the entry. For
+            // example if directory to list is /a and entry is /a/b/c where
+            // c is a file. The immediate child is b which is a directory. c
+            // should not be listed as child of a.
+            String immediateChild = OzoneFSUtils
+                .getImmediateChild(entryKeyName, keyName);
+            boolean isFile = OzoneFSUtils.isFile(immediateChild);
+            if (isFile) {
+              fileStatusList
+                  .add(new OzoneFileStatus(value, scmBlockSize, !isFile));
+              iterator.next();
+            } else {
+              // if entry is a directory
+              fileStatusList.add(new OzoneFileStatus(immediateChild));
+              // skip the other descendants of this child directory.
+              iterator.seek(
+                  getNextGreaterString(volumeName, bucketName, immediateChild));
+            }
+          }
+        } else {
+          break;
+        }
+      }
+    } finally {
+      metadataManager.getLock().releaseBucketLock(volumeName, bucketName);
+    }
+    return fileStatusList;
+  }
+
+  private String getNextGreaterString(String volumeName, String bucketName,
+      String keyPrefix) throws IOException {
+    // Increment the last character of the string and return the new ozone key.
+    Preconditions.checkArgument(!Strings.isNullOrEmpty(keyPrefix),
+        "Key prefix is null or empty");
+    CodecRegistry codecRegistry =
+        ((RDBStore) metadataManager.getStore()).getCodecRegistry();
+    byte[] keyPrefixInBytes = codecRegistry.asRawData(keyPrefix);
+    keyPrefixInBytes[keyPrefixInBytes.length - 1]++;
+    String nextPrefix = codecRegistry.asObject(keyPrefixInBytes, String.class);
+    return metadataManager.getOzoneKey(volumeName, bucketName, nextPrefix);
+  }
+
+  /**
+   * Verify that none of the parent path exists as file in the filesystem.
+   *
+   * @param volumeName         Volume name
+   * @param bucketName         Bucket name
+   * @param path               Directory path. This is the absolute path of the
+   *                           directory for the ozone filesystem.
+   * @param directoryMustExist throws exception if true and given path does not
+   *                           exist as directory
+   * @return OzoneFileStatus of the first directory found in path in reverse
+   * order
+   * @throws OMException if ancestor exists as file in the filesystem
+   *                     if directoryMustExist flag is true and parent does
+   *                     not exist
+   *                     if bucket does not exist
+   * @throws IOException if there is error in the db
+   *                     invalid arguments
+   */
+  private OzoneFileStatus verifyNoFilesInPath(String volumeName,
+      String bucketName, Path path, boolean directoryMustExist)
+      throws IOException {
+    OmKeyArgs.Builder argsBuilder = new OmKeyArgs.Builder()
+        .setVolumeName(volumeName)
+        .setBucketName(bucketName);
+    while (path != null) {
+      String keyName = path.toString();
+      try {
+        OzoneFileStatus fileStatus =
+            getFileStatus(argsBuilder.setKeyName(keyName).build());
+        if (fileStatus.isFile()) {
+          LOG.error("Unable to create directory (File already exists): volume: "
+              + volumeName + "bucket: " + bucketName + "key: " + keyName);
+          throw new OMException(
+              "Unable to create directory at : volume: " + volumeName
+                  + "bucket: " + bucketName + "key: " + keyName,
+              ResultCodes.FILE_ALREADY_EXISTS);
+        } else if (fileStatus.isDirectory()) {
+          return fileStatus;
+        }
+      } catch (OMException ex) {
+        if (ex.getResult() != ResultCodes.FILE_NOT_FOUND) {
+          throw ex;
+        } else if (ex.getResult() == ResultCodes.FILE_NOT_FOUND) {
+          if (directoryMustExist) {
+            throw new OMException("Parent directory does not exist",
+                ex.getCause(), ResultCodes.DIRECTORY_NOT_FOUND);
+          }
+        }
+      }
+      path = path.getParent();
+    }
+    return null;
+  }
+
+  private FileEncryptionInfo getFileEncryptionInfo(OmBucketInfo bucketInfo)
+      throws IOException {
+    FileEncryptionInfo encInfo = null;
+    BucketEncryptionKeyInfo ezInfo = bucketInfo.getEncryptionKeyInfo();
+    if (ezInfo != null) {
+      if (getKMSProvider() == null) {
+        throw new OMException("Invalid KMS provider, check configuration " +
+            CommonConfigurationKeys.HADOOP_SECURITY_KEY_PROVIDER_PATH,
+            OMException.ResultCodes.INVALID_KMS_PROVIDER);
+      }
+
+      final String ezKeyName = ezInfo.getKeyName();
+      EncryptedKeyVersion edek = generateEDEK(ezKeyName);
+      encInfo = new FileEncryptionInfo(ezInfo.getSuite(), ezInfo.getVersion(),
+          edek.getEncryptedKeyVersion().getMaterial(),
+          edek.getEncryptedKeyIv(),
+          ezKeyName, edek.getEncryptionKeyVersionName());
+    }
+    return encInfo;
   }
 
 }

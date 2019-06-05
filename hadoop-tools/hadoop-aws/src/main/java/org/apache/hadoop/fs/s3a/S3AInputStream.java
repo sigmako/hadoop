@@ -25,13 +25,18 @@ import com.amazonaws.services.s3.model.GetObjectRequest;
 import com.amazonaws.services.s3.model.S3Object;
 import com.amazonaws.services.s3.model.S3ObjectInputStream;
 import com.amazonaws.services.s3.model.SSECustomerKey;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.CanSetReadahead;
+import org.apache.hadoop.fs.CanUnbuffer;
 import org.apache.hadoop.fs.FSExceptionMessages;
 import org.apache.hadoop.fs.FSInputStream;
+import org.apache.hadoop.fs.PathIOException;
+import org.apache.hadoop.fs.StreamCapabilities;
+import org.apache.hadoop.fs.s3a.impl.ChangeTracker;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,6 +46,7 @@ import java.io.IOException;
 import java.net.SocketTimeoutException;
 
 import static org.apache.commons.lang3.StringUtils.isNotEmpty;
+import static org.apache.hadoop.util.StringUtils.toLowerCase;
 
 /**
  * The input stream for an S3A object.
@@ -61,10 +67,14 @@ import static org.apache.commons.lang3.StringUtils.isNotEmpty;
  */
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
-public class S3AInputStream extends FSInputStream implements CanSetReadahead {
+public class S3AInputStream extends FSInputStream implements  CanSetReadahead,
+        CanUnbuffer, StreamCapabilities {
 
   public static final String E_NEGATIVE_READAHEAD_VALUE
       = "Negative readahead value";
+
+  public static final String OPERATION_OPEN = "open";
+  public static final String OPERATION_REOPEN = "re-open";
 
   /**
    * This is the public position; the one set in {@link #seek(long)}
@@ -110,6 +120,9 @@ public class S3AInputStream extends FSInputStream implements CanSetReadahead {
    */
   private long contentRangeStart;
 
+  /** change tracker. */
+  private final ChangeTracker changeTracker;
+
   /**
    * Create the stream.
    * This does not attempt to open it; that is only done on the first
@@ -138,6 +151,10 @@ public class S3AInputStream extends FSInputStream implements CanSetReadahead {
     this.serverSideEncryptionAlgorithm =
         s3Attributes.getServerSideEncryptionAlgorithm();
     this.serverSideEncryptionKey = s3Attributes.getServerSideEncryptionKey();
+    this.changeTracker = new ChangeTracker(uri,
+        ctx.getChangeDetectionPolicy(),
+        streamStatistics.getVersionMismatchCounter(),
+        s3Attributes);
     setInputPolicy(ctx.getInputPolicy());
     setReadahead(ctx.getReadahead());
   }
@@ -164,7 +181,7 @@ public class S3AInputStream extends FSInputStream implements CanSetReadahead {
   private synchronized void reopen(String reason, long targetPos, long length,
           boolean forceAbort) throws IOException {
 
-    if (wrappedStream != null) {
+    if (isObjectStreamOpen()) {
       closeStream("reopen(" + reason + ")", contentRangeFinish, forceAbort);
     }
 
@@ -182,15 +199,20 @@ public class S3AInputStream extends FSInputStream implements CanSetReadahead {
         StringUtils.isNotBlank(serverSideEncryptionKey)){
       request.setSSECustomerKey(new SSECustomerKey(serverSideEncryptionKey));
     }
-    String text = String.format("Failed to %s %s at %d",
-        (opencount == 0 ? "open" : "re-open"), uri, targetPos);
+    String operation = opencount == 0 ? OPERATION_OPEN : OPERATION_REOPEN;
+    String text = String.format("%s %s at %d",
+        operation, uri, targetPos);
+    changeTracker.maybeApplyConstraint(request);
     S3Object object = Invoker.once(text, uri,
         () -> client.getObject(request));
+
+    changeTracker.processResponse(object, operation,
+        targetPos);
     wrappedStream = object.getObjectContent();
     contentRangeStart = targetPos;
     if (wrappedStream == null) {
-      throw new IOException("Null IO stream from reopen of (" + reason +  ") "
-          + uri);
+      throw new PathIOException(uri,
+          "Null IO stream from " + operation + " of (" + reason +  ") ");
     }
 
     this.pos = targetPos;
@@ -323,9 +345,12 @@ public class S3AInputStream extends FSInputStream implements CanSetReadahead {
   private void lazySeek(long targetPos, long len) throws IOException {
 
     // With S3Guard, the metadatastore gave us metadata for the file in
-    // open(), so we use a slightly different retry policy.
+    // open(), so we use a slightly different retry policy, but only on initial
+    // open.  After that, an exception generally means the file has changed
+    // and there is no point retrying anymore.
     Invoker invoker = context.getReadInvoker();
-    invoker.retry("lazySeek", pathStr, true,
+    invoker.maybeRetry(streamStatistics.openOperations == 0,
+        "lazySeek", pathStr, true,
         () -> {
           //For lazy seek
           seekInStream(targetPos, len);
@@ -526,7 +551,7 @@ public class S3AInputStream extends FSInputStream implements CanSetReadahead {
    */
   @Retries.OnceRaw
   private void closeStream(String reason, long length, boolean forceAbort) {
-    if (wrappedStream != null) {
+    if (isObjectStreamOpen()) {
 
       // if the amount of data remaining in the current request is greater
       // than the readahead value: abort.
@@ -589,12 +614,11 @@ public class S3AInputStream extends FSInputStream implements CanSetReadahead {
   @InterfaceStability.Unstable
   public synchronized boolean resetConnection() throws IOException {
     checkNotClosed();
-    boolean connectionOpen = wrappedStream != null;
-    if (connectionOpen) {
+    if (isObjectStreamOpen()) {
       LOG.info("Forced reset of connection to {}", uri);
       closeStream("reset()", contentRangeFinish, true);
     }
-    return connectionOpen;
+    return isObjectStreamOpen();
   }
 
   @Override
@@ -661,7 +685,7 @@ public class S3AInputStream extends FSInputStream implements CanSetReadahead {
           "S3AInputStream{");
       sb.append(uri);
       sb.append(" wrappedStream=")
-          .append(wrappedStream != null ? "open" : "closed");
+          .append(isObjectStreamOpen() ? "open" : "closed");
       sb.append(" read policy=").append(inputPolicy);
       sb.append(" pos=").append(pos);
       sb.append(" nextReadPos=").append(nextReadPos);
@@ -670,6 +694,7 @@ public class S3AInputStream extends FSInputStream implements CanSetReadahead {
       sb.append(" contentRangeFinish=").append(contentRangeFinish);
       sb.append(" remainingInCurrentRequest=")
           .append(remainingInCurrentRequest());
+      sb.append(changeTracker);
       sb.append('\n').append(s);
       sb.append('}');
       return sb.toString();
@@ -796,5 +821,26 @@ public class S3AInputStream extends FSInputStream implements CanSetReadahead {
       Preconditions.checkArgument(readahead >= 0, E_NEGATIVE_READAHEAD_VALUE);
       return readahead;
     }
+  }
+
+  @Override
+  public synchronized void unbuffer() {
+    closeStream("unbuffer()", contentRangeFinish, false);
+  }
+
+  @Override
+  public boolean hasCapability(String capability) {
+    switch (toLowerCase(capability)) {
+    case StreamCapabilities.READAHEAD:
+    case StreamCapabilities.UNBUFFER:
+      return true;
+    default:
+      return false;
+    }
+  }
+
+  @VisibleForTesting
+  boolean isObjectStreamOpen() {
+    return wrappedStream != null;
   }
 }

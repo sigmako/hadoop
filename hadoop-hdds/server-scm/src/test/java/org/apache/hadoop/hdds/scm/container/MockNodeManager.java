@@ -43,6 +43,7 @@ import org.apache.hadoop.ozone.protocol.commands.SCMCommand;
 import org.assertj.core.util.Preconditions;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -78,7 +79,7 @@ public class MockNodeManager implements NodeManager {
   private final List<DatanodeDetails> deadNodes;
   private final Map<DatanodeDetails, SCMNodeStat> nodeMetricMap;
   private final SCMNodeStat aggregateStat;
-  private boolean chillmode;
+  private boolean safemode;
   private final Map<UUID, List<SCMCommand>> commandMap;
   private final Node2PipelineMap node2PipelineMap;
   private final Node2ContainerMap node2ContainerMap;
@@ -98,7 +99,7 @@ public class MockNodeManager implements NodeManager {
         populateNodeMetric(dd, x);
       }
     }
-    chillmode = false;
+    safemode = false;
     this.commandMap = new HashMap<>();
   }
 
@@ -132,11 +133,11 @@ public class MockNodeManager implements NodeManager {
   }
 
   /**
-   * Sets the chill mode value.
-   * @param chillmode boolean
+   * Sets the safe mode value.
+   * @param safemode boolean
    */
-  public void setChillmode(boolean chillmode) {
-    this.chillmode = chillmode;
+  public void setSafemode(boolean safemode) {
+    this.safemode = safemode;
   }
 
   /**
@@ -184,7 +185,7 @@ public class MockNodeManager implements NodeManager {
    */
   @Override
   public List<DatanodeDetails> getAllNodes() {
-    return null;
+    return new ArrayList<>(nodeMetricMap.keySet());
   }
 
   /**

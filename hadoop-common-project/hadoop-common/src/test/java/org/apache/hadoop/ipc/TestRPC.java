@@ -87,6 +87,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.apache.hadoop.test.MetricsAsserts.assertCounter;
 import static org.apache.hadoop.test.MetricsAsserts.assertCounterGt;
+import static org.apache.hadoop.test.MetricsAsserts.assertGauge;
+import static org.apache.hadoop.test.MetricsAsserts.getDoubleGauge;
 import static org.apache.hadoop.test.MetricsAsserts.getLongCounter;
 import static org.apache.hadoop.test.MetricsAsserts.getMetrics;
 import static org.junit.Assert.assertEquals;
@@ -95,6 +97,7 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
@@ -1071,10 +1074,14 @@ public class TestRPC extends TestRpcBase {
       }
       MetricsRecordBuilder rpcMetrics =
           getMetrics(server.getRpcMetrics().name());
-      assertTrue("Expected non-zero rpc queue time",
-          getLongCounter("RpcQueueTimeNumOps", rpcMetrics) > 0);
-      assertTrue("Expected non-zero rpc processing time",
-          getLongCounter("RpcProcessingTimeNumOps", rpcMetrics) > 0);
+      assertEquals("Expected correct rpc queue count",
+          3000, getLongCounter("RpcQueueTimeNumOps", rpcMetrics));
+      assertEquals("Expected correct rpc processing count",
+          3000, getLongCounter("RpcProcessingTimeNumOps", rpcMetrics));
+      assertEquals("Expected correct rpc lock wait count",
+          3000, getLongCounter("RpcLockWaitTimeNumOps", rpcMetrics));
+      assertEquals("Expected zero rpc lock wait time",
+          0, getDoubleGauge("RpcLockWaitTimeAvgTime", rpcMetrics), 0.001);
       MetricsAsserts.assertQuantileGauges("RpcQueueTime" + interval + "s",
           rpcMetrics);
       MetricsAsserts.assertQuantileGauges("RpcProcessingTime" + interval + "s",
@@ -1085,6 +1092,10 @@ public class TestRPC extends TestRpcBase {
           UserGroupInformation.getCurrentUser().getShortUserName();
       assertTrue(actualUserVsCon.contains("\"" + proxyUser + "\":1"));
       assertTrue(actualUserVsCon.contains("\"" + testUser + "\":1"));
+
+      proxy.lockAndSleep(null, newSleepRequest(5));
+      rpcMetrics = getMetrics(server.getRpcMetrics().name());
+      assertGauge("RpcLockWaitTimeAvgTime", 10000.0, rpcMetrics);
     } finally {
       if (proxy2 != null) {
         RPC.stopProxy(proxy2);
@@ -1133,7 +1144,7 @@ public class TestRPC extends TestRpcBase {
                 return null;
               }
             }));
-        verify(spy, timeout(500).times(i + 1)).add(any());
+        verify(spy, timeout(500).times(i + 1)).addInternal(any(), eq(false));
       }
       try {
         proxy.sleep(null, newSleepRequest(100));
@@ -1204,7 +1215,7 @@ public class TestRPC extends TestRpcBase {
                 return null;
               }
             }));
-        verify(spy, timeout(500).times(i + 1)).add(any());
+        verify(spy, timeout(500).times(i + 1)).addInternal(any(), eq(false));
       }
       // Start another sleep RPC call and verify the call is backed off due to
       // avg response time(3s) exceeds threshold (2s).

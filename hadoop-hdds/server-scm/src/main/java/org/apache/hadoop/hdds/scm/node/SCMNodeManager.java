@@ -17,7 +17,6 @@
  */
 package org.apache.hadoop.hdds.scm.node;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import org.apache.hadoop.hdds.protocol.proto
     .StorageContainerDatanodeProtocolProtos;
@@ -83,8 +82,7 @@ import java.util.stream.Collectors;
  */
 public class SCMNodeManager implements NodeManager {
 
-  @VisibleForTesting
-  static final Logger LOG =
+  private static final Logger LOG =
       LoggerFactory.getLogger(SCMNodeManager.class);
 
   private final NodeStateManager nodeStateManager;
@@ -102,14 +100,14 @@ public class SCMNodeManager implements NodeManager {
   public SCMNodeManager(OzoneConfiguration conf, String clusterID,
       StorageContainerManager scmManager, EventPublisher eventPublisher)
       throws IOException {
-    this.metrics = SCMNodeMetrics.create();
     this.nodeStateManager = new NodeStateManager(conf, eventPublisher);
     this.clusterID = clusterID;
     this.version = VersionInfo.getLatestVersion();
     this.commandQueue = new CommandQueue();
     this.scmManager = scmManager;
-    LOG.info("Entering startup chill mode.");
+    LOG.info("Entering startup safe mode.");
     registerMXBean();
+    this.metrics = SCMNodeMetrics.create(this);
   }
 
   private void registerMXBean() {
@@ -118,7 +116,7 @@ public class SCMNodeManager implements NodeManager {
   }
 
   private void unregisterMXBean() {
-    if(this.nmInfoBean != null) {
+    if (this.nmInfoBean != null) {
       MBeans.unregister(this.nmInfoBean);
       this.nmInfoBean = null;
     }

@@ -22,14 +22,19 @@ import java.lang.reflect.Proxy;
 import io.jaegertracing.Configuration;
 import io.jaegertracing.internal.JaegerTracer;
 import io.opentracing.Scope;
+import io.opentracing.Span;
 import io.opentracing.SpanContext;
 import io.opentracing.Tracer;
 import io.opentracing.util.GlobalTracer;
+
+import org.apache.hadoop.hdds.scm.ScmConfigKeys;
 
 /**
  * Utility class to collect all the tracing helper methods.
  */
 public final class TracingUtil {
+
+  private static final String NULL_SPAN_AS_STRING = "";
 
   private TracingUtil() {
   }
@@ -56,12 +61,27 @@ public final class TracingUtil {
    * @return encoded tracing context.
    */
   public static String exportCurrentSpan() {
-    StringBuilder builder = new StringBuilder();
     if (GlobalTracer.get().activeSpan() != null) {
+      StringBuilder builder = new StringBuilder();
       GlobalTracer.get().inject(GlobalTracer.get().activeSpan().context(),
           StringCodec.FORMAT, builder);
+      return builder.toString();
     }
-    return builder.toString();
+    return NULL_SPAN_AS_STRING;
+  }
+
+  /**
+   * Export the specific span as a string.
+   *
+   * @return encoded tracing context.
+   */
+  public static String exportSpan(Span span) {
+    if (span != null) {
+      StringBuilder builder = new StringBuilder();
+      GlobalTracer.get().inject(span.context(), StringCodec.FORMAT, builder);
+      return builder.toString();
+    }
+    return NULL_SPAN_AS_STRING;
   }
 
   /**
@@ -98,11 +118,19 @@ public final class TracingUtil {
    * @param delegate the original class instance
    * @param interfce the interface which should be implemented by the proxy
    * @param <T> the type of the interface
+   * @param conf configuration
    *
    * @return A new interface which implements interfce but delegate all the
    * calls to the delegate and also enables tracing.
    */
-  public static <T> T createProxy(T delegate, Class<T> interfce) {
+  public static <T> T createProxy(T delegate, Class<T> interfce,
+                                  org.apache.hadoop.conf.Configuration conf) {
+    boolean isTracingEnabled = conf.getBoolean(
+        ScmConfigKeys.HDDS_TRACING_ENABLED,
+        ScmConfigKeys.HDDS_TRACING_ENABLED_DEFAULT);
+    if (!isTracingEnabled) {
+      return delegate;
+    }
     Class<?> aClass = delegate.getClass();
     return  (T) Proxy.newProxyInstance(aClass.getClassLoader(),
         new Class<?>[] {interfce},

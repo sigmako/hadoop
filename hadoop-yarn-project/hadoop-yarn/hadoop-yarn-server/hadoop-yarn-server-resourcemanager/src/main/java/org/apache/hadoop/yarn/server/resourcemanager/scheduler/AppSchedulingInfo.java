@@ -24,6 +24,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListSet;
@@ -46,6 +47,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerState;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.activities.DiagnosticsCollector;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.SchedulingMode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.ApplicationSchedulingConfig;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.ContainerRequest;
@@ -497,12 +499,15 @@ public class AppSchedulingInfo {
   public PendingAsk getNextPendingAsk() {
     readLock.lock();
     try {
-      SchedulerRequestKey firstRequestKey = schedulerKeys.first();
-      return getPendingAsk(firstRequestKey, ResourceRequest.ANY);
+      if (!schedulerKeys.isEmpty()) {
+        SchedulerRequestKey firstRequestKey = schedulerKeys.first();
+        return getPendingAsk(firstRequestKey, ResourceRequest.ANY);
+      } else {
+        return null;
+      }
     } finally {
       readLock.unlock();
     }
-
   }
 
   public PendingAsk getPendingAsk(SchedulerRequestKey schedulerKey) {
@@ -719,13 +724,10 @@ public class AppSchedulingInfo {
   public static void updateMetrics(ApplicationId applicationId, NodeType type,
       SchedulerNode node, Container containerAllocated, String user,
       Queue queue) {
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("allocate: applicationId=" + applicationId + " container="
-          + containerAllocated.getId() + " host=" + containerAllocated
-          .getNodeId().toString() + " user=" + user + " resource="
-          + containerAllocated.getResource() + " type="
-          + type);
-    }
+    LOG.debug("allocate: applicationId={} container={} host={} user={}"
+        + " resource={} type={}", applicationId, containerAllocated.getId(),
+        containerAllocated.getNodeId(), user, containerAllocated.getResource(),
+        type);
     if(node != null) {
       queue.getMetrics().allocateResources(node.getPartition(), user, 1,
           containerAllocated.getResource(), true);
@@ -768,16 +770,18 @@ public class AppSchedulingInfo {
    * @param schedulerKey schedulerKey
    * @param schedulerNode schedulerNode
    * @param schedulingMode schedulingMode
+   * @param dcOpt optional diagnostics collector
    * @return can use the node or not.
    */
   public boolean precheckNode(SchedulerRequestKey schedulerKey,
-      SchedulerNode schedulerNode, SchedulingMode schedulingMode) {
+      SchedulerNode schedulerNode, SchedulingMode schedulingMode,
+      Optional<DiagnosticsCollector> dcOpt) {
     this.readLock.lock();
     try {
       AppPlacementAllocator ap =
           schedulerKeyToAppPlacementAllocator.get(schedulerKey);
       return (ap != null) && ap.precheckNode(schedulerNode,
-          schedulingMode);
+          schedulingMode, dcOpt);
     } finally {
       this.readLock.unlock();
     }

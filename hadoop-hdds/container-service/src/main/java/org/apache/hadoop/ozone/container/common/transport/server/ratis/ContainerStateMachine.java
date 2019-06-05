@@ -25,7 +25,6 @@ import org.apache.commons.io.IOUtils;
 import org.apache.hadoop.hdds.HddsUtils;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos;
 
-import io.opentracing.Scope;
 import org.apache.hadoop.hdds.scm.container.common.helpers.StorageContainerException;
 import org.apache.hadoop.ozone.container.common.helpers.ContainerUtils;
 import org.apache.ratis.proto.RaftProtos.RaftPeerRole;
@@ -51,7 +50,6 @@ import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos
     .ReadChunkRequestProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos
     .ReadChunkResponseProto;
-import org.apache.hadoop.hdds.tracing.TracingUtil;
 import org.apache.hadoop.ozone.container.common.interfaces.ContainerDispatcher;
 import org.apache.hadoop.hdds.security.token.TokenVerifier;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -142,7 +140,6 @@ public class ContainerStateMachine extends BaseStateMachine {
   private ExecutorService[] executors;
   private final int numExecutors;
   private final Map<Long, Long> applyTransactionCompletionMap;
-  private long lastIndex;
   private final Cache<Long, ByteString> stateMachineDataCache;
   private final boolean isBlockTokenEnabled;
   private final TokenVerifier tokenVerifier;
@@ -165,7 +162,6 @@ public class ContainerStateMachine extends BaseStateMachine {
     this.executors = executors.toArray(new ExecutorService[numExecutors]);
     this.writeChunkFutureMap = new ConcurrentHashMap<>();
     applyTransactionCompletionMap = new ConcurrentHashMap<>();
-    this.lastIndex = RaftServerConstants.INVALID_LOG_INDEX;
     stateMachineDataCache = CacheBuilder.newBuilder()
         .expireAfterAccess(expiryInterval, TimeUnit.MILLISECONDS)
         // set the limit on no of cached entries equal to no of max threads
@@ -204,7 +200,6 @@ public class ContainerStateMachine extends BaseStateMachine {
           "The snapshot info is null." + "Setting the last applied index to:"
               + empty);
       setLastAppliedTermIndex(empty);
-      lastIndex = RaftServerConstants.INVALID_LOG_INDEX;
       return RaftServerConstants.INVALID_LOG_INDEX;
     }
 
@@ -213,7 +208,6 @@ public class ContainerStateMachine extends BaseStateMachine {
         SimpleStateMachineStorage.getTermIndexFromSnapshotFile(snapshotFile);
     LOG.info("Setting the last applied index to " + last);
     setLastAppliedTermIndex(last);
-    lastIndex = last.getIndex();
 
     // initialize the dispatcher with snapshot so that it build the missing
     // container list
@@ -271,51 +265,50 @@ public class ContainerStateMachine extends BaseStateMachine {
     final ContainerCommandRequestProto proto =
         getContainerCommandRequestProto(request.getMessage().getContent());
     Preconditions.checkArgument(request.getRaftGroupId().equals(gid));
-    try (Scope scope = TracingUtil
-        .importAndCreateScope(proto.getCmdType().name(), proto.getTraceID())) {
-      try {
-        dispatcher.validateContainerCommand(proto);
-      } catch (IOException ioe) {
-        TransactionContext ctxt = TransactionContext.newBuilder()
-            .setClientRequest(request)
-            .setStateMachine(this)
-            .setServerRole(RaftPeerRole.LEADER)
-            .build();
-        ctxt.setException(ioe);
-        return ctxt;
-      }
-      if (proto.getCmdType() == Type.WriteChunk) {
-        final WriteChunkRequestProto write = proto.getWriteChunk();
-        // create the log entry proto
-        final WriteChunkRequestProto commitWriteChunkProto =
-            WriteChunkRequestProto.newBuilder()
-                .setBlockID(write.getBlockID())
-                .setChunkData(write.getChunkData())
-                // skipping the data field as it is
-                // already set in statemachine data proto
-                .build();
-        ContainerCommandRequestProto commitContainerCommandProto =
-            ContainerCommandRequestProto
-                .newBuilder(proto)
-                .setWriteChunk(commitWriteChunkProto)
-                .build();
-
-        return TransactionContext.newBuilder()
-            .setClientRequest(request)
-            .setStateMachine(this)
-            .setServerRole(RaftPeerRole.LEADER)
-            .setStateMachineData(write.getData())
-            .setLogData(commitContainerCommandProto.toByteString())
-            .build();
-      } else {
-        return TransactionContext.newBuilder()
-            .setClientRequest(request)
-            .setStateMachine(this)
-            .setServerRole(RaftPeerRole.LEADER)
-            .setLogData(request.getMessage().getContent())
-            .build();
-      }
+    try {
+      dispatcher.validateContainerCommand(proto);
+    } catch (IOException ioe) {
+      TransactionContext ctxt = TransactionContext.newBuilder()
+          .setClientRequest(request)
+          .setStateMachine(this)
+          .setServerRole(RaftPeerRole.LEADER)
+          .build();
+      ctxt.setException(ioe);
+      return ctxt;
     }
+    if (proto.getCmdType() == Type.WriteChunk) {
+      final WriteChunkRequestProto write = proto.getWriteChunk();
+      // create the log entry proto
+      final WriteChunkRequestProto commitWriteChunkProto =
+          WriteChunkRequestProto.newBuilder()
+              .setBlockID(write.getBlockID())
+              .setChunkData(write.getChunkData())
+              // skipping the data field as it is
+              // already set in statemachine data proto
+              .build();
+      ContainerCommandRequestProto commitContainerCommandProto =
+          ContainerCommandRequestProto
+              .newBuilder(proto)
+              .setWriteChunk(commitWriteChunkProto)
+              .setTraceID(proto.getTraceID())
+              .build();
+
+      return TransactionContext.newBuilder()
+          .setClientRequest(request)
+          .setStateMachine(this)
+          .setServerRole(RaftPeerRole.LEADER)
+          .setStateMachineData(write.getData())
+          .setLogData(commitContainerCommandProto.toByteString())
+          .build();
+    } else {
+      return TransactionContext.newBuilder()
+          .setClientRequest(request)
+          .setStateMachine(this)
+          .setServerRole(RaftPeerRole.LEADER)
+          .setLogData(request.getMessage().getContent())
+          .build();
+    }
+
   }
 
   private ByteString getStateMachineData(StateMachineLogEntryProto entryProto) {
@@ -398,6 +391,8 @@ public class ContainerStateMachine extends BaseStateMachine {
     // Remove the future once it finishes execution from the
     // writeChunkFutureMap.
     writeChunkFuture.thenApply(r -> {
+      metrics.incNumBytesWrittenCount(
+          requestProto.getWriteChunk().getChunkData().getLen());
       writeChunkFutureMap.remove(entryIndex);
       LOG.debug("writeChunk writeStateMachineData  completed: blockId " + write
           .getBlockID() + " logIndex " + entryIndex + " chunkName " + write
@@ -445,12 +440,12 @@ public class ContainerStateMachine extends BaseStateMachine {
   @Override
   public CompletableFuture<Message> query(Message request) {
     try {
-      metrics.incNumReadStateMachineOps();
+      metrics.incNumQueryStateMachineOps();
       final ContainerCommandRequestProto requestProto =
           getContainerCommandRequestProto(request.getContent());
       return CompletableFuture.completedFuture(runCommand(requestProto, null));
     } catch (IOException e) {
-      metrics.incNumReadStateMachineFails();
+      metrics.incNumQueryStateMachineFails();
       return completeExceptionally(e);
     }
   }
@@ -527,10 +522,14 @@ public class ContainerStateMachine extends BaseStateMachine {
   public CompletableFuture<ByteString> readStateMachineData(
       LogEntryProto entry) {
     StateMachineLogEntryProto smLogEntryProto = entry.getStateMachineLogEntry();
+    metrics.incNumReadStateMachineOps();
     if (!getStateMachineData(smLogEntryProto).isEmpty()) {
       return CompletableFuture.completedFuture(ByteString.EMPTY);
     }
     try {
+      // the stateMachine data is not present in the stateMachine cache,
+      // increment the stateMachine cache miss count
+      metrics.incNumReadStateMachineMissCount();
       final ContainerCommandRequestProto requestProto =
           getContainerCommandRequestProto(
               entry.getStateMachineLogEntry().getLogData());
@@ -544,6 +543,7 @@ public class ContainerStateMachine extends BaseStateMachine {
                 getCachedStateMachineData(entry.getIndex(), entry.getTerm(),
                     requestProto));
           } catch (ExecutionException e) {
+            metrics.incNumReadStateMachineFails();
             future.completeExceptionally(e);
           }
           return future;
@@ -554,6 +554,7 @@ public class ContainerStateMachine extends BaseStateMachine {
             + " cannot have state machine data");
       }
     } catch (Exception e) {
+      metrics.incNumReadStateMachineFails();
       LOG.error("unable to read stateMachineData:" + e);
       return completeExceptionally(e);
     }
@@ -575,6 +576,18 @@ public class ContainerStateMachine extends BaseStateMachine {
     }
   }
 
+  /**
+   * Notifies the state machine about index updates because of entries
+   * which do not cause state machine update, i.e. conf entries, metadata
+   * entries
+   * @param term term of the log entry
+   * @param index index of the log entry
+   */
+  @Override
+  public void notifyIndexUpdate(long term, long index) {
+    applyTransactionCompletionMap.put(index, term);
+  }
+
   /*
    * ApplyTransaction calls in Ratis are sequential.
    */
@@ -586,14 +599,6 @@ public class ContainerStateMachine extends BaseStateMachine {
             .setTerm(trx.getLogEntry().getTerm())
             .setLogIndex(index);
 
-    // ApplyTransaction call can come with an entryIndex much greater than
-    // lastIndex updated because in between entries in the raft log can be
-    // appended because raft config persistence. Just add a dummy entry
-    // for those.
-    for (long i = lastIndex + 1; i < index; i++) {
-      LOG.info("Gap in indexes at:{} detected, adding dummy entries ", i);
-      applyTransactionCompletionMap.put(i, trx.getLogEntry().getTerm());
-    }
     try {
       metrics.incNumApplyTransactionsOps();
       ContainerCommandRequestProto requestProto =
@@ -616,12 +621,15 @@ public class ContainerStateMachine extends BaseStateMachine {
           .supplyAsync(() -> runCommand(requestProto, builder.build()),
               getCommandExecutor(requestProto));
 
-      lastIndex = index;
       future.thenAccept(m -> {
         final Long previous =
             applyTransactionCompletionMap
                 .put(index, trx.getLogEntry().getTerm());
         Preconditions.checkState(previous == null);
+        if (cmdType == Type.WriteChunk || cmdType == Type.PutSmallFile) {
+          metrics.incNumBytesCommittedCount(
+              requestProto.getWriteChunk().getChunkData().getLen());
+        }
         updateLastApplied();
       });
       return future;

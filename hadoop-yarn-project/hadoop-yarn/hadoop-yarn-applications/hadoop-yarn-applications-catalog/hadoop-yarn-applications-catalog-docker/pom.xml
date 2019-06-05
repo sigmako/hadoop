@@ -14,7 +14,7 @@
    limitations under the License.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/maven-v4_0_0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.apache.hadoop</groupId>
   <artifactId>hadoop-yarn-applications-catalog-docker</artifactId>
@@ -26,8 +26,8 @@
     <version>3.3.0-SNAPSHOT</version>
   </parent>
 
-  <name>YARN Application Catalog Docker Image</name>
-  <url>http://maven.apache.org</url>
+  <name>Apache Hadoop YARN Application Catalog Docker Image</name>
+  <url>https://maven.apache.org</url>
   <dependencies>
     <dependency>
       <groupId>org.apache.hadoop</groupId>
@@ -52,19 +52,12 @@
 
   <profiles>
     <profile>
-      <activation>
-        <file>
-          <exists>/var/run/docker.sock</exists>
-        </file>
-        <os><family>linux</family></os>
-      </activation>
-      <id>application-catalog-docker-image</id>
+      <id>docker</id>
       <build>
         <plugins>
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-dependency-plugin</artifactId>
-            <version>3.0.1</version>
             <executions>
               <execution>
                 <id>copy-dependencies</id>

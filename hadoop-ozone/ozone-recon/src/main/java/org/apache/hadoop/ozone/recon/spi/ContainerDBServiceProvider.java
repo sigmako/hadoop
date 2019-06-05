@@ -23,12 +23,24 @@ import java.util.Map;
 
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.ozone.recon.api.types.ContainerKeyPrefix;
+import org.apache.hadoop.ozone.recon.api.types.ContainerMetadata;
+import org.apache.hadoop.utils.db.TableIterator;
 
 /**
  * The Recon Container DB Service interface.
  */
 @InterfaceStability.Unstable
 public interface ContainerDBServiceProvider {
+
+  /**
+   * Create new container DB and bulk Store the container to Key prefix
+   * mapping.
+   * @param containerKeyPrefixCounts Map of containerId, key-prefix tuple to
+   *                                 key count.
+   */
+  void initNewContainerDB(Map<ContainerKeyPrefix, Integer>
+                                    containerKeyPrefixCounts)
+      throws IOException;
 
   /**
    * Store the container to Key prefix mapping into the Recon Container DB.
@@ -54,5 +66,29 @@ public interface ContainerDBServiceProvider {
    * @param containerId the given containerId.
    * @return Map of Key prefix -> count.
    */
-  Map<String, Integer> getKeyPrefixesForContainer(long containerId);
+  Map<ContainerKeyPrefix, Integer> getKeyPrefixesForContainer(long containerId)
+      throws IOException;
+
+  /**
+   * Get a Map of containerID, containerMetadata of all Containers.
+   *
+   * @return Map of containerID -> containerMetadata.
+   * @throws IOException
+   */
+  Map<Long, ContainerMetadata> getContainers() throws IOException;
+
+  /**
+   * Delete an entry in the container DB.
+   * @param containerKeyPrefix container key prefix to be deleted.
+   * @throws IOException exception.
+   */
+  void deleteContainerMapping(ContainerKeyPrefix containerKeyPrefix)
+      throws IOException;
+
+  /**
+   * Get iterator to the entire container DB.
+   * @return TableIterator
+   * @throws IOException exception
+   */
+  TableIterator getContainerTableIterator() throws IOException;
 }

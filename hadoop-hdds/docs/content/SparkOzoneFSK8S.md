@@ -78,10 +78,12 @@ And create a custom `core-site.xml`:
 <configuration>
     <property>
         <name>fs.o3fs.impl</name>
-        <value>org.apache.hadoop.fs.ozone.OzoneFileSystem</value>
+        <value>org.apache.hadoop.fs.ozone.BasicOzoneFileSystem</value>
     </property>
 </configuration>
 ```
+
+_Note_: You may also use `org.apache.hadoop.fs.ozone.OzoneFileSystem` without the `Basic` prefix. The `Basic` version doesn't support FS statistics and encryption zones but can work together with older hadoop versions.
 
 Copy the `ozonefs.jar` file from an ozone distribution (__use the legacy version!__)
 
@@ -118,7 +120,7 @@ Download any text file and put it to the `/tmp/alice.txt` first.
 kubectl port-forward s3g-0 9878:9878
 aws s3api --endpoint http://localhost:9878 create-bucket --bucket=test
 aws s3api --endpoint http://localhost:9878 put-object --bucket test --key alice.txt --body /tmp/alice.txt
-kubectl exec -it scm-0 ozone sh bucket path test
+kubectl exec -it scm-0 ozone s3 path test
 ```
 
 The output of the last command is something like this:
@@ -134,17 +136,17 @@ Write down the ozone filesystem uri as it should be used with the spark-submit c
 
 ```
 kubectl create serviceaccount spark -n yournamespace
-kubectl create clusterrolebinding spark-role --clusterrole=edit --serviceaccount=poc:yournamespace --namespace=yournamespace
+kubectl create clusterrolebinding spark-role --clusterrole=edit --serviceaccount=yournamespace:spark --namespace=yournamespace
 ```
 ## Execute the job
 
-Execute the following spar-submit command, but change at least the following values:
+Execute the following spark-submit command, but change at least the following values:
 
  * the kubernetes master url (you can check your ~/.kube/config to find the actual value)
  * the kubernetes namespace (yournamespace in this example)
  * serviceAccountName (you can use the _spark_ value if you folllowed the previous steps)
  * container.image (in this example this is myrepo/spark-ozone. This is pushed to the registry in the previous steps)
- * location of the input file (o3fs://...), use the string which is identified earlier with the `ozone sh bucket path` command
+ * location of the input file (o3fs://...), use the string which is identified earlier with the `ozone s3 path <bucketname>` command
 
 ```
 bin/spark-submit \

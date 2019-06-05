@@ -520,7 +520,7 @@ public class BlockManager implements BlockStatsMXBean {
     this.redundancyRecheckIntervalMs = conf.getTimeDuration(
         DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY,
         DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_DEFAULT,
-        TimeUnit.SECONDS) * 1000;
+        TimeUnit.SECONDS, TimeUnit.MILLISECONDS);
 
     this.storageInfoDefragmentInterval =
       conf.getLong(
@@ -733,7 +733,7 @@ public class BlockManager implements BlockStatsMXBean {
 
   /** Dump meta data to out. */
   public void metaSave(PrintWriter out) {
-    assert namesystem.hasWriteLock(); // TODO: block manager read lock and NS write lock
+    assert namesystem.hasReadLock(); // TODO: block manager read lock and NS write lock
     final List<DatanodeDescriptor> live = new ArrayList<DatanodeDescriptor>();
     final List<DatanodeDescriptor> dead = new ArrayList<DatanodeDescriptor>();
     datanodeManager.fetchDatanodes(live, dead, false);
@@ -1484,9 +1484,13 @@ public class BlockManager implements BlockStatsMXBean {
    */
   public boolean isSufficientlyReplicated(BlockInfo b) {
     // Compare against the lesser of the minReplication and number of live DNs.
-    final int replication =
-        Math.min(minReplication, getDatanodeManager().getNumLiveDataNodes());
-    return countNodes(b).liveReplicas() >= replication;
+    final int liveReplicas = countNodes(b).liveReplicas();
+    if (liveReplicas >= minReplication) {
+      return true;
+    }
+    // getNumLiveDataNodes() is very expensive and we minimize its use by
+    // comparing with minReplication first.
+    return liveReplicas >= getDatanodeManager().getNumLiveDataNodes();
   }
 
   /** Get all blocks with location information from a datanode. */
@@ -4231,21 +4235,41 @@ public class BlockManager implements BlockStatsMXBean {
     if (!isPopulatingReplQueues()) {
       return;
     }
-    final Iterator<BlockInfo> it = srcNode.getBlockIterator();
+
     int numExtraRedundancy = 0;
-    while(it.hasNext()) {
-      final BlockInfo block = it.next();
-      if (block.isDeleted()) {
-        //Orphan block, will be handled eventually, skip
+    for (DatanodeStorageInfo datanodeStorageInfo : srcNode.getStorageInfos()) {
+      // the namesystem lock is released between iterations. Make sure the
+      // storage is not removed before continuing.
+      if (srcNode.getStorageInfo(datanodeStorageInfo.getStorageID()) == null) {
         continue;
       }
-      int expectedReplication = this.getExpectedRedundancyNum(block);
-      NumberReplicas num = countNodes(block);
-      if (shouldProcessExtraRedundancy(num, expectedReplication)) {
-        // extra redundancy block
-        processExtraRedundancyBlock(block, (short) expectedReplication, null,
-            null);
-        numExtraRedundancy++;
+      final Iterator<BlockInfo> it = datanodeStorageInfo.getBlockIterator();
+      while(it.hasNext()) {
+        final BlockInfo block = it.next();
+        if (block.isDeleted()) {
+          //Orphan block, will be handled eventually, skip
+          continue;
+        }
+        int expectedReplication = this.getExpectedRedundancyNum(block);
+        NumberReplicas num = countNodes(block);
+        if (shouldProcessExtraRedundancy(num, expectedReplication)) {
+          // extra redundancy block
+          processExtraRedundancyBlock(block, (short) expectedReplication, null,
+              null);
+          numExtraRedundancy++;
+        }
+      }
+      // When called by tests like TestDefaultBlockPlacementPolicy.
+      // testPlacementWithLocalRackNodesDecommissioned, it is not protected by
+      // lock, only when called by DatanodeManager.refreshNodes have writeLock
+      if (namesystem.hasWriteLock()) {
+        namesystem.writeUnlock();
+        try {
+          Thread.sleep(1);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+        namesystem.writeLock();
       }
     }
     LOG.info("Invalidated {} extra redundancy blocks on {} after "

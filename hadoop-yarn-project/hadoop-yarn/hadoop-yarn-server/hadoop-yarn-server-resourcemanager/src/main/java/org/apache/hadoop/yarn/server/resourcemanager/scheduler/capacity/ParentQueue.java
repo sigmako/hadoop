@@ -479,6 +479,13 @@ public class ParentQueue extends AbstractCSQueue {
   }
 
   @Override
+  public void submitApplicationAttempt(FiCaSchedulerApp application,
+      String userName, boolean isMoveApp) {
+    throw new UnsupportedOperationException("Submission of application attempt"
+        + " to parent queue is not supported");
+  }
+
+  @Override
   public void finishApplicationAttempt(FiCaSchedulerApp application,
       String queue) {
     // finish attempt logic.
@@ -593,10 +600,8 @@ public class ParentQueue extends AbstractCSQueue {
         NodeType.NODE_LOCAL);
 
     while (canAssign(clusterResource, node)) {
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Trying to assign containers to child-queue of "
-            + getQueueName());
-      }
+      LOG.debug("Trying to assign containers to child-queue of {}",
+          getQueueName());
 
       // Are we over maximum-capacity for this queue?
       // This will also consider parent's limits and also continuous reservation
@@ -626,6 +631,10 @@ public class ParentQueue extends AbstractCSQueue {
           assignedToChild.getRequestLocalityType());
       assignment.setExcessReservation(assignedToChild.getExcessReservation());
       assignment.setContainersToKill(assignedToChild.getContainersToKill());
+      assignment.setFulfilledReservation(
+          assignedToChild.isFulfilledReservation());
+      assignment.setFulfilledReservedContainer(
+          assignedToChild.getFulfilledReservedContainer());
 
       // Done if no child-queue assigned anything
       if (Resources.greaterThan(resourceCalculator, clusterResource,
@@ -781,10 +790,8 @@ public class ParentQueue extends AbstractCSQueue {
     for (Iterator<CSQueue> iter = sortAndGetChildrenAllocationIterator(
         candidates.getPartition()); iter.hasNext(); ) {
       CSQueue childQueue = iter.next();
-      if(LOG.isDebugEnabled()) {
-        LOG.debug("Trying to assign to queue: " + childQueue.getQueuePath()
-          + " stats: " + childQueue);
-      }
+      LOG.debug("Trying to assign to queue: {} stats: {}",
+          childQueue.getQueuePath(), childQueue);
 
       // Get ResourceLimits of child queue before assign containers
       ResourceLimits childLimits =
@@ -857,10 +864,7 @@ public class ParentQueue extends AbstractCSQueue {
       super.releaseResource(clusterResource, releasedResource,
           node.getPartition());
 
-      if (LOG.isDebugEnabled()) {
-        LOG.debug(
-            "completedContainer " + this + ", cluster=" + clusterResource);
-      }
+      LOG.debug("completedContainer {}, cluster={}", this, clusterResource);
 
     } finally {
       writeLock.unlock();

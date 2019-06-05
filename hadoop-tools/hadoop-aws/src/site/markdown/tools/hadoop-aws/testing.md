@@ -237,6 +237,16 @@ define the target region in `auth-keys.xml`.
   <value>s3.eu-central-1.amazonaws.com</value>
 </property>
 ```
+
+Alternatively you can use endpoints defined in [core-site.xml](../../../../test/resources/core-site.xml).
+
+```xml
+<property>
+  <name>fs.s3a.endpoint</name>
+  <value>${frankfurt.endpoint}</value>
+</property>
+```
+
 This is used for all tests expect for scale tests using a Public CSV.gz file
 (see below)
 
@@ -288,6 +298,24 @@ plugin:
 ```bash
 mvn surefire-report:failsafe-report-only
 ```
+## <a name="versioning"></a> Testing Versioned Stores
+
+Some tests (specifically some in `ITestS3ARemoteFileChanged`) require
+a versioned bucket for full test coverage as well as S3Guard being enabled.
+
+To enable versioning in a bucket.
+
+1. In the AWS S3 Management console find and select the bucket.
+1. In the Properties "tab", set it as versioned.
+1. <i>Important</i> Create a lifecycle rule to automatically clean up old versions
+after 24h. This avoids running up bills for objects which tests runs create and
+then delete.
+1. Run the tests again.
+
+Once a bucket is converted to being versioned, it cannot be converted back
+to being unversioned.
+
+
 ## <a name="scale"></a> Scale Tests
 
 There are a set of tests designed to measure the scalability and performance
@@ -300,7 +328,7 @@ By their very nature they are slow. And, as their execution time is often
 limited by bandwidth between the computer running the tests and the S3 endpoint,
 parallel execution does not speed these tests up.
 
-***Note: Running scale tests with -Ds3guard and -Ddynamo requires that
+***Note: Running scale tests with `-Ds3guard` and `-Ddynamo` requires that
 you use a private, testing-only DynamoDB table.*** The tests do disruptive
 things such as deleting metadata and setting the provisioned throughput
 to very low values.
@@ -1064,6 +1092,12 @@ If the `s3guard` profile *is* set,
 property should be configured, and the name of that table should be different
  than what is used for fs.s3a.s3guard.ddb.table. The test table is destroyed
  and modified multiple times during the test.
+ 1. Several of the tests create and destroy DynamoDB tables. The table names
+ are prefixed with the value defined by
+ `fs.s3a.s3guard.test.dynamo.table.prefix` (default="s3guard.test."). The user
+ executing the tests will need sufficient privilege to create and destroy such
+ tables. If the tests abort uncleanly, these tables may be left behind,
+ incurring AWS charges.
 
 
 ### Scale Testing MetadataStore Directly

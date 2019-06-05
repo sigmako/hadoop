@@ -1345,6 +1345,14 @@
   </property>
 
   <property>
+    <description>If set to true, the older application log directory
+    will be considered while fetching application logs.
+    </description>
+    <name>yarn.nodemanager.remote-app-log-dir-include-older</name>
+    <value>true</value>
+  </property>
+
+  <property>
     <description>Generate additional logs about container launches.
     Currently, this creates a copy of the launch script and lists the
     directory contents of the container work dir. When listing directory
@@ -1801,6 +1809,13 @@
       networks.</description>
     <name>yarn.nodemanager.runtime.linux.docker.default-container-network</name>
     <value>host</value>
+  </property>
+
+  <property>
+    <description>The set of runtimes allowed when launching containers using the
+      DockerContainerRuntime.</description>
+    <name>yarn.nodemanager.runtime.linux.docker.allowed-container-runtimes</name>
+    <value>runc</value>
   </property>
 
   <property>
@@ -2591,6 +2606,13 @@
   </property>
 
   <property>
+    <description>The setting that decides the capacity of the queue to hold
+    asynchronous timeline entities.</description>
+    <name>yarn.timeline-service.writer.async.queue.capacity</name>
+    <value>100</value>
+  </property>
+
+  <property>
     <description>Time period till which the application collector will be alive
      in NM, after the  application master container finishes.</description>
     <name>yarn.timeline-service.app-collector.linger-period.ms</name>
@@ -3328,6 +3350,15 @@
 
   <property>
     <description>
+      Maximum number of opportunistic containers to be allocated per
+      Application Master heartbeat.
+    </description>
+    <name>yarn.resourcemanager.opportunistic.max.container-allocation.per.am.heartbeat</name>
+    <value>-1</value>
+  </property>
+
+  <property>
+    <description>
     Number of nodes to be used by the Opportunistic Container Allocator for
     dispatching containers during container allocation.
     </description>
@@ -3603,17 +3634,6 @@
     <value>64</value>
   </property>
 
-  <property>
-    <description>
-      Flag to enable cross-origin (CORS) support for timeline service v1.x or
-      Timeline Reader in timeline service v2. For timeline service v2, also add
-      org.apache.hadoop.security.HttpCrossOriginFilterInitializer to the
-      configuration hadoop.http.filter.initializers in core-site.xml.
-    </description>
-    <name>yarn.timeline-service.http-cross-origin.enabled</name>
-    <value>false</value>
-  </property>
- 
   <property>
     <description>
       Flag to enable cross-origin (CORS) support for timeline service v1.x or
@@ -4166,5 +4186,29 @@
     </description>
     <name>yarn.nodemanager.csi-driver.names</name>
     <value></value>
+  </property>
+
+  <property>
+    <description>The cleanup interval for activities in milliseconds.</description>
+    <name>yarn.resourcemanager.activities-manager.cleanup-interval-ms</name>
+    <value>5000</value>
+  </property>
+
+  <property>
+    <description>Time to live for scheduler activities in milliseconds.</description>
+    <name>yarn.resourcemanager.activities-manager.scheduler-activities.ttl-ms</name>
+    <value>600000</value>
+  </property>
+
+  <property>
+    <description>Time to live for app activities in milliseconds.</description>
+    <name>yarn.resourcemanager.activities-manager.app-activities.ttl-ms</name>
+    <value>600000</value>
+  </property>
+
+  <property>
+    <description>Max queue length for app activities.</description>
+    <name>yarn.resourcemanager.activities-manager.app-activities.max-queue-length</name>
+    <value>1000</value>
   </property>
 </configuration>

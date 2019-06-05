@@ -46,6 +46,7 @@ import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.KeyValue;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos
     .PutSmallFileRequestProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.Type;
+import org.apache.hadoop.hdds.scm.ByteStringHelper;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
 import org.apache.hadoop.hdds.scm.container.common.helpers
     .StorageContainerException;
@@ -146,6 +147,10 @@ public class KeyValueHandler extends Handler {
     // this handler lock is used for synchronizing createContainer Requests,
     // so using a fair lock here.
     containerCreationLock = new AutoCloseableLock(new ReentrantLock(true));
+    boolean isUnsafeByteOperationsEnabled = conf.getBoolean(
+        OzoneConfigKeys.OZONE_UNSAFEBYTEOPERATIONS_ENABLED,
+        OzoneConfigKeys.OZONE_UNSAFEBYTEOPERATIONS_ENABLED_DEFAULT);
+    ByteStringHelper.init(isUnsafeByteOperationsEnabled);
   }
 
   @VisibleForTesting
@@ -246,7 +251,7 @@ public class KeyValueHandler extends Handler {
         // The create container request for an already existing container can
         // arrive in case the ContainerStateMachine reapplies the transaction
         // on datanode restart. Just log a warning msg here.
-        LOG.warn("Container already exists." +
+        LOG.debug("Container already exists." +
             "container Id " + containerID);
       }
     } catch (StorageContainerException ex) {
@@ -888,6 +893,14 @@ public class KeyValueHandler extends Handler {
   }
 
   @Override
+  public void markContainerUhealthy(Container container)
+      throws IOException {
+    // this will mark the container unhealthy and a close container action will
+    // be sent from the dispatcher ton SCM to close down this container.
+    container.markContainerUnhealthy();
+  }
+
+  @Override
   public void quasiCloseContainer(Container container)
       throws IOException {
     final State state = container.getContainerState();
@@ -914,6 +927,12 @@ public class KeyValueHandler extends Handler {
     // Close call is idempotent.
     if (state == State.CLOSED) {
       return;
+    }
+    if (state == State.UNHEALTHY) {
+      throw new StorageContainerException(
+          "Cannot close container #" + container.getContainerData()
+              .getContainerID() + " while in " + state + " state.",
+          ContainerProtos.Result.CONTAINER_UNHEALTHY);
     }
     // The container has to be either in CLOSING or in QUASI_CLOSED state.
     if (state != State.CLOSING && state != State.QUASI_CLOSED) {

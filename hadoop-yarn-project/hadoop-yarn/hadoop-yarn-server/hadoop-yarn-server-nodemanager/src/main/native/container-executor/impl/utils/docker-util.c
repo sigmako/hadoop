@@ -115,7 +115,15 @@ int check_trusted_image(const struct configuration *command_config, const struct
   int ret = 0;
   int no_registry_prefix_in_image_name = 0;
   char *image_name = get_configuration_value("image", DOCKER_COMMAND_FILE_SECTION, command_config);
-  char **privileged_registry = get_configuration_values_delimiter("docker.trusted.registries", CONTAINER_EXECUTOR_CFG_DOCKER_SECTION, conf, ",");
+  char *privileged = NULL;
+  char **privileged_registry = NULL;
+  privileged = get_configuration_value("privileged", DOCKER_COMMAND_FILE_SECTION, command_config);
+  if (privileged != NULL && strcasecmp(privileged, "true") == 0 ) {
+    privileged_registry = get_configuration_values_delimiter("docker.privileged-containers.registries", CONTAINER_EXECUTOR_CFG_DOCKER_SECTION, conf, ",");
+  }
+  if (privileged_registry == NULL) {
+    privileged_registry = get_configuration_values_delimiter("docker.trusted.registries", CONTAINER_EXECUTOR_CFG_DOCKER_SECTION, conf, ",");
+  }
   char *registry_ptr = NULL;
   if (image_name == NULL) {
     ret = INVALID_DOCKER_IMAGE_NAME;
@@ -158,6 +166,7 @@ int check_trusted_image(const struct configuration *command_config, const struct
   }
 
 free_and_exit:
+  free(privileged);
   free(image_name);
   free_values(privileged_registry);
   return ret;
@@ -713,11 +722,19 @@ int get_docker_rm_command(const char *command_file, const struct configuration *
   }
 
   ret = add_to_args(args, DOCKER_RM_COMMAND);
-  if (ret == 0) {
-    ret = add_to_args(args, container_name);
-    if (ret != 0) {
-      ret = BUFFER_TOO_SMALL;
-    }
+  if (ret != 0) {
+    ret = BUFFER_TOO_SMALL;
+    goto free_and_exit;
+  }
+  ret = add_to_args(args, "-f");
+  if (ret != 0) {
+    ret = BUFFER_TOO_SMALL;
+    goto free_and_exit;
+  }
+  ret = add_to_args(args, container_name);
+  if (ret != 0) {
+    ret = BUFFER_TOO_SMALL;
+    goto free_and_exit;
   }
 free_and_exit:
   free(container_name);
@@ -1445,14 +1462,22 @@ static int check_privileges(const char *user) {
     exit(INITIALIZE_USER_FAILED);
   }
 
+#ifdef __linux__
   int rc = getgrouplist(user, pw->pw_gid, groups, &ngroups);
+#else
+  int rc = getgrouplist(user, pw->pw_gid, (int *)groups, &ngroups);
+#endif
   if (rc < 0) {
     groups = (gid_t *) alloc_and_clear_memory(ngroups, sizeof(gid_t));
     if (groups == NULL) {
       fprintf(ERRORFILE, "Failed to allocate buffer for group lookup for user %s.\n", user);
       exit(OUT_OF_MEMORY);
     }
+#ifdef __linux__
     if (getgrouplist(user, pw->pw_gid, groups, &ngroups) == -1) {
+#else
+    if (getgrouplist(user, pw->pw_gid, (int *)groups, &ngroups) == -1) {
+#endif
       fprintf(ERRORFILE, "Fail to lookup groups for user %s.\n", user);
       ret = 2;
     }

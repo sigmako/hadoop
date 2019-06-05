@@ -33,7 +33,7 @@ import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.Status;
 
 import org.apache.hadoop.yarn.appcatalog.application.AppCatalogSolrClient;
-import org.apache.hadoop.yarn.appcatalog.application.YarnClient;
+import org.apache.hadoop.yarn.appcatalog.application.YarnServiceClient;
 import org.apache.hadoop.yarn.appcatalog.model.AppEntry;
 import org.apache.hadoop.yarn.service.api.records.Service;
 import org.apache.solr.client.solrj.SolrServerException;
@@ -144,7 +144,7 @@ public class AppListController {
       @PathParam("name") String name) {
     AppCatalogSolrClient sc = new AppCatalogSolrClient();
     sc.deleteApp(id);
-    YarnClient yc = new YarnClient();
+    YarnServiceClient yc = new YarnServiceClient();
     yc.deleteApp(name);
     return Response.status(Status.ACCEPTED).build();
   }
@@ -172,7 +172,7 @@ public class AppListController {
     } catch (SolrServerException | IOException e) {
       return Response.status(Status.BAD_REQUEST).entity(e.toString()).build();
     }
-    YarnClient yc = new YarnClient();
+    YarnServiceClient yc = new YarnServiceClient();
     yc.createApp(service);
     String output = "{\"status\":\"Application deployed.\",\"id\":\"" +
         service.getName() + "\"}";

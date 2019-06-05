@@ -26,6 +26,8 @@ import java.util.stream.Collectors;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.scm.container.common.helpers.ExcludeList;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.ozone.OzoneAcl;
+import org.apache.hadoop.ozone.om.OzoneManager;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.helpers.OmBucketArgs;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
@@ -40,11 +42,17 @@ import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadListParts;
 import org.apache.hadoop.ozone.om.helpers.OmPartInfo;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.ozone.om.helpers.OpenKeySession;
+import org.apache.hadoop.ozone.om.helpers.OzoneFileStatus;
 import org.apache.hadoop.ozone.om.helpers.ServiceInfo;
-import org.apache.hadoop.ozone.om.protocol.OzoneManagerProtocol;
-import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.AddAclResponse;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.GetFileStatusRequest;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.GetFileStatusResponse;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.AllocateBlockRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.AllocateBlockResponse;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
+    .ApplyCreateKeyRequest;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
+    .MultipartInfoApplyInitiateRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CancelDelegationTokenResponseProto;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CheckVolumeAccessRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CheckVolumeAccessResponse;
@@ -52,6 +60,7 @@ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CommitK
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CommitKeyResponse;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateBucketRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateBucketResponse;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateDirectoryRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateKeyRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateKeyResponse;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateVolumeRequest;
@@ -110,6 +119,7 @@ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.SetVolu
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Type;
 import org.apache.hadoop.ozone.security.OzoneTokenIdentifier;
+import org.apache.hadoop.ozone.security.acl.OzoneObjInfo;
 import org.apache.hadoop.security.proto.SecurityProtos.CancelDelegationTokenRequestProto;
 import org.apache.hadoop.security.proto.SecurityProtos.GetDelegationTokenRequestProto;
 import org.apache.hadoop.security.proto.SecurityProtos.RenewDelegationTokenRequestProto;
@@ -119,21 +129,24 @@ import com.google.common.collect.Lists;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.*;
+
 /**
  * Command Handler for OM requests. OM State Machine calls this handler for
  * deserializing the client request and sending it to OM.
  */
-public class OzoneManagerRequestHandler {
+public class OzoneManagerRequestHandler implements RequestHandler {
   static final Logger LOG =
       LoggerFactory.getLogger(OzoneManagerRequestHandler.class);
-  private final OzoneManagerProtocol impl;
+  private final OzoneManager impl;
 
-  public OzoneManagerRequestHandler(OzoneManagerProtocol om) {
+  public OzoneManagerRequestHandler(OzoneManager om) {
     this.impl = om;
   }
 
   //TODO simplify it to make it shorter
   @SuppressWarnings("methodlength")
+  @Override
   public OMResponse handle(OMRequest request) {
     LOG.debug("Received OMRequest: {}, ", request);
     Type cmdType = request.getCmdType();
@@ -202,6 +215,11 @@ public class OzoneManagerRequestHandler {
             request.getCreateKeyRequest());
         responseBuilder.setCreateKeyResponse(createKeyResponse);
         break;
+      case ApplyCreateKey:
+        CreateKeyResponse applyKeyResponse =
+            applyCreateKey(request.getApplyCreateKeyRequest());
+        responseBuilder.setCreateKeyResponse(applyKeyResponse);
+        break;
       case LookupKey:
         LookupKeyResponse lookupKeyResponse = lookupKey(
             request.getLookupKeyRequest());
@@ -259,6 +277,13 @@ public class OzoneManagerRequestHandler {
         responseBuilder.setInitiateMultiPartUploadResponse(
             multipartInfoInitiateResponse);
         break;
+      case ApplyInitiateMultiPartUpload:
+        MultipartInfoInitiateResponse response =
+            applyInitiateMultiPartUpload(
+                request.getInitiateMultiPartUploadApplyRequest());
+        responseBuilder.setInitiateMultiPartUploadResponse(
+            response);
+        break;
       case CommitMultiPartUpload:
         MultipartCommitUploadPartResponse commitUploadPartResponse =
             commitMultipartUploadPart(
@@ -309,6 +334,49 @@ public class OzoneManagerRequestHandler {
             .getGetS3SecretRequest());
         responseBuilder.setGetS3SecretResponse(getS3SecretResp);
         break;
+      case GetFileStatus:
+        GetFileStatusResponse getFileStatusResponse =
+            getOzoneFileStatus(request.getGetFileStatusRequest());
+        responseBuilder.setGetFileStatusResponse(getFileStatusResponse);
+        break;
+      case CreateDirectory:
+        createDirectory(request.getCreateDirectoryRequest());
+        break;
+      case CreateFile:
+        CreateFileResponse createFileResponse =
+            createFile(request.getCreateFileRequest());
+        responseBuilder.setCreateFileResponse(createFileResponse);
+        break;
+      case LookupFile:
+        LookupFileResponse lookupFileResponse =
+            lookupFile(request.getLookupFileRequest());
+        responseBuilder.setLookupFileResponse(lookupFileResponse);
+        break;
+      case ListStatus:
+        ListStatusResponse listStatusResponse =
+            listStatus(request.getListStatusRequest());
+        responseBuilder.setListStatusResponse(listStatusResponse);
+        break;
+      case AddAcl:
+        AddAclResponse addAclResponse =
+            addAcl(request.getAddAclRequest());
+        responseBuilder.setAddAclResponse(addAclResponse);
+        break;
+      case RemoveAcl:
+        RemoveAclResponse removeAclResponse =
+            removeAcl(request.getRemoveAclRequest());
+        responseBuilder.setRemoveAclResponse(removeAclResponse);
+        break;
+      case SetAcl:
+        SetAclResponse setAclResponse =
+            setAcl(request.getSetAclRequest());
+        responseBuilder.setSetAclResponse(setAclResponse);
+        break;
+      case GetAcl:
+        GetAclResponse getAclResponse =
+            getAcl(request.getGetAclRequest());
+        responseBuilder.setGetAclResponse(getAclResponse);
+        break;
       default:
         responseBuilder.setSuccess(false);
         responseBuilder.setMessage("Unrecognized Command Type: " + cmdType);
@@ -325,8 +393,39 @@ public class OzoneManagerRequestHandler {
     return responseBuilder.build();
   }
 
+  private GetAclResponse getAcl(GetAclRequest req) throws IOException {
+    List<OzoneAclInfo> acls = new ArrayList<>();
+
+    List<OzoneAcl> aclList =
+        impl.getAcl(OzoneObjInfo.fromProtobuf(req.getObj()));
+    aclList.forEach(a -> acls.add(OzoneAcl.toProtobuf(a)));
+    return GetAclResponse.newBuilder().addAllAcls(acls).build();
+  }
+
+  private RemoveAclResponse removeAcl(RemoveAclRequest req)
+      throws IOException {
+    boolean response = impl.removeAcl(OzoneObjInfo.fromProtobuf(req.getObj()),
+        OzoneAcl.fromProtobuf(req.getAcl()));
+    return RemoveAclResponse.newBuilder().setResponse(response).build();
+  }
+
+  private SetAclResponse setAcl(SetAclRequest req) throws IOException {
+    List<OzoneAcl> ozoneAcl = new ArrayList<>();
+    req.getAclList().parallelStream().forEach(a ->
+        ozoneAcl.add(OzoneAcl.fromProtobuf(a)));
+    boolean response = impl.setAcl(OzoneObjInfo.fromProtobuf(req.getObj()),
+        ozoneAcl);
+    return SetAclResponse.newBuilder().setResponse(response).build();
+  }
+
+  private AddAclResponse addAcl(AddAclRequest req) throws IOException {
+    boolean response = impl.addAcl(OzoneObjInfo.fromProtobuf(req.getObj()),
+        OzoneAcl.fromProtobuf(req.getAcl()));
+    return AddAclResponse.newBuilder().setResponse(response).build();
+  }
+
   // Convert and exception to corresponding status code
-  private Status exceptionToResponseStatus(IOException ex) {
+  protected Status exceptionToResponseStatus(IOException ex) {
     if (ex instanceof OMException) {
       return Status.values()[((OMException) ex).getResult().ordinal()];
     } else {
@@ -344,6 +443,7 @@ public class OzoneManagerRequestHandler {
    * @param omRequest client request to OM
    * @throws OMException thrown if required parameters are set to null.
    */
+  @Override
   public void validateRequest(OMRequest omRequest) throws OMException {
     Type cmdType = omRequest.getCmdType();
     if (cmdType == null) {
@@ -489,6 +589,20 @@ public class OzoneManagerRequestHandler {
     return resp.build();
   }
 
+  private CreateKeyResponse applyCreateKey(ApplyCreateKeyRequest request)
+      throws IOException {
+
+    CreateKeyRequest createKeyRequest = request.getCreateKeyRequest();
+    CreateKeyResponse createKeyResponse = request.getCreateKeyResponse();
+
+    impl.applyOpenKey(createKeyRequest.getKeyArgs(),
+        createKeyResponse.getKeyInfo(), createKeyResponse.getID());
+
+    // If applying to om DB successful just return createKeyResponse.
+    return createKeyResponse;
+
+  }
+
   private LookupKeyResponse lookupKey(LookupKeyRequest request)
       throws IOException {
     LookupKeyResponse.Builder resp =
@@ -498,6 +612,7 @@ public class OzoneManagerRequestHandler {
         .setVolumeName(keyArgs.getVolumeName())
         .setBucketName(keyArgs.getBucketName())
         .setKeyName(keyArgs.getKeyName())
+        .setRefreshPipeline(true)
         .build();
     OmKeyInfo keyInfo = impl.lookupKey(omKeyArgs);
     resp.setKeyInfo(keyInfo.getProtobuf());
@@ -514,6 +629,7 @@ public class OzoneManagerRequestHandler {
         .setVolumeName(keyArgs.getVolumeName())
         .setBucketName(keyArgs.getBucketName())
         .setKeyName(keyArgs.getKeyName())
+        .setRefreshPipeline(true)
         .build();
     impl.renameKey(omKeyArgs, request.getToKeyName());
 
@@ -627,9 +743,18 @@ public class OzoneManagerRequestHandler {
         .setBucketName(keyArgs.getBucketName())
         .setKeyName(keyArgs.getKeyName())
         .build();
-    OmKeyLocationInfo newLocation =
-        impl.allocateBlock(omKeyArgs, request.getClientID(),
-            ExcludeList.getFromProtoBuf(request.getExcludeList()));
+
+    OmKeyLocationInfo newLocation;
+    if (request.hasKeyLocation()) {
+      newLocation =
+          impl.addAllocatedBlock(omKeyArgs, request.getClientID(),
+              request.getKeyLocation());
+    } else {
+      newLocation =
+          impl.allocateBlock(omKeyArgs, request.getClientID(),
+              ExcludeList.getFromProtoBuf(request.getExcludeList()));
+    }
+
     resp.setKeyLocation(newLocation.getProtobuf());
 
     return resp.build();
@@ -703,6 +828,30 @@ public class OzoneManagerRequestHandler {
         .setFactor(keyArgs.getFactor())
         .build();
     OmMultipartInfo multipartInfo = impl.initiateMultipartUpload(omKeyArgs);
+    resp.setVolumeName(multipartInfo.getVolumeName());
+    resp.setBucketName(multipartInfo.getBucketName());
+    resp.setKeyName(multipartInfo.getKeyName());
+    resp.setMultipartUploadID(multipartInfo.getUploadID());
+
+    return resp.build();
+  }
+
+  private MultipartInfoInitiateResponse applyInitiateMultiPartUpload(
+      MultipartInfoApplyInitiateRequest request) throws IOException {
+    MultipartInfoInitiateResponse.Builder resp = MultipartInfoInitiateResponse
+        .newBuilder();
+
+    KeyArgs keyArgs = request.getKeyArgs();
+    OmKeyArgs omKeyArgs = new OmKeyArgs.Builder()
+        .setVolumeName(keyArgs.getVolumeName())
+        .setBucketName(keyArgs.getBucketName())
+        .setKeyName(keyArgs.getKeyName())
+        .setType(keyArgs.getType())
+        .setFactor(keyArgs.getFactor())
+        .build();
+    OmMultipartInfo multipartInfo =
+        impl.applyInitiateMultipartUpload(omKeyArgs,
+            request.getMultipartUploadID());
     resp.setVolumeName(multipartInfo.getVolumeName());
     resp.setBucketName(multipartInfo.getBucketName());
     resp.setKeyName(multipartInfo.getKeyName());
@@ -805,7 +954,7 @@ public class OzoneManagerRequestHandler {
     List<OmPartInfo> omPartInfoList =
         omMultipartUploadListParts.getPartInfoList();
 
-    List<OzoneManagerProtocolProtos.PartInfo> partInfoList =
+    List<PartInfo> partInfoList =
         new ArrayList<>();
 
     omPartInfoList.forEach(partInfo -> partInfoList.add(partInfo.getProto()));
@@ -868,14 +1017,99 @@ public class OzoneManagerRequestHandler {
     return rb.build();
   }
 
-  private OzoneManagerProtocolProtos.GetS3SecretResponse getS3Secret(
-      OzoneManagerProtocolProtos.GetS3SecretRequest request)
+  private GetS3SecretResponse getS3Secret(
+      GetS3SecretRequest request)
       throws IOException {
-    OzoneManagerProtocolProtos.GetS3SecretResponse.Builder rb =
-        OzoneManagerProtocolProtos.GetS3SecretResponse.newBuilder();
+    GetS3SecretResponse.Builder rb =
+        GetS3SecretResponse.newBuilder();
 
     rb.setS3Secret(impl.getS3Secret(request.getKerberosID()).getProtobuf());
 
     return rb.build();
+  }
+
+  private GetFileStatusResponse getOzoneFileStatus(
+      GetFileStatusRequest request) throws IOException {
+    KeyArgs keyArgs = request.getKeyArgs();
+    OmKeyArgs omKeyArgs = new OmKeyArgs.Builder()
+        .setVolumeName(keyArgs.getVolumeName())
+        .setBucketName(keyArgs.getBucketName())
+        .setKeyName(keyArgs.getKeyName())
+        .build();
+
+    GetFileStatusResponse.Builder rb = GetFileStatusResponse.newBuilder();
+    rb.setStatus(impl.getFileStatus(omKeyArgs).getProtobuf());
+
+    return rb.build();
+  }
+
+  private void createDirectory(CreateDirectoryRequest request)
+      throws IOException {
+    KeyArgs keyArgs = request.getKeyArgs();
+    OmKeyArgs omKeyArgs = new OmKeyArgs.Builder()
+        .setVolumeName(keyArgs.getVolumeName())
+        .setBucketName(keyArgs.getBucketName())
+        .setKeyName(keyArgs.getKeyName())
+        .build();
+    impl.createDirectory(omKeyArgs);
+  }
+
+  private CreateFileResponse createFile(
+      CreateFileRequest request) throws IOException {
+    KeyArgs keyArgs = request.getKeyArgs();
+    OmKeyArgs omKeyArgs = new OmKeyArgs.Builder()
+        .setVolumeName(keyArgs.getVolumeName())
+        .setBucketName(keyArgs.getBucketName())
+        .setKeyName(keyArgs.getKeyName())
+        .setDataSize(keyArgs.getDataSize())
+        .setType(keyArgs.getType())
+        .setFactor(keyArgs.getFactor())
+        .build();
+    OpenKeySession keySession =
+        impl.createFile(omKeyArgs, request.getIsOverwrite(),
+            request.getIsRecursive());
+    return CreateFileResponse.newBuilder()
+        .setKeyInfo(keySession.getKeyInfo().getProtobuf())
+        .setID(keySession.getId())
+        .setOpenVersion(keySession.getOpenVersion())
+        .build();
+  }
+
+  private LookupFileResponse lookupFile(
+      LookupFileRequest request)
+      throws IOException {
+    KeyArgs keyArgs = request.getKeyArgs();
+    OmKeyArgs omKeyArgs = new OmKeyArgs.Builder()
+        .setVolumeName(keyArgs.getVolumeName())
+        .setBucketName(keyArgs.getBucketName())
+        .setKeyName(keyArgs.getKeyName())
+        .build();
+    return LookupFileResponse.newBuilder()
+        .setKeyInfo(impl.lookupFile(omKeyArgs).getProtobuf())
+        .build();
+  }
+
+  private ListStatusResponse listStatus(
+      ListStatusRequest request) throws IOException {
+    KeyArgs keyArgs = request.getKeyArgs();
+    OmKeyArgs omKeyArgs = new OmKeyArgs.Builder()
+        .setVolumeName(keyArgs.getVolumeName())
+        .setBucketName(keyArgs.getBucketName())
+        .setKeyName(keyArgs.getKeyName())
+        .build();
+    List<OzoneFileStatus> statuses =
+        impl.listStatus(omKeyArgs, request.getRecursive(),
+            request.getStartKey(), request.getNumEntries());
+    ListStatusResponse.Builder
+        listStatusResponseBuilder =
+        ListStatusResponse.newBuilder();
+    for (OzoneFileStatus status : statuses) {
+      listStatusResponseBuilder.addStatuses(status.getProtobuf());
+    }
+    return listStatusResponseBuilder.build();
+  }
+
+  protected OzoneManager getOzoneManager() {
+    return impl;
   }
 }

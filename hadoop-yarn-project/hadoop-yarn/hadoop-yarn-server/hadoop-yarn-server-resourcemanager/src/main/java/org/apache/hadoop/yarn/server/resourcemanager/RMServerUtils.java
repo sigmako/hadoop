@@ -240,12 +240,13 @@ public class RMServerUtils {
   }
 
   /**
-   * Utility method to validate a list resource requests, by insuring that the
+   * Utility method to validate a list resource requests, by ensuring that the
    * requested memory/vcore is non-negative and not greater than max
    */
   public static void normalizeAndValidateRequests(List<ResourceRequest> ask,
       Resource maximumAllocation, String queueName, YarnScheduler scheduler,
-      RMContext rmContext) throws InvalidResourceRequestException {
+      RMContext rmContext, boolean nodeLabelsEnabled)
+          throws InvalidResourceRequestException {
     // Get queue from scheduler
     QueueInfo queueInfo = null;
     try {
@@ -257,7 +258,7 @@ public class RMServerUtils {
 
     for (ResourceRequest resReq : ask) {
       SchedulerUtils.normalizeAndValidateRequest(resReq, maximumAllocation,
-          queueName, scheduler, rmContext, queueInfo);
+          queueName, rmContext, queueInfo, nodeLabelsEnabled);
     }
   }
 

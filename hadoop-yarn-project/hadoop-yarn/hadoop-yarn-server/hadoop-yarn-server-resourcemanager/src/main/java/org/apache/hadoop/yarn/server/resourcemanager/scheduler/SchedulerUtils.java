@@ -42,7 +42,6 @@ import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceInformation;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
-import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.InvalidLabelResourceRequestException;
 import org.apache.hadoop.yarn.exceptions.InvalidResourceRequestException;
 import org.apache.hadoop.yarn.exceptions.InvalidResourceRequestException
@@ -195,7 +194,7 @@ public class SchedulerUtils {
   }
 
   /**
-   * Utility method to normalize a resource request, by insuring that the
+   * Utility method to normalize a resource request, by ensuring that the
    * requested memory is a multiple of minMemory and is not zero.
    */
   @VisibleForTesting
@@ -210,7 +209,7 @@ public class SchedulerUtils {
   }
 
   /**
-   * Utility method to normalize a resource request, by insuring that the
+   * Utility method to normalize a resource request, by ensuring that the
    * requested memory is a multiple of increment resource and is not zero.
    *
    * @return normalized resource
@@ -240,10 +239,8 @@ public class SchedulerUtils {
     // default label expression of queue
     if (labelExp == null && queueInfo != null && ResourceRequest.ANY
         .equals(resReq.getResourceName())) {
-      if ( LOG.isDebugEnabled()) {
-        LOG.debug("Setting default node label expression : " + queueInfo
-            .getDefaultNodeLabelExpression());
-      }
+      LOG.debug("Setting default node label expression : {}", queueInfo
+          .getDefaultNodeLabelExpression());
       labelExp = queueInfo.getDefaultNodeLabelExpression();
     }
 
@@ -261,12 +258,12 @@ public class SchedulerUtils {
   }
 
   public static void normalizeAndValidateRequest(ResourceRequest resReq,
-      Resource maximumAllocation, String queueName, YarnScheduler scheduler,
-      boolean isRecovery, RMContext rmContext, QueueInfo queueInfo)
-      throws InvalidResourceRequestException {
+      Resource maximumAllocation, String queueName, boolean isRecovery,
+      RMContext rmContext, QueueInfo queueInfo, boolean nodeLabelsEnabled)
+          throws InvalidResourceRequestException {
     Configuration conf = rmContext.getYarnConfiguration();
     // If Node label is not enabled throw exception
-    if (null != conf && !YarnConfiguration.areNodeLabelsEnabled(conf)) {
+    if (null != conf && !nodeLabelsEnabled) {
       String labelExp = resReq.getNodeLabelExpression();
       if (!(RMNodeLabelsManager.NO_LABEL.equals(labelExp)
           || null == labelExp)) {
@@ -282,7 +279,8 @@ public class SchedulerUtils {
     }
     if (null == queueInfo) {
       try {
-        queueInfo = scheduler.getQueueInfo(queueName, false, false);
+        queueInfo = rmContext.getScheduler().getQueueInfo(queueName, false,
+            false);
       } catch (IOException e) {
         //Queue may not exist since it could be auto-created in case of
         // dynamic queues
@@ -296,15 +294,15 @@ public class SchedulerUtils {
   }
 
   public static void normalizeAndValidateRequest(ResourceRequest resReq,
-      Resource maximumAllocation, String queueName, YarnScheduler scheduler,
-      RMContext rmContext, QueueInfo queueInfo)
-      throws InvalidResourceRequestException {
-    normalizeAndValidateRequest(resReq, maximumAllocation, queueName, scheduler,
-        false, rmContext, queueInfo);
+      Resource maximumAllocation, String queueName, RMContext rmContext,
+      QueueInfo queueInfo, boolean nodeLabelsEnabled)
+          throws InvalidResourceRequestException {
+    normalizeAndValidateRequest(resReq, maximumAllocation, queueName, false,
+        rmContext, queueInfo, nodeLabelsEnabled);
   }
 
   /**
-   * Utility method to validate a resource request, by insuring that the
+   * Utility method to validate a resource request, by ensuring that the
    * requested memory/vcore is non-negative and not greater than max
    *
    * @throws InvalidResourceRequestException when there is invalid request

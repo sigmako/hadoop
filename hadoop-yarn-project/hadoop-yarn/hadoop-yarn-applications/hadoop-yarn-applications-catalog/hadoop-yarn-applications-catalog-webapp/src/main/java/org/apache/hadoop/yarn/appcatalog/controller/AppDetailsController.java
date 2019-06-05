@@ -18,8 +18,12 @@
 
 package org.apache.hadoop.yarn.appcatalog.controller;
 
+import java.io.IOException;
+
+import javax.ws.rs.Consumes;
 import javax.ws.rs.GET;
 import javax.ws.rs.POST;
+import javax.ws.rs.PUT;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
@@ -28,10 +32,11 @@ import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.Status;
 
 import org.apache.hadoop.yarn.appcatalog.application.AppCatalogSolrClient;
-import org.apache.hadoop.yarn.appcatalog.application.YarnClient;
+import org.apache.hadoop.yarn.appcatalog.application.YarnServiceClient;
 import org.apache.hadoop.yarn.appcatalog.model.AppEntry;
 import org.apache.hadoop.yarn.service.api.records.Service;
 import org.apache.hadoop.yarn.service.api.records.ServiceState;
+import org.apache.solr.client.solrj.SolrServerException;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 
@@ -200,7 +205,7 @@ public class AppDetailsController {
   public AppEntry getStatus(@PathParam("id") String id) {
     AppCatalogSolrClient sc = new AppCatalogSolrClient();
     AppEntry appEntry = sc.findAppEntry(id);
-    YarnClient yc = new YarnClient();
+    YarnServiceClient yc = new YarnServiceClient();
     yc.getStatus(appEntry);
     return appEntry;
   }
@@ -226,7 +231,7 @@ public class AppDetailsController {
     Service yarnApp = app.getYarnfile();
     yarnApp.setState(ServiceState.STOPPED);
     try {
-      YarnClient yc = new YarnClient();
+      YarnServiceClient yc = new YarnServiceClient();
       yc.stopApp(yarnApp);
     } catch (JsonProcessingException e) {
       return Response.status(Status.BAD_REQUEST).build();
@@ -255,11 +260,40 @@ public class AppDetailsController {
     Service yarnApp = app.getYarnfile();
     yarnApp.setState(ServiceState.STARTED);
     try {
-      YarnClient yc = new YarnClient();
+      YarnServiceClient yc = new YarnServiceClient();
       yc.restartApp(yarnApp);
     } catch (JsonProcessingException e) {
       return Response.status(Status.BAD_REQUEST).build();
     }
     return Response.ok().build();
+  }
+
+  /**
+   * Upgrade an application.
+   *
+   * @apiGroup AppDetailController
+   * @apiName upgradeApp
+   * @api {put} /app_details/upgrade/{id} Upgrade one instance of application.
+   * @apiParam {String} id Application Name to upgrade.
+   * @apiSuccess {String} text
+   * @apiError BadRequest Requested application does not upgrade.
+   * @return Web response code
+   */
+  @Path("upgrade/{id}")
+  @PUT
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response upgradeApp(@PathParam("id") String id, Service app) {
+    try {
+      AppCatalogSolrClient sc = new AppCatalogSolrClient();
+      sc.upgradeApp(app);
+      YarnServiceClient yc = new YarnServiceClient();
+      yc.upgradeApp(app);
+    } catch (IOException | SolrServerException e) {
+      return Response.status(Status.BAD_REQUEST).entity(e.toString()).build();
+    }
+    String output = "{\"status\":\"Application upgrade requested.\",\"id\":\"" +
+        app.getName() + "\"}";
+    return Response.status(Status.ACCEPTED).entity(output).build();
   }
 }

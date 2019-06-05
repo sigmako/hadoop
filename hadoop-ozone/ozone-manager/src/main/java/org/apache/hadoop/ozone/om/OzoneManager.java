@@ -24,11 +24,11 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.protobuf.BlockingService;
 
+import java.net.InetAddress;
 import java.security.PrivateKey;
 import java.security.PublicKey;
-import java.security.cert.CertificateException;
-import java.security.cert.X509Certificate;
 import java.security.KeyPair;
+import java.security.cert.CertificateException;
 import java.util.Collection;
 import java.util.Objects;
 
@@ -44,6 +44,7 @@ import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.protocol.SCMSecurityProtocol;
+import org.apache.hadoop.hdds.protocol.proto.SCMSecurityProtocolProtos.SCMGetCertResponseProto;
 import org.apache.hadoop.hdds.protocolPB.SCMSecurityProtocolClientSideTranslatorPB;
 import org.apache.hadoop.hdds.protocolPB.SCMSecurityProtocolPB;
 import org.apache.hadoop.hdds.scm.ScmInfo;
@@ -62,16 +63,29 @@ import org.apache.hadoop.hdds.security.x509.certificates.utils.CertificateSignRe
 import org.apache.hadoop.hdds.server.ServiceRuntimeInfoImpl;
 import org.apache.hadoop.hdds.tracing.TracingUtil;
 import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.util.PersistentLongFile;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.retry.RetryPolicy;
 import org.apache.hadoop.ipc.Client;
 import org.apache.hadoop.ipc.ProtobufRpcEngine;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.Server;
+import org.apache.hadoop.ozone.OzoneAcl;
 import org.apache.hadoop.ozone.OzoneIllegalArgumentException;
 import org.apache.hadoop.ozone.OzoneSecurityUtil;
 import org.apache.hadoop.ozone.om.ha.OMFailoverProxyProvider;
+import org.apache.hadoop.ozone.om.helpers.OmDeleteVolumeResponse;
+import org.apache.hadoop.ozone.om.helpers.OmVolumeOwnerChangeResponse;
 import org.apache.hadoop.ozone.om.helpers.S3SecretValue;
+import org.apache.hadoop.ozone.om.protocol.OzoneManagerServerProtocol;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
+    .KeyArgs;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
+    .KeyInfo;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
+    .KeyLocation;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
+    .VolumeList;
 import org.apache.hadoop.ozone.security.OzoneSecurityException;
 import org.apache.hadoop.ozone.security.OzoneTokenIdentifier;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
@@ -102,7 +116,7 @@ import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadListParts;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.ozone.om.helpers.OpenKeySession;
 import org.apache.hadoop.ozone.om.helpers.ServiceInfo;
-import org.apache.hadoop.ozone.om.protocol.OzoneManagerProtocol;
+import org.apache.hadoop.ozone.om.helpers.OzoneFileStatus;
 import org.apache.hadoop.ozone.om.protocolPB.OzoneManagerProtocolPB;
 import org.apache.hadoop.ozone.om.ratis.OzoneManagerRatisClient;
 import org.apache.hadoop.ozone.om.ratis.OzoneManagerRatisServer;
@@ -113,8 +127,6 @@ import org.apache.hadoop.ozone.security.acl.IAccessAuthorizer;
 import org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLType;
 import org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLIdentityType;
 import org.apache.hadoop.ozone.security.acl.OzoneAccessAuthorizer;
-import org.apache.hadoop.ozone.security.acl.OzoneAclException;
-import org.apache.hadoop.ozone.security.acl.OzoneAclException.ErrorCode;
 import org.apache.hadoop.ozone.security.acl.OzoneObj;
 import org.apache.hadoop.ozone.security.acl.OzoneObj.StoreType;
 import org.apache.hadoop.ozone.security.acl.OzoneObj.ResourceType;
@@ -173,6 +185,7 @@ import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_ACL_ENABLED_DEFAULT;
 import static org.apache.hadoop.ozone.OzoneConsts.OM_METRICS_FILE;
 import static org.apache.hadoop.ozone.OzoneConsts.OM_METRICS_TEMP_FILE;
 
+import static org.apache.hadoop.ozone.OzoneConsts.OM_RATIS_SNAPSHOT_INDEX;
 import static org.apache.hadoop.ozone.OzoneConsts.RPC_PORT;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_ADDRESS_KEY;
 import static org.apache.hadoop.ozone.om.OMConfigKeys
@@ -190,6 +203,7 @@ import static org.apache.hadoop.ozone.om.OMConfigKeys
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_SERVICE_IDS_KEY;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_RATIS_PORT_KEY;
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.INVALID_AUTH_METHOD;
+import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.INVALID_REQUEST;
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.TOKEN_ERROR_OTHER;
 import static org.apache.hadoop.ozone.protocol.proto
     .OzoneManagerProtocolProtos.OzoneManagerService
@@ -205,7 +219,7 @@ import static org.apache.hadoop.util.ExitUtil.terminate;
  */
 @InterfaceAudience.LimitedPrivate({"HDFS", "CBLOCK", "OZONE", "HBASE"})
 public final class OzoneManager extends ServiceRuntimeInfoImpl
-    implements OzoneManagerProtocol, OMMXBean, Auditor {
+    implements OzoneManagerServerProtocol, OMMXBean, Auditor {
   public static final Logger LOG =
       LoggerFactory.getLogger(OzoneManager.class);
 
@@ -218,9 +232,8 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
           + StartupOption.HELP.getName() + " ]\n";
   private static final String OM_DAEMON = "om";
   private static boolean securityEnabled = false;
-  private static OzoneDelegationTokenSecretManager delegationTokenMgr;
+  private OzoneDelegationTokenSecretManager delegationTokenMgr;
   private OzoneBlockTokenSecretManager blockTokenMgr;
-  private KeyPair keyPair;
   private CertificateClient certClient;
   private static boolean testSecureOmFlag = false;
   private final Text omRpcAddressTxt;
@@ -228,11 +241,7 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
   private RPC.Server omRpcServer;
   private InetSocketAddress omRpcAddress;
   private String omId;
-  private OMNodeDetails omNodeDetails;
   private List<OMNodeDetails> peerNodes;
-  private boolean isRatisEnabled;
-  private OzoneManagerRatisServer omRatisServer;
-  private OzoneManagerRatisClient omRatisClient;
   private final OMMetadataManager metadataManager;
   private final VolumeManager volumeManager;
   private final BucketManager bucketManager;
@@ -257,13 +266,21 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
   private final IAccessAuthorizer accessAuthorizer;
   private JvmPauseMonitor jvmPauseMonitor;
   private final SecurityConfig secConfig;
-  private final S3SecretManager s3SecretManager;
+  private S3SecretManager s3SecretManager;
   private volatile boolean isOmRpcServerRunning = false;
   private String omComponent;
+
+  private boolean isRatisEnabled;
+  private OzoneManagerRatisServer omRatisServer;
+  private OzoneManagerRatisClient omRatisClient;
+  private OMNodeDetails omNodeDetails;
+  private final File ratisSnapshotFile;
+  private long snapshotIndex;
 
   private KeyProviderCryptoExtension kmsProvider = null;
   private static String keyProviderUriKeyName =
       CommonConfigurationKeysPublic.HADOOP_SECURITY_KEY_PROVIDER_PATH;
+
 
   private OzoneManager(OzoneConfiguration conf) throws IOException,
       AuthenticationException {
@@ -287,7 +304,7 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
     // For testing purpose only, not hit scm from om as Hadoop UGI can't login
     // two principals in the same JVM.
     if (!testSecureOmFlag) {
-      ScmInfo scmInfo = scmBlockClient.getScmInfo();
+      ScmInfo scmInfo = getScmInfo(configuration);
       if (!(scmInfo.getClusterId().equals(omStorage.getClusterID()) && scmInfo
           .getScmId().equals(omStorage.getScmId()))) {
         throw new OMException("SCM version info mismatch.",
@@ -298,26 +315,19 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
     RPC.setProtocolEngine(configuration, OzoneManagerProtocolPB.class,
         ProtobufRpcEngine.class);
 
+    metadataManager = new OmMetadataManagerImpl(configuration);
     startRatisServer();
     startRatisClient();
+
+    this.ratisSnapshotFile = new File(omStorage.getCurrentDir(),
+        OM_RATIS_SNAPSHOT_INDEX);
+    this.snapshotIndex = loadRatisSnapshotIndex();
 
     InetSocketAddress omNodeRpcAddr = omNodeDetails.getRpcAddress();
     omRpcAddressTxt = new Text(omNodeDetails.getRpcAddressString());
 
     secConfig = new SecurityConfig(configuration);
-    if (secConfig.isSecurityEnabled()) {
-      omComponent = OM_DAEMON + "-" + omId;
-      certClient = new OMCertificateClient(new SecurityConfig(conf));
-      delegationTokenMgr = createDelegationTokenSecretManager(configuration);
-    }
-    if (secConfig.isBlockTokenEnabled()) {
-      blockTokenMgr = createBlockTokenSecretManager(configuration);
-    }
 
-    omRpcServer = getRpcServer(conf);
-    omRpcAddress = updateRPCListenAddress(configuration,
-        OZONE_OM_ADDRESS_KEY, omNodeRpcAddr, omRpcServer);
-    metadataManager = new OmMetadataManagerImpl(configuration);
     volumeManager = new VolumeManagerImpl(metadataManager, configuration);
 
     // Create the KMS Key Provider
@@ -328,14 +338,33 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
       LOG.error("Fail to create Key Provider");
     }
 
-    bucketManager = new BucketManagerImpl(metadataManager, getKmsProvider());
+    bucketManager = new BucketManagerImpl(metadataManager, getKmsProvider(),
+        isRatisEnabled);
     metrics = OMMetrics.create();
 
     s3BucketManager = new S3BucketManagerImpl(configuration, metadataManager,
         volumeManager, bucketManager);
-    keyManager = new KeyManagerImpl(scmBlockClient, metadataManager,
+    if (secConfig.isSecurityEnabled()) {
+      omComponent = OM_DAEMON + "-" + omId;
+      if(omStorage.getOmCertSerialId() == null) {
+        throw new RuntimeException("OzoneManager started in secure mode but " +
+            "doesn't have SCM signed certificate.");
+      }
+      certClient = new OMCertificateClient(new SecurityConfig(conf),
+          omStorage.getOmCertSerialId());
+      s3SecretManager = new S3SecretManagerImpl(configuration, metadataManager);
+      delegationTokenMgr = createDelegationTokenSecretManager(configuration);
+    }
+    if (secConfig.isBlockTokenEnabled()) {
+      blockTokenMgr = createBlockTokenSecretManager(configuration);
+    }
+
+    omRpcServer = getRpcServer(conf);
+    omRpcAddress = updateRPCListenAddress(configuration,
+        OZONE_OM_ADDRESS_KEY, omNodeRpcAddr, omRpcServer);
+    keyManager = new KeyManagerImpl(
+        new ScmClient(scmBlockClient, scmContainerClient), metadataManager,
         configuration, omStorage.getOmId(), blockTokenMgr, getKmsProvider());
-    s3SecretManager = new S3SecretManagerImpl(configuration, metadataManager);
 
     shutdownHook = () -> {
       saveOmMetrics();
@@ -601,7 +630,8 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
             TimeUnit.MILLISECONDS);
 
     return new OzoneDelegationTokenSecretManager(conf, tokenMaxLifetime,
-        tokenRenewInterval, tokenRemoverScanInterval, omRpcAddressTxt);
+        tokenRenewInterval, tokenRemoverScanInterval, omRpcAddressTxt,
+        s3SecretManager);
   }
 
   private OzoneBlockTokenSecretManager createBlockTokenSecretManager(
@@ -690,8 +720,6 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
       Objects.requireNonNull(pubKey);
       Objects.requireNonNull(pvtKey);
       Objects.requireNonNull(certClient.getCertificate());
-
-      keyPair = new KeyPair(pubKey, pvtKey);
     } catch (Exception e) {
       throw new OzoneSecurityException("Error reading keypair & certificate "
           + "OzoneManager.", e, OzoneSecurityException
@@ -749,7 +777,8 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
                 NetUtils.getDefaultSocketFactory(conf),
                 Client.getRpcTimeout(conf)));
     return TracingUtil
-        .createProxy(scmBlockLocationClient, ScmBlockLocationProtocol.class);
+        .createProxy(scmBlockLocationClient, ScmBlockLocationProtocol.class,
+            conf);
   }
 
   /**
@@ -758,8 +787,8 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
    * @return {@link SCMSecurityProtocol}
    * @throws IOException
    */
-  private static SCMSecurityProtocol getScmSecurityClient(
-      OzoneConfiguration conf) throws IOException {
+  private static SCMSecurityProtocolClientSideTranslatorPB
+      getScmSecurityClient(OzoneConfiguration conf) throws IOException {
     RPC.setProtocolEngine(conf, SCMSecurityProtocolPB.class,
         ProtobufRpcEngine.class);
     long scmVersion =
@@ -796,7 +825,7 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
                 scmAddr, UserGroupInformation.getCurrentUser(), conf,
                 NetUtils.getDefaultSocketFactory(conf),
                 Client.getRpcTimeout(conf))),
-            StorageContainerLocationProtocol.class);
+            StorageContainerLocationProtocol.class, conf);
     return scmContainerClient;
   }
 
@@ -811,7 +840,7 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
    * @return RPC server
    * @throws IOException if there is an I/O error while creating RPC server
    */
-  private static RPC.Server startRpcServer(OzoneConfiguration conf,
+  private RPC.Server startRpcServer(OzoneConfiguration conf,
       InetSocketAddress addr, Class<?> protocol, BlockingService instance,
       int handlerCount) throws IOException {
     RPC.Server rpcServer = new RPC.Builder(conf)
@@ -947,7 +976,7 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
    *                     accessible
    */
   @VisibleForTesting
-  static boolean omInit(OzoneConfiguration conf) throws IOException {
+  public static boolean omInit(OzoneConfiguration conf) throws IOException {
     OMStorage omStorage = new OMStorage(conf);
     StorageState state = omStorage.getState();
     if (state != StorageState.INITIALIZED) {
@@ -963,15 +992,14 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
         }
         omStorage.setClusterId(clusterId);
         omStorage.setScmId(scmId);
+        if (OzoneSecurityUtil.isSecurityEnabled(conf)) {
+          initializeSecurity(conf, omStorage);
+        }
         omStorage.initialize();
         System.out.println(
             "OM initialization succeeded.Current cluster id for sd="
                 + omStorage.getStorageDir() + ";cid=" + omStorage
                 .getClusterID());
-
-        if (OzoneSecurityUtil.isSecurityEnabled(conf)) {
-          initializeSecurity(conf, omStorage);
-        }
 
         return true;
       } catch (IOException ioe) {
@@ -979,6 +1007,12 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
         return false;
       }
     } else {
+      if(OzoneSecurityUtil.isSecurityEnabled(conf) &&
+          omStorage.getOmCertSerialId() == null) {
+        LOG.info("OM storage is already initialized. Initializing security");
+        initializeSecurity(conf, omStorage);
+        omStorage.persistCurrentState();
+      }
       System.out.println(
           "OM already initialized.Reusing existing cluster id for sd="
               + omStorage.getStorageDir() + ";cid=" + omStorage
@@ -997,7 +1031,8 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
     LOG.info("Initializing secure OzoneManager.");
 
     CertificateClient certClient =
-        new OMCertificateClient(new SecurityConfig(conf));
+        new OMCertificateClient(new SecurityConfig(conf),
+            omStore.getOmCertSerialId());
     CertificateClient.InitResponse response = certClient.init();
     LOG.info("Init response: {}", response);
     switch (response) {
@@ -1237,7 +1272,7 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
 
     BlockingService omService = newReflectiveBlockingService(
         new OzoneManagerProtocolServerSideTranslatorPB(this, omRatisServer,
-            omRatisClient, isRatisEnabled));
+            isRatisEnabled));
     return startRpcServer(configuration, omNodeRpcAddr,
         OzoneManagerProtocolPB.class, omService,
         handlerCount);
@@ -1289,6 +1324,33 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
     }
   }
 
+  @VisibleForTesting
+  public long loadRatisSnapshotIndex() {
+    if (ratisSnapshotFile.exists()) {
+      try {
+        return PersistentLongFile.readFile(ratisSnapshotFile, 0);
+      } catch (IOException e) {
+        LOG.error("Unable to read the ratis snapshot index (last applied " +
+            "transaction log index)", e);
+      }
+    }
+    return 0;
+  }
+
+  @Override
+  public long saveRatisSnapshot() throws IOException {
+    snapshotIndex = omRatisServer.getStateMachineLastAppliedIndex();
+
+    // Flush the OM state to disk
+    getMetadataManager().getStore().flush();
+
+    PersistentLongFile.writeFile(ratisSnapshotFile, snapshotIndex);
+    LOG.info("Saved Ratis Snapshot on the OM with snapshotIndex {}",
+        snapshotIndex);
+
+    return snapshotIndex;
+  }
+
   /**
    * Stop service.
    */
@@ -1310,7 +1372,9 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
       isOmRpcServerRunning = false;
       keyManager.stop();
       stopSecretManager();
-      httpServer.stop();
+      if (httpServer != null) {
+        httpServer.stop();
+      }
       metadataManager.stop();
       metrics.unRegister();
       unregisterMXBean();
@@ -1354,10 +1418,15 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
     KeyPair keyPair = new KeyPair(client.getPublicKey(),
         client.getPrivateKey());
     InetSocketAddress omRpcAdd;
-
     omRpcAdd = OmUtils.getOmAddress(config);
+    if (omRpcAdd == null || omRpcAdd.getAddress() == null) {
+      LOG.error("Incorrect om rpc address. omRpcAdd:{}", omRpcAdd);
+      throw new RuntimeException("Can't get SCM signed certificate. " +
+          "omRpcAdd: " + omRpcAdd);
+    }
     // Get host name.
     String hostname = omRpcAdd.getAddress().getHostName();
+    String ip = omRpcAdd.getAddress().getHostAddress();
 
     String subject = UserGroupInformation.getCurrentUser()
         .getShortUserName() + "@" + hostname;
@@ -1368,16 +1437,16 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
         .setScmID(omStore.getScmId())
         .setClusterID(omStore.getClusterID())
         .setSubject(subject)
-        .addIpAddress(omRpcAdd.getAddress().getHostAddress());
+        .addIpAddress(ip);
 
     LOG.info("Creating csr for OM->dns:{},ip:{},scmId:{},clusterId:{}," +
-            "subject:{}", hostname, omRpcAdd.getAddress().getHostAddress(),
+            "subject:{}", hostname, ip,
         omStore.getScmId(), omStore.getClusterID(), subject);
 
     HddsProtos.OzoneManagerDetailsProto.Builder omDetailsProtoBuilder =
         HddsProtos.OzoneManagerDetailsProto.newBuilder()
             .setHostName(omRpcAdd.getHostName())
-            .setIpAddress(omRpcAdd.getAddress().getHostAddress())
+            .setIpAddress(ip)
             .setUuid(omStore.getOmId())
             .addPorts(HddsProtos.Port.newBuilder()
                 .setName(RPC_PORT)
@@ -1388,15 +1457,28 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
     HddsProtos.OzoneManagerDetailsProto omDetailsProto =
         omDetailsProtoBuilder.build();
     LOG.info("OzoneManager ports added:{}", omDetailsProto.getPortsList());
-    SCMSecurityProtocol secureScmClient = getScmSecurityClient(config);
+    SCMSecurityProtocolClientSideTranslatorPB secureScmClient =
+        getScmSecurityClient(config);
 
-    String pemEncodedCert = secureScmClient.getOMCertificate(omDetailsProto,
-        getEncodedString(csr));
+    SCMGetCertResponseProto response = secureScmClient.
+        getOMCertChain(omDetailsProto, getEncodedString(csr));
+    String pemEncodedCert = response.getX509Certificate();
 
     try {
-      X509Certificate x509Certificate =
-          CertificateCodec.getX509Cert(pemEncodedCert);
-      client.storeCertificate(x509Certificate);
+
+
+      // Store SCM CA certificate.
+      if(response.hasX509CACertificate()) {
+        String pemEncodedRootCert = response.getX509CACertificate();
+        client.storeCertificate(pemEncodedRootCert, true, true);
+        client.storeCertificate(pemEncodedCert, true);
+        // Persist om cert serial id.
+        omStore.setOmCertSerialId(CertificateCodec.
+            getX509Certificate(pemEncodedCert).getSerialNumber().toString());
+      } else {
+        throw new RuntimeException("Unable to retrieve OM certificate " +
+            "chain");
+      }
     } catch (IOException | CertificateException e) {
       LOG.error("Error while storing SCM signed certificate.", e);
       throw new RuntimeException(e);
@@ -1450,8 +1532,6 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
   @Override
   public Token<OzoneTokenIdentifier> getDelegationToken(Text renewer)
       throws OMException {
-    final boolean success;
-    final String tokenId;
     Token<OzoneTokenIdentifier> token;
     try {
       if (!isAllowedDelegationTokenOp()) {
@@ -1570,6 +1650,79 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
     }
   }
 
+  @Override
+  public VolumeList startCreateVolume(OmVolumeArgs args) throws IOException {
+    // TODO: Need to add metrics and Audit log for HA requests
+    if(isAclEnabled) {
+      checkAcls(ResourceType.VOLUME, StoreType.OZONE, ACLType.CREATE,
+          args.getVolume(), null, null);
+    }
+    VolumeList volumeList = volumeManager.createVolume(args);
+    return volumeList;
+  }
+
+  @Override
+  public void applyCreateVolume(OmVolumeArgs omVolumeArgs,
+      VolumeList volumeList) throws IOException {
+    // TODO: Need to add metrics and Audit log for HA requests
+    volumeManager.applyCreateVolume(omVolumeArgs, volumeList);
+  }
+
+  @Override
+  public OmVolumeOwnerChangeResponse startSetOwner(String volume,
+      String owner) throws IOException {
+    // TODO: Need to add metrics and Audit log for HA requests
+    if (isAclEnabled) {
+      checkAcls(ResourceType.VOLUME, StoreType.OZONE, ACLType.WRITE_ACL, volume,
+          null, null);
+    }
+    return volumeManager.setOwner(volume, owner);
+  }
+
+  @Override
+  public void applySetOwner(String oldOwner, VolumeList oldOwnerVolumeList,
+      VolumeList newOwnerVolumeList, OmVolumeArgs newOwnerVolumeArgs)
+      throws IOException {
+    // TODO: Need to add metrics and Audit log for HA requests
+    volumeManager.applySetOwner(oldOwner, oldOwnerVolumeList,
+        newOwnerVolumeList, newOwnerVolumeArgs);
+  }
+
+  @Override
+  public OmVolumeArgs startSetQuota(String volume, long quota)
+      throws IOException {
+    // TODO: Need to add metrics and Audit log for HA requests
+    if (isAclEnabled) {
+      checkAcls(ResourceType.VOLUME, StoreType.OZONE, ACLType.WRITE_ACL, volume,
+          null, null);
+    }
+    return volumeManager.setQuota(volume, quota);
+  }
+
+  @Override
+  public void applySetQuota(OmVolumeArgs omVolumeArgs) throws IOException {
+      // TODO: Need to add metrics and Audit log for HA requests
+    volumeManager.applySetQuota(omVolumeArgs);
+  }
+
+  @Override
+  public OmDeleteVolumeResponse startDeleteVolume(String volume)
+      throws IOException {
+    if(isAclEnabled) {
+      checkAcls(ResourceType.VOLUME, StoreType.OZONE, ACLType.DELETE, volume,
+          null, null);
+    }
+    // TODO: Need to add metrics and Audit log for HA requests
+    return volumeManager.deleteVolume(volume);
+  }
+
+  @Override
+  public void applyDeleteVolume(String volume, String owner,
+      VolumeList newVolumeList) throws IOException {
+    // TODO: Need to add metrics and Audit log for HA requests
+    volumeManager.applyDeleteVolume(volume, owner, newVolumeList);
+  }
+
   /**
    * Checks if current caller has acl permissions.
    *
@@ -1579,18 +1732,36 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
    * @param vol     - name of volume
    * @param bucket  - bucket name
    * @param key     - key
-   * @throws OzoneAclException
+   * @throws OMException
    */
   private void checkAcls(ResourceType resType, StoreType store,
       ACLType acl, String vol, String bucket, String key)
-      throws OzoneAclException {
-    if(!isAclEnabled) {
-      return;
-    }
+      throws OMException {
+    checkAcls(resType, store, acl, vol, bucket, key,
+        ProtobufRpcEngine.Server.getRemoteUser(),
+        ProtobufRpcEngine.Server.getRemoteIp());
+  }
 
+  /**
+   * CheckAcls for the ozone object.
+   * @param resType
+   * @param storeType
+   * @param aclType
+   * @param vol
+   * @param bucket
+   * @param key
+   * @param ugi
+   * @param remoteAddress
+   * @throws OMException
+   */
+  @SuppressWarnings("parameternumber")
+  public void checkAcls(ResourceType resType, StoreType storeType,
+      ACLType aclType, String vol, String bucket, String key,
+      UserGroupInformation ugi, InetAddress remoteAddress)
+      throws OMException {
     OzoneObj obj = OzoneObjInfo.Builder.newBuilder()
         .setResType(resType)
-        .setStoreType(store)
+        .setStoreType(storeType)
         .setVolumeName(vol)
         .setBucketName(bucket)
         .setKeyName(key).build();
@@ -1599,15 +1770,24 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
         .setClientUgi(user)
         .setIp(ProtobufRpcEngine.Server.getRemoteIp())
         .setAclType(ACLIdentityType.USER)
-        .setAclRights(acl)
+        .setAclRights(aclType)
         .build();
     if (!accessAuthorizer.checkAccess(obj, context)) {
       LOG.warn("User {} doesn't have {} permission to access {}",
-          user.getUserName(), acl, resType);
-      throw new OzoneAclException("User " + user.getUserName() + " doesn't " +
-          "have " + acl + " permission to access " + resType,
-          ErrorCode.PERMISSION_DENIED);
+          user.getUserName(), aclType, resType);
+      throw new OMException("User " + user.getUserName() + " doesn't " +
+          "have " + aclType + " permission to access " + resType,
+          ResultCodes.PERMISSION_DENIED);
     }
+  }
+
+  /**
+   *
+   * Return true if Ozone acl's are enabled, else false.
+   * @return boolean
+   */
+  public boolean getAclsEnabled() {
+    return isAclEnabled;
   }
 
   /**
@@ -1973,6 +2153,51 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
   }
 
   @Override
+  public void applyOpenKey(KeyArgs omKeyArgs, KeyInfo keyInfo, long clientID)
+      throws IOException {
+    // Do we need to check again Acl's for apply OpenKey call?
+    if(isAclEnabled) {
+      checkAcls(ResourceType.KEY, StoreType.OZONE, ACLType.READ,
+          omKeyArgs.getVolumeName(), omKeyArgs.getBucketName(),
+          omKeyArgs.getKeyName());
+    }
+    boolean auditSuccess = true;
+    try {
+      keyManager.applyOpenKey(omKeyArgs, keyInfo, clientID);
+    } catch (Exception ex) {
+      metrics.incNumKeyAllocateFails();
+      auditSuccess = false;
+      AUDIT.logWriteFailure(buildAuditMessageForFailure(
+          OMAction.APPLY_ALLOCATE_KEY,
+          (omKeyArgs == null) ? null : toAuditMap(omKeyArgs), ex));
+      throw ex;
+    } finally {
+      if(auditSuccess){
+        AUDIT.logWriteSuccess(buildAuditMessageForSuccess(
+            OMAction.APPLY_ALLOCATE_KEY, (omKeyArgs == null) ? null :
+                toAuditMap(omKeyArgs)));
+      }
+    }
+  }
+
+  private Map<String, String> toAuditMap(KeyArgs omKeyArgs) {
+    Map<String, String> auditMap = new LinkedHashMap<>();
+    auditMap.put(OzoneConsts.VOLUME, omKeyArgs.getVolumeName());
+    auditMap.put(OzoneConsts.BUCKET, omKeyArgs.getBucketName());
+    auditMap.put(OzoneConsts.KEY, omKeyArgs.getKeyName());
+    auditMap.put(OzoneConsts.DATA_SIZE,
+        String.valueOf(omKeyArgs.getDataSize()));
+    auditMap.put(OzoneConsts.REPLICATION_TYPE,
+        omKeyArgs.hasType() ? omKeyArgs.getType().name() : null);
+    auditMap.put(OzoneConsts.REPLICATION_FACTOR,
+        omKeyArgs.hasFactor() ? omKeyArgs.getFactor().name() : null);
+    auditMap.put(OzoneConsts.KEY_LOCATION_INFO,
+        (omKeyArgs.getKeyLocationsList() != null) ?
+            omKeyArgs.getKeyLocationsList().toString() : null);
+    return auditMap;
+  }
+
+  @Override
   public void commitKey(OmKeyArgs args, long clientID)
       throws IOException {
     if(isAclEnabled) {
@@ -2030,6 +2255,34 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
       if(auditSuccess){
         AUDIT.logWriteSuccess(buildAuditMessageForSuccess(
             OMAction.ALLOCATE_BLOCK, auditMap));
+      }
+    }
+  }
+
+  @Override
+  public OmKeyLocationInfo addAllocatedBlock(OmKeyArgs args, long clientID,
+      KeyLocation keyLocation) throws IOException {
+    if(isAclEnabled) {
+      checkAcls(ResourceType.KEY, StoreType.OZONE, ACLType.WRITE,
+          args.getVolumeName(), args.getBucketName(), args.getKeyName());
+    }
+    boolean auditSuccess = true;
+    Map<String, String> auditMap = (args == null) ? new LinkedHashMap<>() :
+        args.toAuditMap();
+    auditMap.put(OzoneConsts.CLIENT_ID, String.valueOf(clientID));
+    try {
+      metrics.incNumAddAllocateBlockCalls();
+      return keyManager.addAllocatedBlock(args, clientID, keyLocation);
+    } catch (Exception ex) {
+      metrics.incNumAddAllocateBlockFails();
+      auditSuccess = false;
+      AUDIT.logWriteFailure(buildAuditMessageForFailure(
+          OMAction.ADD_ALLOCATE_BLOCK, auditMap, ex));
+      throw ex;
+    } finally {
+      if(auditSuccess){
+        AUDIT.logWriteSuccess(buildAuditMessageForSuccess(
+            OMAction.ADD_ALLOCATE_BLOCK, auditMap));
       }
     }
   }
@@ -2179,8 +2432,10 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
    */
   @Override
   public void deleteBucket(String volume, String bucket) throws IOException {
-    checkAcls(ResourceType.BUCKET, StoreType.OZONE, ACLType.WRITE, volume,
-        bucket, null);
+    if (isAclEnabled) {
+      checkAcls(ResourceType.BUCKET, StoreType.OZONE, ACLType.WRITE, volume,
+          bucket, null);
+    }
     Map<String, String> auditMap = buildAuditMap(volume);
     auditMap.put(OzoneConsts.BUCKET, bucket);
     try {
@@ -2432,6 +2687,28 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
     }
   }
 
+
+  @Override
+  public OmMultipartInfo applyInitiateMultipartUpload(OmKeyArgs keyArgs,
+      String multipartUploadID) throws IOException {
+    OmMultipartInfo multipartInfo;
+    metrics.incNumInitiateMultipartUploads();
+    try {
+      multipartInfo = keyManager.applyInitiateMultipartUpload(keyArgs,
+          multipartUploadID);
+      AUDIT.logWriteSuccess(buildAuditMessageForSuccess(
+          OMAction.INITIATE_MULTIPART_UPLOAD, (keyArgs == null) ? null :
+              keyArgs.toAuditMap()));
+    } catch (IOException ex) {
+      AUDIT.logWriteFailure(buildAuditMessageForFailure(
+          OMAction.INITIATE_MULTIPART_UPLOAD,
+          (keyArgs == null) ? null : keyArgs.toAuditMap(), ex));
+      metrics.incNumInitiateMultipartUploadFails();
+      throw ex;
+    }
+    return multipartInfo;
+  }
+
   @Override
   public OmMultipartInfo initiateMultipartUpload(OmKeyArgs keyArgs) throws
       IOException {
@@ -2550,6 +2827,238 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
     }
   }
 
+  @Override
+  public OzoneFileStatus getFileStatus(OmKeyArgs args) throws IOException {
+    if (isAclEnabled) {
+      checkAcls(ResourceType.KEY, StoreType.OZONE, ACLType.READ,
+          args.getVolumeName(), args.getBucketName(), args.getKeyName());
+    }
+    boolean auditSuccess = true;
+    try {
+      metrics.incNumGetFileStatus();
+      return keyManager.getFileStatus(args);
+    } catch (IOException ex) {
+      metrics.incNumGetFileStatusFails();
+      auditSuccess = false;
+      AUDIT.logWriteFailure(
+          buildAuditMessageForFailure(OMAction.GET_FILE_STATUS,
+              (args == null) ? null : args.toAuditMap(), ex));
+      throw ex;
+    } finally {
+      if (auditSuccess) {
+        AUDIT.logWriteSuccess(
+            buildAuditMessageForSuccess(OMAction.GET_FILE_STATUS,
+                (args == null) ? null : args.toAuditMap()));
+      }
+    }
+  }
+
+  @Override
+  public void createDirectory(OmKeyArgs args) throws IOException {
+    if (isAclEnabled) {
+      checkAcls(ResourceType.KEY, StoreType.OZONE, ACLType.WRITE,
+          args.getVolumeName(), args.getBucketName(), args.getKeyName());
+    }
+    boolean auditSuccess = true;
+    try {
+      metrics.incNumCreateDirectory();
+      keyManager.createDirectory(args);
+    } catch (IOException ex) {
+      metrics.incNumCreateDirectoryFails();
+      auditSuccess = false;
+      AUDIT.logWriteFailure(
+          buildAuditMessageForFailure(OMAction.CREATE_DIRECTORY,
+              (args == null) ? null : args.toAuditMap(), ex));
+      throw ex;
+    } finally {
+      if (auditSuccess) {
+        AUDIT.logWriteSuccess(
+            buildAuditMessageForSuccess(OMAction.CREATE_DIRECTORY,
+                (args == null) ? null : args.toAuditMap()));
+      }
+    }
+  }
+
+  @Override
+  public OpenKeySession createFile(OmKeyArgs args, boolean overWrite,
+      boolean recursive) throws IOException {
+    if (isAclEnabled) {
+      checkAcls(ResourceType.KEY, StoreType.OZONE, ACLType.WRITE,
+          args.getVolumeName(), args.getBucketName(), args.getKeyName());
+    }
+    boolean auditSuccess = true;
+    try {
+      metrics.incNumCreateFile();
+      return keyManager.createFile(args, overWrite, recursive);
+    } catch (Exception ex) {
+      metrics.incNumCreateFileFails();
+      auditSuccess = false;
+      AUDIT.logWriteFailure(buildAuditMessageForFailure(OMAction.CREATE_FILE,
+          (args == null) ? null : args.toAuditMap(), ex));
+      throw ex;
+    } finally {
+      if(auditSuccess){
+        AUDIT.logWriteSuccess(buildAuditMessageForSuccess(
+            OMAction.CREATE_FILE, (args == null) ? null : args.toAuditMap()));
+      }
+    }
+  }
+
+  @Override
+  public OmKeyInfo lookupFile(OmKeyArgs args) throws IOException {
+    if(isAclEnabled) {
+      checkAcls(ResourceType.KEY, StoreType.OZONE, ACLType.READ,
+          args.getVolumeName(), args.getBucketName(), args.getKeyName());
+    }
+    boolean auditSuccess = true;
+    try {
+      metrics.incNumLookupFile();
+      return keyManager.lookupFile(args);
+    } catch (Exception ex) {
+      metrics.incNumLookupFileFails();
+      auditSuccess = false;
+      AUDIT.logWriteFailure(buildAuditMessageForFailure(OMAction.LOOKUP_FILE,
+          (args == null) ? null : args.toAuditMap(), ex));
+      throw ex;
+    } finally {
+      if(auditSuccess){
+        AUDIT.logWriteSuccess(buildAuditMessageForSuccess(
+            OMAction.LOOKUP_FILE, (args == null) ? null : args.toAuditMap()));
+      }
+    }
+  }
+
+  @Override
+  public List<OzoneFileStatus> listStatus(OmKeyArgs args, boolean recursive,
+      String startKey, long numEntries) throws IOException {
+    if(isAclEnabled) {
+      checkAcls(ResourceType.KEY, StoreType.OZONE, ACLType.READ,
+          args.getVolumeName(), args.getBucketName(), args.getKeyName());
+    }
+    boolean auditSuccess = true;
+    try {
+      metrics.incNumListStatus();
+      return keyManager.listStatus(args, recursive, startKey, numEntries);
+    } catch (Exception ex) {
+      metrics.incNumListStatusFails();
+      auditSuccess = false;
+      AUDIT.logWriteFailure(buildAuditMessageForFailure(OMAction.LIST_STATUS,
+          (args == null) ? null : args.toAuditMap(), ex));
+      throw ex;
+    } finally {
+      if(auditSuccess){
+        AUDIT.logWriteSuccess(buildAuditMessageForSuccess(
+            OMAction.LIST_STATUS, (args == null) ? null : args.toAuditMap()));
+      }
+    }
+  }
+
+  /**
+   * Add acl for Ozone object. Return true if acl is added successfully else
+   * false.
+   *
+   * @param obj Ozone object for which acl should be added.
+   * @param acl ozone acl top be added.
+   * @throws IOException if there is error.
+   */
+  @Override
+  public boolean addAcl(OzoneObj obj, OzoneAcl acl) throws IOException {
+    if(isAclEnabled) {
+      checkAcls(obj.getResourceType(), obj.getStoreType(), ACLType.WRITE_ACL,
+          obj.getVolumeName(), obj.getBucketName(), obj.getKeyName());
+    }
+    // TODO: Audit ACL operation.
+    switch (obj.getResourceType()) {
+    case VOLUME:
+      return volumeManager.addAcl(obj, acl);
+
+    case BUCKET:
+      return bucketManager.addAcl(obj, acl);
+    default:
+      throw new OMException("Unexpected resource type: " +
+          obj.getResourceType(), INVALID_REQUEST);
+    }
+  }
+
+  /**
+   * Remove acl for Ozone object. Return true if acl is removed successfully
+   * else false.
+   *
+   * @param obj Ozone object.
+   * @param acl Ozone acl to be removed.
+   * @throws IOException if there is error.
+   */
+  @Override
+  public boolean removeAcl(OzoneObj obj, OzoneAcl acl) throws IOException {
+    if(isAclEnabled) {
+      checkAcls(obj.getResourceType(), obj.getStoreType(), ACLType.WRITE_ACL,
+          obj.getVolumeName(), obj.getBucketName(), obj.getKeyName());
+    }
+    // TODO: Audit ACL operation.
+    switch (obj.getResourceType()) {
+    case VOLUME:
+      return volumeManager.removeAcl(obj, acl);
+
+    case BUCKET:
+      return bucketManager.removeAcl(obj, acl);
+    default:
+      throw new OMException("Unexpected resource type: " +
+          obj.getResourceType(), INVALID_REQUEST);
+    }
+  }
+
+  /**
+   * Acls to be set for given Ozone object. This operations reset ACL for given
+   * object to list of ACLs provided in argument.
+   *
+   * @param obj Ozone object.
+   * @param acls List of acls.
+   * @throws IOException if there is error.
+   */
+  @Override
+  public boolean setAcl(OzoneObj obj, List<OzoneAcl> acls) throws IOException {
+    if(isAclEnabled) {
+      checkAcls(obj.getResourceType(), obj.getStoreType(), ACLType.WRITE_ACL,
+          obj.getVolumeName(), obj.getBucketName(), obj.getKeyName());
+    }
+    // TODO: Audit ACL operation.
+    switch (obj.getResourceType()) {
+    case VOLUME:
+      return volumeManager.setAcl(obj, acls);
+
+    case BUCKET:
+      return bucketManager.setAcl(obj, acls);
+    default:
+      throw new OMException("Unexpected resource type: " +
+          obj.getResourceType(), INVALID_REQUEST);
+    }
+  }
+
+  /**
+   * Returns list of ACLs for given Ozone object.
+   *
+   * @param obj Ozone object.
+   * @throws IOException if there is error.
+   */
+  @Override
+  public List<OzoneAcl> getAcl(OzoneObj obj) throws IOException {
+    if(isAclEnabled) {
+      checkAcls(obj.getResourceType(), obj.getStoreType(), ACLType.READ_ACL,
+          obj.getVolumeName(), obj.getBucketName(), obj.getKeyName());
+    }
+    // TODO: Audit ACL operation.
+    switch (obj.getResourceType()) {
+    case VOLUME:
+      return volumeManager.getAcl(obj);
+
+    case BUCKET:
+      return bucketManager.getAcl(obj);
+    default:
+      throw new OMException("Unexpected resource type: " +
+          obj.getResourceType(), INVALID_REQUEST);
+    }
+  }
+
   /**
    * Startup options.
    */
@@ -2615,5 +3124,9 @@ public final class OzoneManager extends ServiceRuntimeInfoImpl
   @Override
   public OMFailoverProxyProvider getOMFailoverProxyProvider() {
     return null;
+  }
+
+  public OMMetrics getOmMetrics() {
+    return metrics;
   }
 }

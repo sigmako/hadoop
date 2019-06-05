@@ -22,7 +22,6 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -39,17 +38,18 @@ import org.junit.Test;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.s3a.Constants;
 import org.apache.hadoop.fs.s3a.S3AFileSystem;
-import org.apache.hadoop.fs.s3a.S3AUtils;
 import org.apache.hadoop.fs.s3a.s3guard.S3GuardTool.Destroy;
 import org.apache.hadoop.fs.s3a.s3guard.S3GuardTool.Init;
-import org.apache.hadoop.test.LambdaTestUtils;
 
 import static org.apache.hadoop.fs.s3a.Constants.S3GUARD_DDB_REGION_KEY;
 import static org.apache.hadoop.fs.s3a.Constants.S3GUARD_DDB_TABLE_NAME_KEY;
 import static org.apache.hadoop.fs.s3a.Constants.S3GUARD_DDB_TABLE_TAG;
+import static org.apache.hadoop.fs.s3a.S3ATestUtils.getTestDynamoTablePrefix;
+import static org.apache.hadoop.fs.s3a.S3AUtils.setBucketOption;
 import static org.apache.hadoop.fs.s3a.s3guard.DynamoDBMetadataStore.*;
 import static org.apache.hadoop.fs.s3a.s3guard.S3GuardTool.*;
 import static org.apache.hadoop.fs.s3a.s3guard.S3GuardToolTestHelper.exec;
+import static org.apache.hadoop.test.LambdaTestUtils.intercept;
 
 /**
  * Test S3Guard related CLI commands against DynamoDB.
@@ -81,11 +81,12 @@ public class ITestS3GuardToolDynamoDB extends AbstractS3GuardToolTestBase {
 
   @Test
   public void testInvalidRegion() throws Exception {
-    final String testTableName = "testInvalidRegion" + new Random().nextInt();
+    final String testTableName =
+        getTestTableName("testInvalidRegion" + new Random().nextInt());
     final String testRegion = "invalidRegion";
     // Initialize MetadataStore
     final Init initCmd = new Init(getFileSystem().getConf());
-    LambdaTestUtils.intercept(IOException.class,
+    intercept(IOException.class,
         new Callable<String>() {
           @Override
           public String call() throws Exception {
@@ -118,7 +119,7 @@ public class ITestS3GuardToolDynamoDB extends AbstractS3GuardToolTestBase {
     );
 
     conf.set(S3GUARD_DDB_TABLE_NAME_KEY,
-        "testDynamoTableTagging-" + UUID.randomUUID());
+        getTestTableName("testDynamoTableTagging-" + UUID.randomUUID()));
     S3GuardTool.Init cmdR = new S3GuardTool.Init(conf);
     Map<String, String> tagMap = new HashMap<>();
     tagMap.put("hello", "dynamo");
@@ -160,78 +161,14 @@ public class ITestS3GuardToolDynamoDB extends AbstractS3GuardToolTestBase {
     return stringBuilder.toString();
   }
 
-
-  private static class Capacities {
-    private final long read, write;
-
-    Capacities(long read, long write) {
-      this.read = read;
-      this.write = write;
-    }
-
-    public long getRead() {
-      return read;
-    }
-
-    public long getWrite() {
-      return write;
-    }
-
-    String getReadStr() {
-      return Long.toString(read);
-    }
-
-    String getWriteStr() {
-      return Long.toString(write);
-    }
-
-    void checkEquals(String text, Capacities that) throws Exception {
-      if (!this.equals(that)) {
-        throw new Exception(text + " expected = " + this +"; actual = "+ that);
-      }
-    }
-
-    @Override
-    public boolean equals(Object o) {
-      if (this == o) {
-        return true;
-      }
-      if (o == null || getClass() != o.getClass()) {
-        return false;
-      }
-      Capacities that = (Capacities) o;
-      return read == that.read && write == that.write;
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(read, write);
-    }
-
-    @Override
-    public String toString() {
-      final StringBuilder sb = new StringBuilder("Capacities{");
-      sb.append("read=").append(read);
-      sb.append(", write=").append(write);
-      sb.append('}');
-      return sb.toString();
-    }
-  }
-
-  private Capacities getCapacities() throws IOException {
-    Map<String, String> diagnostics = getMetadataStore().getDiagnostics();
-    return getCapacities(diagnostics);
-  }
-
-  private Capacities getCapacities(Map<String, String> diagnostics) {
-    return new Capacities(
-        Long.parseLong(diagnostics.get(DynamoDBMetadataStore.READ_CAPACITY)),
-        Long.parseLong(diagnostics.get(DynamoDBMetadataStore.WRITE_CAPACITY)));
+  private DDBCapacities getCapacities() throws IOException {
+    return DDBCapacities.extractCapacities(getMetadataStore().getDiagnostics());
   }
 
   @Test
   public void testDynamoDBInitDestroyCycle() throws Throwable {
-    String testTableName = "testDynamoDBInitDestroy" + new Random().nextInt();
+    String testTableName =
+        getTestTableName("testDynamoDBInitDestroy" + new Random().nextInt());
     String testS3Url = path(testTableName).toString();
     S3AFileSystem fs = getFileSystem();
     DynamoDB db = null;
@@ -240,7 +177,11 @@ public class ITestS3GuardToolDynamoDB extends AbstractS3GuardToolTestBase {
       Init initCmd = new Init(fs.getConf());
       expectSuccess("Init command did not exit successfully - see output",
           initCmd,
-          "init", "-meta", "dynamodb://" + testTableName, testS3Url);
+          Init.NAME,
+          "-" + READ_FLAG, "2",
+          "-" + WRITE_FLAG, "2",
+          "-" + META_FLAG, "dynamodb://" + testTableName,
+          testS3Url);
       // Verify it exists
       MetadataStore ms = getMetadataStore();
       assertTrue("metadata store should be DynamoDBMetadataStore",
@@ -253,7 +194,7 @@ public class ITestS3GuardToolDynamoDB extends AbstractS3GuardToolTestBase {
       Configuration conf = fs.getConf();
       String bucket = fs.getBucket();
       // force in a new bucket
-      S3AUtils.setBucketOption(conf, bucket, Constants.S3_METADATA_STORE_IMPL,
+      setBucketOption(conf, bucket, Constants.S3_METADATA_STORE_IMPL,
           Constants.S3GUARD_METASTORE_DYNAMO);
       initCmd = new Init(conf);
       String initOutput = exec(initCmd,
@@ -273,18 +214,32 @@ public class ITestS3GuardToolDynamoDB extends AbstractS3GuardToolTestBase {
       // get the current values to set again
 
       // play with the set-capacity option
-      Capacities original = getCapacities();
-      String fsURI = getFileSystem().getUri().toString();
-      String capacityOut = exec(newSetCapacity(),
-          S3GuardTool.SetCapacity.NAME,
-          fsURI);
-      LOG.info("Set Capacity output=\n{}", capacityOut);
-      capacityOut = exec(newSetCapacity(),
-          S3GuardTool.SetCapacity.NAME,
-          "-" + READ_FLAG, original.getReadStr(),
-          "-" + WRITE_FLAG, original.getWriteStr(),
-          fsURI);
-      LOG.info("Set Capacity output=\n{}", capacityOut);
+      DDBCapacities original = getCapacities();
+        String fsURI = getFileSystem().getUri().toString();
+      if (!original.isOnDemandTable()) {
+        // classic provisioned table
+        assertTrue("Wrong billing mode in " + info,
+            info.contains(BILLING_MODE_PROVISIONED));
+        String capacityOut = exec(newSetCapacity(),
+            SetCapacity.NAME,
+            fsURI);
+        LOG.info("Set Capacity output=\n{}", capacityOut);
+        capacityOut = exec(newSetCapacity(),
+            SetCapacity.NAME,
+            "-" + READ_FLAG, original.getReadStr(),
+            "-" + WRITE_FLAG, original.getWriteStr(),
+            fsURI);
+        LOG.info("Set Capacity output=\n{}", capacityOut);
+      } else {
+        // on demand table
+        assertTrue("Wrong billing mode in " + info,
+            info.contains(BILLING_MODE_PER_REQUEST));
+        // on demand tables fail here, so expect that
+        intercept(IOException.class, E_ON_DEMAND_NO_SET_CAPACITY,
+            () -> exec(newSetCapacity(),
+                    SetCapacity.NAME,
+                    fsURI));
+      }
 
       // that call does not change the values
       original.checkEquals("unchanged", getCapacities());
@@ -332,7 +287,7 @@ public class ITestS3GuardToolDynamoDB extends AbstractS3GuardToolTestBase {
   public void testDestroyUnknownTable() throws Throwable {
     run(S3GuardTool.Destroy.NAME,
         "-region", "us-west-2",
-        "-meta", DYNAMODB_TABLE);
+        "-meta", "dynamodb://" + getTestTableName(DYNAMODB_TABLE));
   }
 
 }

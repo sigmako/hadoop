@@ -269,7 +269,7 @@ public class FederationClientInterceptor
     for (int i = 0; i < numSubmitRetries; ++i) {
       SubClusterId subClusterId = getRandomActiveSubCluster(subClustersActive);
       LOG.debug(
-          "getNewApplication try #" + i + " on SubCluster " + subClusterId);
+          "getNewApplication try #{} on SubCluster {}", i, subClusterId);
       ApplicationClientProtocol clientRMProxy =
           getClientRMProxyForSubCluster(subClusterId);
       GetNewApplicationResponse response = null;
@@ -622,7 +622,7 @@ public class FederationClientInterceptor
           ApplicationClientProtocol protocol =
               getClientRMProxyForSubCluster(subClusterId);
           Method method = ApplicationClientProtocol.class
-              .getDeclaredMethod(request.getMethodName(), request.getTypes());
+              .getMethod(request.getMethodName(), request.getTypes());
           return method.invoke(protocol, request.getParams());
         }
       });

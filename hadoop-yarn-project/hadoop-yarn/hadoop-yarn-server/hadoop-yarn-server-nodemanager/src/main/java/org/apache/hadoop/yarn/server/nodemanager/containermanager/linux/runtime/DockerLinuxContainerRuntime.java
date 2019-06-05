@@ -265,6 +265,9 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
   @InterfaceAudience.Private
   public static final String ENV_DOCKER_CONTAINER_YARN_SYSFS =
       "YARN_CONTAINER_RUNTIME_YARN_SYSFS_ENABLE";
+  @InterfaceAudience.Private
+  public static final String ENV_DOCKER_CONTAINER_DOCKER_RUNTIME =
+      "YARN_CONTAINER_RUNTIME_DOCKER_RUNTIME";
   public static final String YARN_SYSFS_PATH =
       "/hadoop/yarn/sysfs";
   private Configuration conf;
@@ -275,7 +278,9 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
   private String defaultImageName;
   private Boolean defaultImageUpdate;
   private Set<String> allowedNetworks = new HashSet<>();
+  private Set<String> allowedRuntimes = new HashSet<>();
   private String defaultNetwork;
+  private String defaultRuntime;
   private CGroupsHandler cGroupsHandler;
   private AccessControlList privilegedContainersAcl;
   private boolean enableUserReMapping;
@@ -349,6 +354,7 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
     this.conf = conf;
     dockerClient = new DockerClient();
     allowedNetworks.clear();
+    allowedRuntimes.clear();
     defaultROMounts.clear();
     defaultRWMounts.clear();
     defaultTmpfsMounts.clear();
@@ -363,6 +369,10 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
     defaultNetwork = conf.getTrimmed(
         YarnConfiguration.NM_DOCKER_DEFAULT_CONTAINER_NETWORK,
         YarnConfiguration.DEFAULT_NM_DOCKER_DEFAULT_CONTAINER_NETWORK);
+    allowedRuntimes.addAll(Arrays.asList(
+        conf.getTrimmedStrings(
+            YarnConfiguration.NM_DOCKER_ALLOWED_CONTAINER_RUNTIMES,
+            YarnConfiguration.DEFAULT_NM_DOCKER_ALLOWED_CONTAINER_RUNTIMES)));
 
     if(!allowedNetworks.contains(defaultNetwork)) {
       String message = "Default network: " + defaultNetwork
@@ -511,11 +521,8 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
             + ", please check error message in log to understand "
             + "why this happens.";
     LOG.error(message);
-
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("All docker volumes in the system, command="
-          + dockerVolumeInspectCommand.toString());
-    }
+    LOG.debug("All docker volumes in the system, command={}",
+        dockerVolumeInspectCommand);
 
     throw new ContainerExecutionException(message);
   }
@@ -529,6 +536,19 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
     String msg = "Disallowed network:  '" + network
         + "' specified. Allowed networks: are " + allowedNetworks
         .toString();
+    throw new ContainerExecutionException(msg);
+  }
+
+  private void validateContainerRuntimeType(String runtime)
+          throws ContainerExecutionException {
+    if (runtime == null || runtime.isEmpty()
+        || allowedRuntimes.contains(runtime)) {
+      return;
+    }
+
+    String msg = "Disallowed runtime:  '" + runtime
+            + "' specified. Allowed networks: are " + allowedRuntimes
+            .toString();
     throw new ContainerExecutionException(msg);
   }
 
@@ -630,30 +650,22 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
   protected void addCGroupParentIfRequired(String resourcesOptions,
       String containerIdStr, DockerRunCommand runCommand) {
     if (cGroupsHandler == null) {
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("cGroupsHandler is null. cgroups are not in use. nothing to"
+      LOG.debug("cGroupsHandler is null. cgroups are not in use. nothing to"
             + " do.");
-      }
       return;
     }
 
     if (resourcesOptions.equals(PrivilegedOperation.CGROUP_ARG_PREFIX
             + PrivilegedOperation.CGROUP_ARG_NO_TASKS)) {
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("no resource restrictions specified. not using docker's "
-            + "cgroup options");
-      }
+      LOG.debug("no resource restrictions specified. not using docker's "
+          + "cgroup options");
     } else {
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("using docker's cgroups options");
-      }
+      LOG.debug("using docker's cgroups options");
 
       String cGroupPath = "/"
           + cGroupsHandler.getRelativePathForCGroup(containerIdStr);
 
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("using cgroup parent: " + cGroupPath);
-      }
+      LOG.debug("using cgroup parent: {}", cGroupPath);
 
       runCommand.setCGroupParent(cGroupPath);
     }
@@ -812,6 +824,7 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
     String imageName = environment.get(ENV_DOCKER_CONTAINER_IMAGE);
     String network = environment.get(ENV_DOCKER_CONTAINER_NETWORK);
     String hostname = environment.get(ENV_DOCKER_CONTAINER_HOSTNAME);
+    String runtime = environment.get(ENV_DOCKER_CONTAINER_DOCKER_RUNTIME);
     boolean useEntryPoint = checkUseEntryPoint(environment);
 
     if (imageName == null || imageName.isEmpty()) {
@@ -826,6 +839,8 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
     validateHostname(hostname);
 
     validateImageName(imageName);
+
+    validateContainerRuntimeType(runtime);
 
     if (defaultImageUpdate) {
       pullImageFromRemote(containerIdStr, imageName);
@@ -897,6 +912,9 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
     }
 
     runCommand.setCapabilities(capabilities);
+    if (runtime != null && !runtime.isEmpty()) {
+      runCommand.addRuntime(runtime);
+    }
 
     runCommand.addAllReadWriteMountLocations(containerLogDirs);
     runCommand.addAllReadWriteMountLocations(applicationLocalDirs);
@@ -1368,9 +1386,7 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
     if (tcCommandFile != null) {
       launchOp.appendArgs(tcCommandFile);
     }
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Launching container with cmd: " + command);
-    }
+    LOG.debug("Launching container with cmd: {}", command);
 
     return launchOp;
   }
@@ -1391,8 +1407,8 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
       throws ContainerExecutionException {
     long start = System.currentTimeMillis();
     DockerPullCommand dockerPullCommand = new DockerPullCommand(imageName);
-    LOG.debug("now pulling docker image." + " image name: " + imageName + ","
-        + " container: " + containerIdStr);
+    LOG.debug("now pulling docker image. image name: {}, container: {}",
+        imageName, containerIdStr);
 
     DockerCommandExecutor.executeDockerCommand(dockerPullCommand,
         containerIdStr, null,
@@ -1400,10 +1416,9 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
 
     long end = System.currentTimeMillis();
     long pullImageTimeMs = end - start;
-    LOG.debug("pull docker image done with "
-        + String.valueOf(pullImageTimeMs) + "ms spent."
-        + " image name: " + imageName + ","
-        + " container: " + containerIdStr);
+
+    LOG.debug("pull docker image done with {}ms specnt. image name: {},"
+        + " container: {}", pullImageTimeMs, imageName, containerIdStr);
   }
 
   private void executeLivelinessCheck(ContainerRuntimeContext ctx)

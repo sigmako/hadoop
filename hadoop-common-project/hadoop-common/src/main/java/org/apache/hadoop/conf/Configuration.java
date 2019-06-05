@@ -30,7 +30,6 @@ import java.io.BufferedInputStream;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -43,6 +42,7 @@ import java.net.InetSocketAddress;
 import java.net.JarURLConnection;
 import java.net.URL;
 import java.net.URLConnection;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -69,6 +69,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import javax.annotation.Nullable;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.stream.XMLInputFactory;
@@ -1805,6 +1806,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * Return time duration in the given time unit. Valid units are encoded in
    * properties as suffixes: nanoseconds (ns), microseconds (us), milliseconds
    * (ms), seconds (s), minutes (m), hours (h), and days (d).
+   *
    * @param name Property name
    * @param defaultValue Value returned if no mapping exists.
    * @param unit Unit to convert the stored property, if it exists.
@@ -1813,20 +1815,44 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * @return time duration in given time unit
    */
   public long getTimeDuration(String name, long defaultValue, TimeUnit unit) {
-    String vStr = get(name);
-    if (null == vStr) {
-      return defaultValue;
-    } else {
-      return getTimeDurationHelper(name, vStr, unit);
-    }
+    return getTimeDuration(name, defaultValue, unit, unit);
   }
 
   public long getTimeDuration(String name, String defaultValue, TimeUnit unit) {
+    return getTimeDuration(name, defaultValue, unit, unit);
+  }
+
+  /**
+   * Return time duration in the given time unit. Valid units are encoded in
+   * properties as suffixes: nanoseconds (ns), microseconds (us), milliseconds
+   * (ms), seconds (s), minutes (m), hours (h), and days (d). If no unit is
+   * provided, the default unit is applied.
+   *
+   * @param name Property name
+   * @param defaultValue Value returned if no mapping exists.
+   * @param defaultUnit Default time unit if no valid suffix is provided.
+   * @param returnUnit The unit used for the returned value.
+   * @throws NumberFormatException If the property stripped of its unit is not
+   *         a number
+   * @return time duration in given time unit
+   */
+  public long getTimeDuration(String name, long defaultValue,
+      TimeUnit defaultUnit, TimeUnit returnUnit) {
     String vStr = get(name);
     if (null == vStr) {
-      return getTimeDurationHelper(name, defaultValue, unit);
+      return returnUnit.convert(defaultValue, defaultUnit);
     } else {
-      return getTimeDurationHelper(name, vStr, unit);
+      return getTimeDurationHelper(name, vStr, defaultUnit, returnUnit);
+    }
+  }
+
+  public long getTimeDuration(String name, String defaultValue,
+      TimeUnit defaultUnit, TimeUnit returnUnit) {
+    String vStr = get(name);
+    if (null == vStr) {
+      return getTimeDurationHelper(name, defaultValue, defaultUnit, returnUnit);
+    } else {
+      return getTimeDurationHelper(name, vStr, defaultUnit, returnUnit);
     }
   }
 
@@ -1834,26 +1860,43 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * Return time duration in the given time unit. Valid units are encoded in
    * properties as suffixes: nanoseconds (ns), microseconds (us), milliseconds
    * (ms), seconds (s), minutes (m), hours (h), and days (d).
+   *
    * @param name Property name
    * @param vStr The string value with time unit suffix to be converted.
    * @param unit Unit to convert the stored property, if it exists.
    */
   public long getTimeDurationHelper(String name, String vStr, TimeUnit unit) {
+    return getTimeDurationHelper(name, vStr, unit, unit);
+  }
+
+  /**
+   * Return time duration in the given time unit. Valid units are encoded in
+   * properties as suffixes: nanoseconds (ns), microseconds (us), milliseconds
+   * (ms), seconds (s), minutes (m), hours (h), and days (d).
+   *
+   * @param name Property name
+   * @param vStr The string value with time unit suffix to be converted.
+   * @param defaultUnit Unit to convert the stored property, if it exists.
+   * @param returnUnit Unit for the returned value.
+   */
+  private long getTimeDurationHelper(String name, String vStr,
+      TimeUnit defaultUnit, TimeUnit returnUnit) {
     vStr = vStr.trim();
     vStr = StringUtils.toLowerCase(vStr);
     ParsedTimeDuration vUnit = ParsedTimeDuration.unitFor(vStr);
     if (null == vUnit) {
-      logDeprecation("No unit for " + name + "(" + vStr + ") assuming " + unit);
-      vUnit = ParsedTimeDuration.unitFor(unit);
+      logDeprecation("No unit for " + name + "(" + vStr + ") assuming " +
+          defaultUnit);
+      vUnit = ParsedTimeDuration.unitFor(defaultUnit);
     } else {
       vStr = vStr.substring(0, vStr.lastIndexOf(vUnit.suffix()));
     }
 
     long raw = Long.parseLong(vStr);
-    long converted = unit.convert(raw, vUnit.unit());
-    if (vUnit.unit().convert(converted, unit) < raw) {
+    long converted = returnUnit.convert(raw, vUnit.unit());
+    if (vUnit.unit().convert(converted, returnUnit) < raw) {
       logDeprecation("Possible loss of precision converting " + vStr
-          + vUnit.suffix() + " to " + unit + " for " + name);
+          + vUnit.suffix() + " to " + returnUnit + " for " + name);
     }
     return converted;
   }
@@ -3032,7 +3075,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
           LOG.debug("parsing File " + file);
         }
         reader = (XMLStreamReader2)parse(new BufferedInputStream(
-            new FileInputStream(file)), ((Path)resource).toString(),
+            Files.newInputStream(file.toPath())), ((Path) resource).toString(),
             isRestricted);
       }
     } else if (resource instanceof InputStream) {
@@ -3470,7 +3513,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * </ul>
    * @param out the writer to write to.
    */
-  public void writeXml(String propertyName, Writer out)
+  public void writeXml(@Nullable String propertyName, Writer out)
       throws IOException, IllegalArgumentException {
     Document doc = asXmlDocument(propertyName);
 
@@ -3492,7 +3535,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   /**
    * Return the XML DOM corresponding to this Configuration.
    */
-  private synchronized Document asXmlDocument(String propertyName)
+  private synchronized Document asXmlDocument(@Nullable String propertyName)
       throws IOException, IllegalArgumentException {
     Document doc;
     try {

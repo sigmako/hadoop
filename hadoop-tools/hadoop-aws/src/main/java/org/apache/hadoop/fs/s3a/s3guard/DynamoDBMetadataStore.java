@@ -88,6 +88,7 @@ import org.apache.hadoop.fs.s3a.AWSServiceThrottledException;
 import org.apache.hadoop.fs.s3a.Constants;
 import org.apache.hadoop.fs.s3a.Invoker;
 import org.apache.hadoop.fs.s3a.Retries;
+import org.apache.hadoop.fs.s3a.S3AFileStatus;
 import org.apache.hadoop.fs.s3a.S3AFileSystem;
 import org.apache.hadoop.fs.s3a.S3AInstrumentation;
 import org.apache.hadoop.fs.s3a.S3AUtils;
@@ -129,6 +130,14 @@ import static org.apache.hadoop.fs.s3a.s3guard.S3Guard.*;
  *      This attribute is meaningful only to file items.</li>
  * <li> optional long attribute revealing block size of the file.
  *      This attribute is meaningful only to file items.</li>
+ * <li> optional string attribute tracking the s3 eTag of the file.
+ *      May be absent if the metadata was entered with a version of S3Guard
+ *      before this was tracked.
+ *      This attribute is meaningful only to file items.</li>
+  * <li> optional string attribute tracking the s3 versionId of the file.
+ *      May be absent if the metadata was entered with a version of S3Guard
+ *      before this was tracked.
+ *      This attribute is meaningful only to file items.</li>
  * </ul>
  *
  * The DynamoDB partition key is the parent, and the range key is the child.
@@ -155,20 +164,20 @@ import static org.apache.hadoop.fs.s3a.s3guard.S3Guard.*;
  * This is persisted to a single DynamoDB table as:
  *
  * <pre>
- * =========================================================================
- * | parent                 | child | is_dir | mod_time | len |     ...    |
- * =========================================================================
- * | /bucket                | dir1  | true   |          |     |            |
- * | /bucket/dir1           | dir2  | true   |          |     |            |
- * | /bucket/dir1           | dir3  | true   |          |     |            |
- * | /bucket/dir1/dir2      | file1 |        |   100    | 111 |            |
- * | /bucket/dir1/dir2      | file2 |        |   200    | 222 |            |
- * | /bucket/dir1/dir3      | dir4  | true   |          |     |            |
- * | /bucket/dir1/dir3      | dir5  | true   |          |     |            |
- * | /bucket/dir1/dir3/dir4 | file3 |        |   300    | 333 |            |
- * | /bucket/dir1/dir3/dir5 | file4 |        |   400    | 444 |            |
- * | /bucket/dir1/dir3      | dir6  | true   |          |     |            |
- * =========================================================================
+ * ====================================================================================
+ * | parent                 | child | is_dir | mod_time | len | etag | ver_id |  ...  |
+ * ====================================================================================
+ * | /bucket                | dir1  | true   |          |     |      |        |       |
+ * | /bucket/dir1           | dir2  | true   |          |     |      |        |       |
+ * | /bucket/dir1           | dir3  | true   |          |     |      |        |       |
+ * | /bucket/dir1/dir2      | file1 |        |   100    | 111 | abc  |  mno   |       |
+ * | /bucket/dir1/dir2      | file2 |        |   200    | 222 | def  |  pqr   |       |
+ * | /bucket/dir1/dir3      | dir4  | true   |          |     |      |        |       |
+ * | /bucket/dir1/dir3      | dir5  | true   |          |     |      |        |       |
+ * | /bucket/dir1/dir3/dir4 | file3 |        |   300    | 333 | ghi  |  stu   |       |
+ * | /bucket/dir1/dir3/dir5 | file4 |        |   400    | 444 | jkl  |  vwx   |       |
+ * | /bucket/dir1/dir3      | dir6  | true   |          |     |      |        |       |
+ * ====================================================================================
  * </pre>
  *
  * This choice of schema is efficient for read access patterns.
@@ -211,6 +220,18 @@ public class DynamoDBMetadataStore implements MetadataStore,
       = "Database table is from an incompatible S3Guard version.";
 
   @VisibleForTesting
+  static final String BILLING_MODE
+      = "billing-mode";
+
+  @VisibleForTesting
+  static final String BILLING_MODE_PER_REQUEST
+      = "per-request";
+
+  @VisibleForTesting
+  static final String BILLING_MODE_PROVISIONED
+      = "provisioned";
+
+  @VisibleForTesting
   static final String DESCRIPTION
       = "S3Guard metadata store in DynamoDB";
   @VisibleForTesting
@@ -228,6 +249,9 @@ public class DynamoDBMetadataStore implements MetadataStore,
 
   @VisibleForTesting
   static final String THROTTLING = "Throttling";
+
+  public static final String E_ON_DEMAND_NO_SET_CAPACITY
+      = "Neither ReadCapacityUnits nor WriteCapacityUnits can be specified when BillingMode is PAY_PER_REQUEST";
 
   private static ValueMap deleteTrackingValueMap =
       new ValueMap().withBoolean(":false", false);
@@ -603,16 +627,15 @@ public class DynamoDBMetadataStore implements MetadataStore,
   }
 
   /**
-   * Make a FileStatus object for a directory at given path.  The FileStatus
-   * only contains what S3A needs, and omits mod time since S3A uses its own
-   * implementation which returns current system time.
-   * @param owner  username of owner
+   * Make a S3AFileStatus object for a directory at given path.
+   * The FileStatus only contains what S3A needs, and omits mod time
+   * since S3A uses its own implementation which returns current system time.
+   * @param dirOwner  username of owner
    * @param path   path to dir
-   * @return new FileStatus
+   * @return new S3AFileStatus
    */
-  private FileStatus makeDirStatus(String owner, Path path) {
-    return new FileStatus(0, true, 1, 0, 0, 0, null,
-            owner, null, path);
+  private S3AFileStatus makeDirStatus(String dirOwner, Path path) {
+    return new S3AFileStatus(Tristate.UNKNOWN, path, dirOwner);
   }
 
   @Override
@@ -638,20 +661,40 @@ public class DynamoDBMetadataStore implements MetadataStore,
             metas.add(meta);
           }
 
+          // Minor race condition here - if the path is deleted between
+          // getting the list of items and the directory metadata we might
+          // get a null in DDBPathMetadata.
           DDBPathMetadata dirPathMeta = get(path);
-          boolean isAuthoritative = false;
-          if(dirPathMeta != null) {
-            isAuthoritative = dirPathMeta.isAuthoritativeDir();
-          }
 
-          LOG.trace("Listing table {} in region {} for {} returning {}",
-              tableName, region, path, metas);
-
-          return (metas.isEmpty() && dirPathMeta == null)
-              ? null
-              : new DirListingMetadata(path, metas, isAuthoritative,
-              dirPathMeta.getLastUpdated());
+          return getDirListingMetadataFromDirMetaAndList(path, metas,
+              dirPathMeta);
         });
+  }
+
+  DirListingMetadata getDirListingMetadataFromDirMetaAndList(Path path,
+      List<PathMetadata> metas, DDBPathMetadata dirPathMeta) {
+    boolean isAuthoritative = false;
+    if (dirPathMeta != null) {
+      isAuthoritative = dirPathMeta.isAuthoritativeDir();
+    }
+
+    LOG.trace("Listing table {} in region {} for {} returning {}",
+        tableName, region, path, metas);
+
+    if (!metas.isEmpty() && dirPathMeta == null) {
+      // We handle this case as the directory is deleted.
+      LOG.warn("Directory marker is deleted, but the list of the directory "
+          + "elements is not empty: {}. This case is handled as if the "
+          + "directory was deleted.", metas);
+      return null;
+    }
+
+    if(metas.isEmpty() && dirPathMeta == null) {
+      return null;
+    }
+
+    return new DirListingMetadata(path, metas, isAuthoritative,
+        dirPathMeta.getLastUpdated());
   }
 
   /**
@@ -675,7 +718,7 @@ public class DynamoDBMetadataStore implements MetadataStore,
       while (!parent.isRoot() && !ancestry.containsKey(parent)) {
         LOG.debug("auto-create ancestor path {} for child path {}",
             parent, path);
-        final FileStatus status = makeDirStatus(parent, username);
+        final S3AFileStatus status = makeDirStatus(parent, username);
         ancestry.put(parent, new DDBPathMetadata(status, Tristate.FALSE,
             false));
         parent = parent.getParent();
@@ -880,7 +923,7 @@ public class DynamoDBMetadataStore implements MetadataStore,
     while (path != null && !path.isRoot()) {
       final Item item = getConsistentItem(path);
       if (!itemExists(item)) {
-        final FileStatus status = makeDirStatus(path, username);
+        final S3AFileStatus status = makeDirStatus(path, username);
         metasToPut.add(new DDBPathMetadata(status, Tristate.FALSE, false,
             meta.isAuthoritativeDir(), meta.getLastUpdated()));
         path = path.getParent();
@@ -903,9 +946,8 @@ public class DynamoDBMetadataStore implements MetadataStore,
   }
 
   /** Create a directory FileStatus using current system time as mod time. */
-  static FileStatus makeDirStatus(Path f, String owner) {
-    return  new FileStatus(0, true, 1, 0, System.currentTimeMillis(), 0,
-        null, owner, owner, f);
+  static S3AFileStatus makeDirStatus(Path f, String owner) {
+    return new S3AFileStatus(Tristate.UNKNOWN, f, owner);
   }
 
   /**
@@ -1495,6 +1537,10 @@ public class DynamoDBMetadataStore implements MetadataStore,
           = desc.getProvisionedThroughput();
       map.put(READ_CAPACITY, throughput.getReadCapacityUnits().toString());
       map.put(WRITE_CAPACITY, throughput.getWriteCapacityUnits().toString());
+      map.put(BILLING_MODE,
+          throughput.getWriteCapacityUnits() == 0
+              ? BILLING_MODE_PER_REQUEST
+              : BILLING_MODE_PROVISIONED);
       map.put(TABLE, desc.toString());
       map.put(MetadataStoreCapabilities.PERSISTS_AUTHORITATIVE_BIT,
           Boolean.toString(true));
@@ -1537,6 +1583,11 @@ public class DynamoDBMetadataStore implements MetadataStore,
     long newWrite = getLongParam(parameters,
             S3GUARD_DDB_TABLE_CAPACITY_WRITE_KEY,
             currentWrite);
+
+    if (currentRead == 0 || currentWrite == 0) {
+      // table is pay on demand
+      throw new IOException(E_ON_DEMAND_NO_SET_CAPACITY);
+    }
 
     if (newRead != currentRead || newWrite != currentWrite) {
       LOG.info("Current table capacity is read: {}, write: {}",

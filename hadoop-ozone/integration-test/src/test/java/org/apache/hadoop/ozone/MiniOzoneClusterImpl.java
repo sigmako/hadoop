@@ -23,11 +23,11 @@ import java.util.List;
 import java.util.Optional;
 import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.StorageUnit;
 import org.apache.hadoop.hdds.HddsConfigKeys;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.scm.server.SCMStorageConfig;
+import org.apache.hadoop.hdds.security.x509.certificate.client.CertificateClient;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.ipc.Client;
@@ -95,6 +95,7 @@ public class MiniOzoneClusterImpl implements MiniOzoneCluster {
 
   // Timeout for the cluster to be ready
   private int waitForClusterToBeReadyTimeout = 60000; // 1 min
+  private CertificateClient caClient;
 
   /**
    * Creates a new MiniOzoneCluster.
@@ -102,9 +103,9 @@ public class MiniOzoneClusterImpl implements MiniOzoneCluster {
    * @throws IOException if there is an I/O error
    */
   MiniOzoneClusterImpl(OzoneConfiguration conf,
-                               OzoneManager ozoneManager,
-                               StorageContainerManager scm,
-                               List<HddsDatanodeService> hddsDatanodes) {
+                       OzoneManager ozoneManager,
+                       StorageContainerManager scm,
+                       List<HddsDatanodeService> hddsDatanodes) {
     this.conf = conf;
     this.ozoneManager = ozoneManager;
     this.scm = scm;
@@ -157,17 +158,17 @@ public class MiniOzoneClusterImpl implements MiniOzoneCluster {
   }
 
   /**
-   * Waits for SCM to be out of Chill Mode. Many tests can be run iff we are out
-   * of Chill mode.
+   * Waits for SCM to be out of Safe Mode. Many tests can be run iff we are out
+   * of Safe mode.
    *
    * @throws TimeoutException
    * @throws InterruptedException
    */
   @Override
-  public void waitTobeOutOfChillMode()
+  public void waitTobeOutOfSafeMode()
       throws TimeoutException, InterruptedException {
     GenericTestUtils.waitFor(() -> {
-      if (!scm.isInChillMode()) {
+      if (!scm.isInSafeMode()) {
         return true;
       }
       LOG.info("Waiting for cluster to be ready. No datanodes found");
@@ -190,7 +191,8 @@ public class MiniOzoneClusterImpl implements MiniOzoneCluster {
     return hddsDatanodes;
   }
 
-  private int getHddsDatanodeIndex(DatanodeDetails dn) throws IOException {
+  @Override
+  public int getHddsDatanodeIndex(DatanodeDetails dn) throws IOException {
     for (HddsDatanodeService service : hddsDatanodes) {
       if (service.getDatanodeDetails().equals(dn)) {
         return hddsDatanodes.indexOf(service);
@@ -247,14 +249,16 @@ public class MiniOzoneClusterImpl implements MiniOzoneCluster {
   }
 
   @Override
-  public void restartStorageContainerManager()
+  public void restartStorageContainerManager(boolean waitForDatanode)
       throws TimeoutException, InterruptedException, IOException,
       AuthenticationException {
     scm.stop();
     scm.join();
     scm = StorageContainerManager.createSCM(null, conf);
     scm.start();
-    waitForClusterToBeReady();
+    if (waitForDatanode) {
+      waitForClusterToBeReady();
+    }
   }
 
   @Override
@@ -270,7 +274,7 @@ public class MiniOzoneClusterImpl implements MiniOzoneCluster {
     datanodeService.stop();
     datanodeService.join();
     // ensure same ports are used across restarts.
-    Configuration config = datanodeService.getConf();
+    OzoneConfiguration config = datanodeService.getConf();
     int currentPort = datanodeService.getDatanodeDetails()
         .getPort(DatanodeDetails.Port.Name.STANDALONE).getValue();
     config.setInt(DFS_CONTAINER_IPC_PORT, currentPort);
@@ -286,9 +290,9 @@ public class MiniOzoneClusterImpl implements MiniOzoneCluster {
     }
     String[] args = new String[]{};
     HddsDatanodeService service =
-        HddsDatanodeService.createHddsDatanodeService(args, config);
+        HddsDatanodeService.createHddsDatanodeService(args);
     hddsDatanodes.add(i, service);
-    service.start(null);
+    service.start(config);
     if (waitForDatanode) {
       // wait for the node to be identified as a healthy node again.
       waitForClusterToBeReady();
@@ -364,7 +368,18 @@ public class MiniOzoneClusterImpl implements MiniOzoneCluster {
    */
   @Override
   public void startHddsDatanodes() {
-    hddsDatanodes.forEach((datanode) -> datanode.start(null));
+    hddsDatanodes.forEach((datanode) -> {
+      datanode.setCertificateClient(getCAClient());
+      datanode.start();
+    });
+  }
+
+  private CertificateClient getCAClient() {
+    return this.caClient;
+  }
+
+  private void setCAClient(CertificateClient client) {
+    this.caClient = client;
   }
 
 
@@ -403,6 +418,7 @@ public class MiniOzoneClusterImpl implements MiniOzoneCluster {
       final List<HddsDatanodeService> hddsDatanodes = createHddsDatanodes(scm);
       MiniOzoneClusterImpl cluster = new MiniOzoneClusterImpl(conf, om, scm,
           hddsDatanodes);
+      cluster.setCAClient(certClient);
       if (startDataNodes) {
         cluster.startHddsDatanodes();
       }
@@ -432,14 +448,18 @@ public class MiniOzoneClusterImpl implements MiniOzoneCluster {
       if (!blockSize.isPresent()) {
         blockSize = Optional.of(2 * streamBufferMaxSize.get());
       }
+
+      if (!streamBufferSizeUnit.isPresent()) {
+        streamBufferSizeUnit = Optional.of(StorageUnit.MB);
+      }
       conf.setStorageSize(ScmConfigKeys.OZONE_SCM_CHUNK_SIZE_KEY,
-          chunkSize.get(), StorageUnit.MB);
+          chunkSize.get(), streamBufferSizeUnit.get());
       conf.setStorageSize(OzoneConfigKeys.OZONE_CLIENT_STREAM_BUFFER_FLUSH_SIZE,
-          streamBufferFlushSize.get(), StorageUnit.MB);
+          streamBufferFlushSize.get(), streamBufferSizeUnit.get());
       conf.setStorageSize(OzoneConfigKeys.OZONE_CLIENT_STREAM_BUFFER_MAX_SIZE,
-          streamBufferMaxSize.get(), StorageUnit.MB);
+          streamBufferMaxSize.get(), streamBufferSizeUnit.get());
       conf.setStorageSize(OzoneConfigKeys.OZONE_SCM_BLOCK_SIZE, blockSize.get(),
-          StorageUnit.MB);
+          streamBufferSizeUnit.get());
       configureTrace();
     }
 
@@ -492,7 +512,7 @@ public class MiniOzoneClusterImpl implements MiniOzoneCluster {
      *
      * @throws IOException
      */
-    private OzoneManager createOM()
+    OzoneManager createOM()
         throws IOException, AuthenticationException {
       configureOM();
       OMStorage omStore = new OMStorage(conf);
@@ -516,21 +536,28 @@ public class MiniOzoneClusterImpl implements MiniOzoneCluster {
       conf.setStrings(ScmConfigKeys.OZONE_SCM_NAMES, scmAddress);
       List<HddsDatanodeService> hddsDatanodes = new ArrayList<>();
       for (int i = 0; i < numOfDatanodes; i++) {
-        Configuration dnConf = new OzoneConfiguration(conf);
+        OzoneConfiguration dnConf = new OzoneConfiguration(conf);
         String datanodeBaseDir = path + "/datanode-" + Integer.toString(i);
         Path metaDir = Paths.get(datanodeBaseDir, "meta");
         Path dataDir = Paths.get(datanodeBaseDir, "data", "containers");
         Path ratisDir = Paths.get(datanodeBaseDir, "data", "ratis");
+        Path wrokDir = Paths.get(datanodeBaseDir, "data", "replication",
+            "work");
         Files.createDirectories(metaDir);
         Files.createDirectories(dataDir);
         Files.createDirectories(ratisDir);
+        Files.createDirectories(wrokDir);
         dnConf.set(HddsConfigKeys.OZONE_METADATA_DIRS, metaDir.toString());
         dnConf.set(DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY, dataDir.toString());
         dnConf.set(OzoneConfigKeys.DFS_CONTAINER_RATIS_DATANODE_STORAGE_DIR,
             ratisDir.toString());
+        dnConf.set(OzoneConfigKeys.OZONE_CONTAINER_COPY_WORKDIR,
+            wrokDir.toString());
 
-        hddsDatanodes.add(
-            HddsDatanodeService.createHddsDatanodeService(args, dnConf));
+        HddsDatanodeService datanode
+            = HddsDatanodeService.createHddsDatanodeService(args);
+        datanode.setConfiguration(dnConf);
+        hddsDatanodes.add(datanode);
       }
       return hddsDatanodes;
     }

@@ -415,6 +415,7 @@ public class ProtobufRpcEngine implements RpcEngine {
      * @param numHandlers the number of method handler threads to run
      * @param verbose whether each call should be logged
      * @param portRangeConfig A config parameter that can be used to restrict
+     * the range of ports used when port is 0 (an ephemeral port)
      * @param alignmentContext provides server state info on client responses
      */
     public Server(Class<?> protocolClass, Object protocolImpl,
@@ -520,46 +521,29 @@ public class ProtobufRpcEngine implements RpcEngine {
         Message param = request.getValue(prototype);
 
         Message result;
-        long startTime = Time.now();
-        int qTime = (int) (startTime - receiveTime);
-        Exception exception = null;
-        boolean isDeferred = false;
+        Call currentCall = Server.getCurCall().get();
         try {
           server.rpcDetailedMetrics.init(protocolImpl.protocolClass);
           currentCallInfo.set(new CallInfo(server, methodName));
+          currentCall.setDetailedMetricsName(methodName);
           result = service.callBlockingMethod(methodDescriptor, null, param);
           // Check if this needs to be a deferred response,
           // by checking the ThreadLocal callback being set
           if (currentCallback.get() != null) {
-            Server.getCurCall().get().deferResponse();
-            isDeferred = true;
+            currentCall.deferResponse();
             currentCallback.set(null);
             return null;
           }
         } catch (ServiceException e) {
-          exception = (Exception) e.getCause();
+          Exception exception = (Exception) e.getCause();
+          currentCall.setDetailedMetricsName(
+              exception.getClass().getSimpleName());
           throw (Exception) e.getCause();
         } catch (Exception e) {
-          exception = e;
+          currentCall.setDetailedMetricsName(e.getClass().getSimpleName());
           throw e;
         } finally {
           currentCallInfo.set(null);
-          int processingTime = (int) (Time.now() - startTime);
-          if (LOG.isDebugEnabled()) {
-            String msg =
-                "Served: " + methodName + (isDeferred ? ", deferred" : "") +
-                    ", queueTime= " + qTime +
-                    " procesingTime= " + processingTime;
-            if (exception != null) {
-              msg += " exception= " + exception.getClass().getSimpleName();
-            }
-            LOG.debug(msg);
-          }
-          String detailedMetricsName = (exception == null) ?
-              methodName :
-              exception.getClass().getSimpleName();
-          server.updateMetrics(detailedMetricsName, qTime, processingTime,
-              isDeferred);
         }
         return RpcWritable.wrap(result);
       }

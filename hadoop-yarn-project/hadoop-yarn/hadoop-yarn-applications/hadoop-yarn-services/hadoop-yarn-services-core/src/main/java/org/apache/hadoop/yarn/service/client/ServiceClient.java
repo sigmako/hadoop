@@ -1189,7 +1189,7 @@ public class ServiceClient extends AppAdminClient implements SliderExitCodes,
           .append(entry.getValue().getResource().getFile())
           .append(System.lineSeparator());
     }
-    LOG.debug(builder.toString());
+    LOG.debug("{}", builder);
   }
 
   private String buildCommandLine(Service app, Configuration conf,
@@ -1234,11 +1234,15 @@ public class ServiceClient extends AppAdminClient implements SliderExitCodes,
     return cmdStr;
   }
 
-  private Map<String, String> addAMEnv() throws IOException {
+  @VisibleForTesting
+  protected Map<String, String> addAMEnv() throws IOException {
     Map<String, String> env = new HashMap<>();
-    ClasspathConstructor classpath =
-        buildClasspath(YarnServiceConstants.SUBMITTED_CONF_DIR, "lib", fs, getConfig()
-            .getBoolean(YarnConfiguration.IS_MINI_YARN_CLUSTER, false));
+    ClasspathConstructor classpath = buildClasspath(
+        YarnServiceConstants.SUBMITTED_CONF_DIR,
+        "lib",
+        fs,
+        getConfig().get(YarnServiceConf.YARN_SERVICE_CLASSPATH, ""),
+        getConfig().getBoolean(YarnConfiguration.IS_MINI_YARN_CLUSTER, false));
     env.put("CLASSPATH", classpath.buildClasspath());
     env.put("LANG", "en_US.UTF-8");
     env.put("LC_ALL", "en_US.UTF-8");
@@ -1249,7 +1253,7 @@ public class ServiceClient extends AppAdminClient implements SliderExitCodes,
     }
     if (!UserGroupInformation.isSecurityEnabled()) {
       String userName = UserGroupInformation.getCurrentUser().getUserName();
-      LOG.debug("Run as user " + userName);
+      LOG.debug("Run as user {}", userName);
       // HADOOP_USER_NAME env is used by UserGroupInformation when log in
       // This env makes AM run as this user
       env.put("HADOOP_USER_NAME", userName);
@@ -1405,7 +1409,7 @@ public class ServiceClient extends AppAdminClient implements SliderExitCodes,
       if (LOG.isDebugEnabled()) {
         if (tokens != null && tokens.length != 0) {
           for (Token<?> token : tokens) {
-            LOG.debug("Got DT: " + token);
+            LOG.debug("Got DT: {}", token);
           }
         }
       }

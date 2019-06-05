@@ -62,9 +62,7 @@ public final class PipelineFactory {
     return providers.get(type).create(factor, nodes);
   }
 
-  public void close() {
-    for (PipelineProvider p : providers.values()) {
-      p.close();
-    }
+  public void shutdown() {
+    providers.values().forEach(provider -> provider.shutdown());
   }
 }

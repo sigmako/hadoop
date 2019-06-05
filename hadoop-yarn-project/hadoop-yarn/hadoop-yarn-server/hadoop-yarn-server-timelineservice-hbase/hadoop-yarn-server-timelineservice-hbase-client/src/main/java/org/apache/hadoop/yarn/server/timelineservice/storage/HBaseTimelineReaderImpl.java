@@ -29,6 +29,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.service.AbstractService;
+import org.apache.hadoop.yarn.api.records.timeline.TimelineHealth;
 import org.apache.hadoop.yarn.api.records.timelineservice.TimelineEntity;
 import org.apache.hadoop.yarn.api.records.timelineservice.TimelineEntityType;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
@@ -158,6 +159,18 @@ public class HBaseTimelineReaderImpl
     return reader.readEntityTypes(hbaseConf, conn);
   }
 
+  @Override
+  public TimelineHealth getHealthStatus() {
+    if (!this.isHBaseDown()) {
+      return new TimelineHealth(TimelineHealth.TimelineHealthStatus.RUNNING,
+          "");
+    } else {
+      return new TimelineHealth(
+          TimelineHealth.TimelineHealthStatus.READER_CONNECTION_FAILURE,
+          "HBase connection is down");
+    }
+  }
+
   protected static final TimelineEntityFilters MONITOR_FILTERS =
       new TimelineEntityFilters.Builder().entityLimit(1L).build();
   protected static final TimelineDataToRetrieve DATA_TO_RETRIEVE =
@@ -167,7 +180,7 @@ public class HBaseTimelineReaderImpl
     @Override
     public void run() {
       try {
-        LOG.info("Running HBase liveness monitor");
+        LOG.debug("Running HBase liveness monitor");
         TimelineEntityReader reader =
             TimelineEntityReaderFactory.createMultipleEntitiesReader(
                 monitorContext, MONITOR_FILTERS, DATA_TO_RETRIEVE);
@@ -175,9 +188,7 @@ public class HBaseTimelineReaderImpl
 
         // on success, reset hbase down flag
         if (hbaseDown.getAndSet(false)) {
-          if(LOG.isDebugEnabled()) {
-            LOG.debug("HBase request succeeded, assuming HBase up");
-          }
+          LOG.debug("HBase request succeeded, assuming HBase up");
         }
       } catch (Exception e) {
         LOG.warn("Got failure attempting to read from timeline storage, " +

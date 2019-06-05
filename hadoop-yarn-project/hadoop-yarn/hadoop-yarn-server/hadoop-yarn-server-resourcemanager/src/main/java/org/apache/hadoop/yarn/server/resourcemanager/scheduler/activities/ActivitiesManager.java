@@ -18,6 +18,13 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.activities;
 
+import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
+import org.apache.commons.collections.CollectionUtils;
+import org.apache.hadoop.yarn.server.resourcemanager.webapp.RMWSConsts;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.service.AbstractService;
@@ -26,6 +33,7 @@ import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.ActivitiesInfo;
@@ -33,11 +41,13 @@ import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.AppActivitiesInf
 import org.apache.hadoop.yarn.util.SystemClock;
 
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentMap;
 import java.util.List;
 import java.util.Set;
 import java.util.*;
 import java.util.ArrayList;
+import java.util.stream.Collectors;
 
 /**
  * A class to store node or application allocations.
@@ -46,39 +56,91 @@ import java.util.ArrayList;
 public class ActivitiesManager extends AbstractService {
   private static final Logger LOG =
       LoggerFactory.getLogger(ActivitiesManager.class);
-  private ConcurrentMap<NodeId, List<NodeAllocation>> recordingNodesAllocation;
-  private ConcurrentMap<NodeId, List<NodeAllocation>> completedNodeAllocations;
+  // An empty node ID, we use this variable as a placeholder
+  // in the activity records when recording multiple nodes assignments.
+  public static final NodeId EMPTY_NODE_ID = NodeId.newInstance("", 0);
+  public static final char DIAGNOSTICS_DETAILS_SEPARATOR = '\n';
+  public static final String EMPTY_DIAGNOSTICS = "";
+  private ThreadLocal<Map<NodeId, List<NodeAllocation>>>
+      recordingNodesAllocation;
+  @VisibleForTesting
+  ConcurrentMap<NodeId, List<NodeAllocation>> completedNodeAllocations;
   private Set<NodeId> activeRecordedNodes;
   private ConcurrentMap<ApplicationId, Long>
       recordingAppActivitiesUntilSpecifiedTime;
-  private ConcurrentMap<ApplicationId, AppAllocation> appsAllocation;
-  private ConcurrentMap<ApplicationId, List<AppAllocation>>
-      completedAppAllocations;
+  private ThreadLocal<Map<ApplicationId, AppAllocation>>
+      appsAllocation;
+  @VisibleForTesting
+  ConcurrentMap<ApplicationId, Queue<AppAllocation>> completedAppAllocations;
   private boolean recordNextAvailableNode = false;
   private List<NodeAllocation> lastAvailableNodeActivities = null;
   private Thread cleanUpThread;
-  private int timeThreshold = 600 * 1000;
+  private long activitiesCleanupIntervalMs;
+  private long schedulerActivitiesTTL;
+  private long appActivitiesTTL;
+  private int appActivitiesMaxQueueLength;
   private final RMContext rmContext;
   private volatile boolean stopped;
+  private ThreadLocal<DiagnosticsCollectorManager> diagnosticCollectorManager;
 
   public ActivitiesManager(RMContext rmContext) {
     super(ActivitiesManager.class.getName());
-    recordingNodesAllocation = new ConcurrentHashMap<>();
+    recordingNodesAllocation = ThreadLocal.withInitial(() -> new HashMap());
     completedNodeAllocations = new ConcurrentHashMap<>();
-    appsAllocation = new ConcurrentHashMap<>();
+    appsAllocation = ThreadLocal.withInitial(() -> new HashMap());
     completedAppAllocations = new ConcurrentHashMap<>();
     activeRecordedNodes = Collections.newSetFromMap(new ConcurrentHashMap<>());
     recordingAppActivitiesUntilSpecifiedTime = new ConcurrentHashMap<>();
+    diagnosticCollectorManager = ThreadLocal.withInitial(
+        () -> new DiagnosticsCollectorManager(
+            new GenericDiagnosticsCollector()));
     this.rmContext = rmContext;
+    if (rmContext.getYarnConfiguration() != null) {
+      setupConfForCleanup(rmContext.getYarnConfiguration());
+    }
   }
 
-  public AppActivitiesInfo getAppActivitiesInfo(ApplicationId applicationId) {
-    if (rmContext.getRMApps().get(applicationId).getFinalApplicationStatus()
-        == FinalApplicationStatus.UNDEFINED) {
-      List<AppAllocation> allocations = completedAppAllocations.get(
-          applicationId);
+  private void setupConfForCleanup(Configuration conf) {
+    activitiesCleanupIntervalMs = conf.getLong(
+        YarnConfiguration.RM_ACTIVITIES_MANAGER_CLEANUP_INTERVAL_MS,
+        YarnConfiguration.
+            DEFAULT_RM_ACTIVITIES_MANAGER_CLEANUP_INTERVAL_MS);
+    schedulerActivitiesTTL = conf.getLong(
+        YarnConfiguration.RM_ACTIVITIES_MANAGER_SCHEDULER_ACTIVITIES_TTL_MS,
+        YarnConfiguration.
+            DEFAULT_RM_ACTIVITIES_MANAGER_SCHEDULER_ACTIVITIES_TTL_MS);
+    appActivitiesTTL = conf.getLong(
+        YarnConfiguration.RM_ACTIVITIES_MANAGER_APP_ACTIVITIES_TTL_MS,
+        YarnConfiguration.
+            DEFAULT_RM_ACTIVITIES_MANAGER_APP_ACTIVITIES_TTL_MS);
+    appActivitiesMaxQueueLength = conf.getInt(YarnConfiguration.
+            RM_ACTIVITIES_MANAGER_APP_ACTIVITIES_MAX_QUEUE_LENGTH,
+        YarnConfiguration.
+            DEFAULT_RM_ACTIVITIES_MANAGER_APP_ACTIVITIES_MAX_QUEUE_LENGTH);
+  }
 
-      return new AppActivitiesInfo(allocations, applicationId);
+  public AppActivitiesInfo getAppActivitiesInfo(ApplicationId applicationId,
+      Set<String> requestPriorities, Set<String> allocationRequestIds,
+      RMWSConsts.ActivitiesGroupBy groupBy) {
+    RMApp app = rmContext.getRMApps().get(applicationId);
+    if (app != null && app.getFinalApplicationStatus()
+        == FinalApplicationStatus.UNDEFINED) {
+      Queue<AppAllocation> curAllocations =
+          completedAppAllocations.get(applicationId);
+      List<AppAllocation> allocations = null;
+      if (curAllocations != null) {
+        if (CollectionUtils.isNotEmpty(requestPriorities) || CollectionUtils
+            .isNotEmpty(allocationRequestIds)) {
+          allocations = curAllocations.stream().map(e -> e
+              .filterAllocationAttempts(requestPriorities,
+                  allocationRequestIds))
+              .filter(e -> !e.getAllocationAttempts().isEmpty())
+              .collect(Collectors.toList());
+        } else {
+          allocations = new ArrayList(curAllocations);
+        }
+      }
+      return new AppActivitiesInfo(allocations, applicationId, groupBy);
     } else {
       return new AppActivitiesInfo(
           "fail to get application activities after finished",
@@ -86,14 +148,15 @@ public class ActivitiesManager extends AbstractService {
     }
   }
 
-  public ActivitiesInfo getActivitiesInfo(String nodeId) {
+  public ActivitiesInfo getActivitiesInfo(String nodeId,
+      RMWSConsts.ActivitiesGroupBy groupBy) {
     List<NodeAllocation> allocations;
     if (nodeId == null) {
       allocations = lastAvailableNodeActivities;
     } else {
       allocations = completedNodeAllocations.get(NodeId.fromString(nodeId));
     }
-    return new ActivitiesInfo(allocations, nodeId);
+    return new ActivitiesInfo(allocations, nodeId, groupBy);
   }
 
   public void recordNextNodeUpdateActivities(String nodeId) {
@@ -119,30 +182,49 @@ public class ActivitiesManager extends AbstractService {
         while (!stopped && !Thread.currentThread().isInterrupted()) {
           Iterator<Map.Entry<NodeId, List<NodeAllocation>>> ite =
               completedNodeAllocations.entrySet().iterator();
+          long curTS = SystemClock.getInstance().getTime();
           while (ite.hasNext()) {
             Map.Entry<NodeId, List<NodeAllocation>> nodeAllocation = ite.next();
             List<NodeAllocation> allocations = nodeAllocation.getValue();
-            long currTS = SystemClock.getInstance().getTime();
-            if (allocations.size() > 0 && allocations.get(0).getTimeStamp()
-                - currTS > timeThreshold) {
+            if (allocations.size() > 0
+                && curTS - allocations.get(0).getTimeStamp()
+                > schedulerActivitiesTTL) {
               ite.remove();
             }
           }
 
-          Iterator<Map.Entry<ApplicationId, List<AppAllocation>>> iteApp =
+          Iterator<Map.Entry<ApplicationId, Queue<AppAllocation>>> iteApp =
               completedAppAllocations.entrySet().iterator();
           while (iteApp.hasNext()) {
-            Map.Entry<ApplicationId, List<AppAllocation>> appAllocation =
+            Map.Entry<ApplicationId, Queue<AppAllocation>> appAllocation =
                 iteApp.next();
-            if (rmContext.getRMApps().get(appAllocation.getKey())
-                .getFinalApplicationStatus()
+            RMApp rmApp = rmContext.getRMApps().get(appAllocation.getKey());
+            if (rmApp == null || rmApp.getFinalApplicationStatus()
                 != FinalApplicationStatus.UNDEFINED) {
               iteApp.remove();
+            } else {
+              Iterator<AppAllocation> appActivitiesIt =
+                  appAllocation.getValue().iterator();
+              while (appActivitiesIt.hasNext()) {
+                if (curTS - appActivitiesIt.next().getTime()
+                    > appActivitiesTTL) {
+                  appActivitiesIt.remove();
+                } else {
+                  break;
+                }
+              }
+              if (appAllocation.getValue().isEmpty()) {
+                iteApp.remove();
+                LOG.debug("Removed all expired activities from cache for {}.",
+                    rmApp.getApplicationId());
+              }
             }
           }
 
+          LOG.debug("Remaining apps in app activities cache: {}",
+              completedAppAllocations.keySet());
           try {
-            Thread.sleep(5000);
+            Thread.sleep(activitiesCleanupIntervalMs);
           } catch (InterruptedException e) {
             LOG.info(getName() + " thread interrupted");
             break;
@@ -173,9 +255,13 @@ public class ActivitiesManager extends AbstractService {
     if (recordNextAvailableNode) {
       recordNextNodeUpdateActivities(nodeID.toString());
     }
-    if (activeRecordedNodes.contains(nodeID)) {
+    // Removing from activeRecordedNodes immediately is to ensure that
+    // activities will be recorded just once in multiple threads.
+    if (activeRecordedNodes.remove(nodeID)) {
       List<NodeAllocation> nodeAllocation = new ArrayList<>();
-      recordingNodesAllocation.put(nodeID, nodeAllocation);
+      recordingNodesAllocation.get().put(nodeID, nodeAllocation);
+      // enable diagnostic collector
+      diagnosticCollectorManager.get().enable();
     }
   }
 
@@ -183,30 +269,29 @@ public class ActivitiesManager extends AbstractService {
       SchedulerApplicationAttempt application) {
     ApplicationId applicationId = application.getApplicationId();
 
-    if (recordingAppActivitiesUntilSpecifiedTime.containsKey(applicationId)
-        && recordingAppActivitiesUntilSpecifiedTime.get(applicationId)
-        > currTS) {
-      appsAllocation.put(applicationId,
-          new AppAllocation(application.getPriority(), nodeID,
-              application.getQueueName()));
-    }
-
-    if (recordingAppActivitiesUntilSpecifiedTime.containsKey(applicationId)
-        && recordingAppActivitiesUntilSpecifiedTime.get(applicationId)
-        <= currTS) {
-      turnOffActivityMonitoringForApp(applicationId);
+    Long turnOffTimestamp =
+        recordingAppActivitiesUntilSpecifiedTime.get(applicationId);
+    if (turnOffTimestamp != null) {
+      if (turnOffTimestamp > currTS) {
+        appsAllocation.get().put(applicationId,
+            new AppAllocation(application.getPriority(), nodeID,
+                application.getQueueName()));
+        // enable diagnostic collector
+        diagnosticCollectorManager.get().enable();
+      } else {
+        turnOffActivityMonitoringForApp(applicationId);
+      }
     }
   }
 
   // Add queue, application or container activity into specific node allocation.
-  void addSchedulingActivityForNode(SchedulerNode node, String parentName,
+  void addSchedulingActivityForNode(NodeId nodeId, String parentName,
       String childName, String priority, ActivityState state, String diagnostic,
-      String type) {
-    if (shouldRecordThisNode(node.getNodeID())) {
-      NodeAllocation nodeAllocation = getCurrentNodeAllocation(
-          node.getNodeID());
+      String type, String allocationRequestId) {
+    if (shouldRecordThisNode(nodeId)) {
+      NodeAllocation nodeAllocation = getCurrentNodeAllocation(nodeId);
       nodeAllocation.addAllocationActivity(parentName, childName, priority,
-          state, diagnostic, type);
+          state, diagnostic, type, nodeId, allocationRequestId);
     }
   }
 
@@ -214,12 +299,14 @@ public class ActivitiesManager extends AbstractService {
   // allocation.
   void addSchedulingActivityForApp(ApplicationId applicationId,
       ContainerId containerId, String priority, ActivityState state,
-      String diagnostic, String type) {
+      String diagnostic, String type, NodeId nodeId,
+      String allocationRequestId) {
     if (shouldRecordThisApp(applicationId)) {
-      AppAllocation appAllocation = appsAllocation.get(applicationId);
+      AppAllocation appAllocation = appsAllocation.get().get(applicationId);
       appAllocation.addAppAllocationActivity(containerId == null ?
           "Container-Id-Not-Assigned" :
-          containerId.toString(), priority, state, diagnostic, type);
+          containerId.toString(), priority, state, diagnostic, type, nodeId,
+          allocationRequestId);
     }
   }
 
@@ -238,31 +325,34 @@ public class ActivitiesManager extends AbstractService {
       ContainerId containerId, ActivityState appState, String diagnostic) {
     if (shouldRecordThisApp(applicationId)) {
       long currTS = SystemClock.getInstance().getTime();
-      AppAllocation appAllocation = appsAllocation.remove(applicationId);
+      AppAllocation appAllocation = appsAllocation.get().remove(applicationId);
       appAllocation.updateAppContainerStateAndTime(containerId, appState,
           currTS, diagnostic);
 
-      List<AppAllocation> appAllocations;
-      if (completedAppAllocations.containsKey(applicationId)) {
-        appAllocations = completedAppAllocations.get(applicationId);
-      } else {
-        appAllocations = new ArrayList<>();
-        completedAppAllocations.put(applicationId, appAllocations);
+      Queue<AppAllocation> appAllocations =
+          completedAppAllocations.get(applicationId);
+      if (appAllocations == null) {
+        appAllocations = new ConcurrentLinkedQueue<>();
+        Queue<AppAllocation> curAppAllocations =
+            completedAppAllocations.putIfAbsent(applicationId, appAllocations);
+        if (curAppAllocations != null) {
+          appAllocations = curAppAllocations;
+        }
       }
-      if (appAllocations.size() == 1000) {
-        appAllocations.remove(0);
+      if (appAllocations.size() == appActivitiesMaxQueueLength) {
+        appAllocations.poll();
       }
       appAllocations.add(appAllocation);
-
-      if (recordingAppActivitiesUntilSpecifiedTime.get(applicationId)
-          <= currTS) {
+      Long stopTime =
+          recordingAppActivitiesUntilSpecifiedTime.get(applicationId);
+      if (stopTime != null && stopTime <= currTS) {
         turnOffActivityMonitoringForApp(applicationId);
       }
     }
   }
 
   void finishNodeUpdateRecording(NodeId nodeID) {
-    List<NodeAllocation> value = recordingNodesAllocation.get(nodeID);
+    List<NodeAllocation> value = recordingNodesAllocation.get().get(nodeID);
     long timeStamp = SystemClock.getInstance().getTime();
 
     if (value != null) {
@@ -278,25 +368,33 @@ public class ActivitiesManager extends AbstractService {
       }
 
       if (shouldRecordThisNode(nodeID)) {
-        recordingNodesAllocation.remove(nodeID);
+        recordingNodesAllocation.get().remove(nodeID);
         completedNodeAllocations.put(nodeID, value);
-        stopRecordNodeUpdateActivities(nodeID);
       }
     }
+    // disable diagnostic collector
+    diagnosticCollectorManager.get().disable();
   }
 
   boolean shouldRecordThisApp(ApplicationId applicationId) {
+    if (recordingAppActivitiesUntilSpecifiedTime.isEmpty()
+        || appsAllocation.get().isEmpty()) {
+      return false;
+    }
     return recordingAppActivitiesUntilSpecifiedTime.containsKey(applicationId)
-        && appsAllocation.containsKey(applicationId);
+        && appsAllocation.get().containsKey(applicationId);
   }
 
   boolean shouldRecordThisNode(NodeId nodeID) {
-    return activeRecordedNodes.contains(nodeID) && recordingNodesAllocation
+    return isRecordingMultiNodes() || recordingNodesAllocation.get()
         .containsKey(nodeID);
   }
 
   private NodeAllocation getCurrentNodeAllocation(NodeId nodeID) {
-    List<NodeAllocation> nodeAllocations = recordingNodesAllocation.get(nodeID);
+    NodeId recordingKey =
+        isRecordingMultiNodes() ? EMPTY_NODE_ID : nodeID;
+    List<NodeAllocation> nodeAllocations =
+        recordingNodesAllocation.get().get(recordingKey);
     NodeAllocation nodeAllocation;
     // When this node has already stored allocation activities, get the
     // last allocation for this node.
@@ -323,11 +421,94 @@ public class ActivitiesManager extends AbstractService {
     return nodeAllocation;
   }
 
-  private void stopRecordNodeUpdateActivities(NodeId nodeId) {
-    activeRecordedNodes.remove(nodeId);
-  }
-
   private void turnOffActivityMonitoringForApp(ApplicationId applicationId) {
     recordingAppActivitiesUntilSpecifiedTime.remove(applicationId);
+  }
+
+  public boolean isRecordingMultiNodes() {
+    return recordingNodesAllocation.get().containsKey(EMPTY_NODE_ID);
+  }
+
+  /**
+   * Get recording node id:
+   * 1. node id of the input node if it is not null.
+   * 2. EMPTY_NODE_ID if input node is null and activities manager is
+   *    recording multi-nodes.
+   * 3. null otherwise.
+   * @param node - input node
+   * @return recording nodeId
+   */
+  public NodeId getRecordingNodeId(SchedulerNode node) {
+    if (node != null) {
+      return node.getNodeID();
+    } else if (isRecordingMultiNodes()) {
+      return ActivitiesManager.EMPTY_NODE_ID;
+    }
+    return null;
+  }
+
+  /**
+   * Class to manage the diagnostics collector.
+   */
+  public static class DiagnosticsCollectorManager {
+    private boolean enabled = false;
+    private DiagnosticsCollector gdc;
+
+    public boolean isEnabled() {
+      return enabled;
+    }
+
+    public void enable() {
+      this.enabled = true;
+    }
+
+    public void disable() {
+      this.enabled = false;
+    }
+
+    public DiagnosticsCollectorManager(DiagnosticsCollector gdc) {
+      this.gdc = gdc;
+    }
+
+    public Optional<DiagnosticsCollector> getOptionalDiagnosticsCollector() {
+      if (enabled) {
+        return Optional.of(gdc);
+      } else {
+        return Optional.empty();
+      }
+    }
+  }
+
+  public Optional<DiagnosticsCollector> getOptionalDiagnosticsCollector() {
+    return diagnosticCollectorManager.get().getOptionalDiagnosticsCollector();
+  }
+
+  public String getResourceDiagnostics(ResourceCalculator rc, Resource required,
+      Resource available) {
+    Optional<DiagnosticsCollector> dcOpt = getOptionalDiagnosticsCollector();
+    if (dcOpt.isPresent()) {
+      dcOpt.get().collectResourceDiagnostics(rc, required, available);
+      return getDiagnostics(dcOpt.get());
+    }
+    return EMPTY_DIAGNOSTICS;
+  }
+
+  public static String getDiagnostics(Optional<DiagnosticsCollector> dcOpt) {
+    if (dcOpt != null && dcOpt.isPresent()) {
+      DiagnosticsCollector dc = dcOpt.get();
+      if (dc != null && dc.getDiagnostics() != null) {
+        return getDiagnostics(dc);
+      }
+    }
+    return EMPTY_DIAGNOSTICS;
+  }
+
+  private static String getDiagnostics(DiagnosticsCollector dc) {
+    StringBuilder sb = new StringBuilder();
+    sb.append(", ").append(dc.getDiagnostics());
+    if (dc.getDetails() != null) {
+      sb.append(DIAGNOSTICS_DETAILS_SEPARATOR).append(dc.getDetails());
+    }
+    return sb.toString();
   }
 }

@@ -87,6 +87,7 @@ public class TestCloseContainerHandlingByClient {
     conf.set(OzoneConfigKeys.OZONE_CLIENT_WATCH_REQUEST_TIMEOUT, "5000ms");
     conf.setTimeDuration(HDDS_SCM_WATCHER_TIMEOUT, 1000, TimeUnit.MILLISECONDS);
     conf.setTimeDuration(OZONE_SCM_STALENODE_INTERVAL, 3, TimeUnit.SECONDS);
+    conf.set(OzoneConfigKeys.OZONE_CLIENT_CHECKSUM_TYPE, "NONE");
     conf.setQuietMode(false);
     conf.setStorageSize(OzoneConfigKeys.OZONE_SCM_BLOCK_SIZE, 4,
         StorageUnit.MB);
@@ -131,9 +132,10 @@ public class TestCloseContainerHandlingByClient {
     OmKeyArgs keyArgs = new OmKeyArgs.Builder().setVolumeName(volumeName)
         .setBucketName(bucketName).setType(HddsProtos.ReplicationType.RATIS)
         .setFactor(HddsProtos.ReplicationFactor.ONE).setKeyName(keyName)
+        .setRefreshPipeline(true)
         .build();
 
-    waitForContainerClose(keyName, key);
+    waitForContainerClose(key);
     key.write(data);
     key.flush();
     key.close();
@@ -164,9 +166,10 @@ public class TestCloseContainerHandlingByClient {
         .setBucketName(bucketName)
         .setType(HddsProtos.ReplicationType.RATIS)
         .setFactor(HddsProtos.ReplicationFactor.ONE).setKeyName(keyName)
+        .setRefreshPipeline(true)
         .build();
 
-    waitForContainerClose(keyName, key);
+    waitForContainerClose(key);
     key.close();
     // read the key from OM again and match the length.The length will still
     // be the equal to the original data size.
@@ -180,12 +183,12 @@ public class TestCloseContainerHandlingByClient {
 
     String keyName = getKeyName();
     OzoneOutputStream key =
-        createKey(keyName, ReplicationType.RATIS, (4 * blockSize));
+        createKey(keyName, ReplicationType.RATIS, (3 * blockSize));
     KeyOutputStream keyOutputStream =
         (KeyOutputStream) key.getOutputStream();
     // With the initial size provided, it should have preallocated 4 blocks
-    Assert.assertEquals(4, keyOutputStream.getStreamEntries().size());
-    // write data more than 1 chunk
+    Assert.assertEquals(3, keyOutputStream.getStreamEntries().size());
+    // write data more than 1 block
     byte[] data =
         ContainerTestHelper.getFixedLengthString(keyString, (3 * blockSize))
             .getBytes(UTF_8);
@@ -197,9 +200,10 @@ public class TestCloseContainerHandlingByClient {
     OmKeyArgs keyArgs = new OmKeyArgs.Builder().setVolumeName(volumeName)
         .setBucketName(bucketName).setType(HddsProtos.ReplicationType.RATIS)
         .setFactor(HddsProtos.ReplicationFactor.ONE).setKeyName(keyName)
+        .setRefreshPipeline(true)
         .build();
 
-    waitForContainerClose(keyName, key);
+    waitForContainerClose(key);
     // write 1 more block worth of data. It will fail and new block will be
     // allocated
     key.write(ContainerTestHelper.getFixedLengthString(keyString, blockSize)
@@ -256,9 +260,10 @@ public class TestCloseContainerHandlingByClient {
     OmKeyArgs keyArgs = new OmKeyArgs.Builder().setVolumeName(volumeName)
         .setBucketName(bucketName).setType(HddsProtos.ReplicationType.RATIS)
         .setFactor(HddsProtos.ReplicationFactor.THREE).setKeyName(keyName)
+        .setRefreshPipeline(true)
         .build();
 
-    waitForContainerClose(keyName, key);
+    waitForContainerClose(key);
 
     key.close();
     // read the key from OM again and match the length.The length will still
@@ -286,7 +291,7 @@ public class TestCloseContainerHandlingByClient {
         (KeyOutputStream) key.getOutputStream();
     // With the initial size provided, it should have preallocated 4 blocks
     Assert.assertEquals(4, keyOutputStream.getStreamEntries().size());
-    // write data 3 blocks and one more chunk
+    // write data 4 blocks and one more chunk
     byte[] writtenData =
         ContainerTestHelper.getFixedLengthString(keyString, keyLen)
             .getBytes(UTF_8);
@@ -299,9 +304,10 @@ public class TestCloseContainerHandlingByClient {
     OmKeyArgs keyArgs = new OmKeyArgs.Builder().setVolumeName(volumeName)
         .setBucketName(bucketName).setType(HddsProtos.ReplicationType.RATIS)
         .setFactor(HddsProtos.ReplicationFactor.ONE).setKeyName(keyName)
+        .setRefreshPipeline(true)
         .build();
 
-    waitForContainerClose(keyName, key);
+    waitForContainerClose(key);
     // write 3 more chunks worth of data. It will fail and new block will be
     // allocated. This write completes 4 blocks worth of data written to key
     data = Arrays.copyOfRange(writtenData, 3 * blockSize + chunkSize, keyLen);
@@ -330,20 +336,10 @@ public class TestCloseContainerHandlingByClient {
     Assert.assertEquals(4 * blockSize, length);
   }
 
-  private void waitForContainerClose(String keyName,
-      OzoneOutputStream outputStream)
+  private void waitForContainerClose(OzoneOutputStream outputStream)
       throws Exception {
-    KeyOutputStream keyOutputStream =
-        (KeyOutputStream) outputStream.getOutputStream();
-    List<OmKeyLocationInfo> locationInfoList =
-        keyOutputStream.getLocationInfoList();
-    List<Long> containerIdList = new ArrayList<>();
-    for (OmKeyLocationInfo info : locationInfoList) {
-      containerIdList.add(info.getContainerID());
-    }
-    Assert.assertTrue(!containerIdList.isEmpty());
     ContainerTestHelper
-        .waitForContainerClose(cluster, containerIdList.toArray(new Long[0]));
+        .waitForContainerClose(outputStream, cluster);
   }
 
   @Ignore // test needs to be fixed after close container is handled for
@@ -375,7 +371,7 @@ public class TestCloseContainerHandlingByClient {
             .getPipeline(container.getPipelineID());
     List<DatanodeDetails> datanodes = pipeline.getNodes();
     Assert.assertEquals(1, datanodes.size());
-    waitForContainerClose(keyName, key);
+    waitForContainerClose(key);
     dataString =
         ContainerTestHelper.getFixedLengthString(keyString, (1 * blockSize));
     data = dataString.getBytes(UTF_8);
@@ -418,10 +414,11 @@ public class TestCloseContainerHandlingByClient {
     OmKeyArgs keyArgs = new OmKeyArgs.Builder().setVolumeName(volumeName).
         setBucketName(bucketName).setType(HddsProtos.ReplicationType.RATIS)
         .setFactor(HddsProtos.ReplicationFactor.THREE).setKeyName(keyName)
+        .setRefreshPipeline(true)
         .build();
 
     Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
-    waitForContainerClose(keyName, key);
+    waitForContainerClose(key);
     // Again Write the Data. This will throw an exception which will be handled
     // and new blocks will be allocated
     key.write(data);
@@ -435,4 +432,43 @@ public class TestCloseContainerHandlingByClient {
     Assert.assertEquals(2 * data.length, keyInfo.getDataSize());
     validateData(keyName, dataString.getBytes(UTF_8));
   }
+
+  @Test
+  public void testBlockWrites() throws Exception {
+    String keyName = getKeyName();
+    OzoneOutputStream key = createKey(keyName, ReplicationType.RATIS, 0);
+    // write data more than 1 chunk
+    byte[] data1 =
+        ContainerTestHelper.getFixedLengthString(keyString, 2 * chunkSize)
+            .getBytes(UTF_8);
+    key.write(data1);
+
+    Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
+    //get the name of a valid container
+    OmKeyArgs keyArgs = new OmKeyArgs.Builder().setVolumeName(volumeName)
+        .setBucketName(bucketName).setType(HddsProtos.ReplicationType.RATIS)
+        .setFactor(HddsProtos.ReplicationFactor.ONE).setKeyName(keyName)
+        .setRefreshPipeline(true)
+        .build();
+
+    waitForContainerClose(key);
+    byte[] data2 =
+        ContainerTestHelper.getFixedLengthString(keyString, 3 * chunkSize)
+            .getBytes(UTF_8);
+    key.write(data2);
+    key.flush();
+    key.close();
+    // read the key from OM again and match the length.The length will still
+    // be the equal to the original data size.
+    OmKeyInfo keyInfo = cluster.getOzoneManager().lookupKey(keyArgs);
+    Assert.assertEquals(5 * chunkSize, keyInfo.getDataSize());
+
+    // Written the same data twice
+    String dataString = new String(data1, UTF_8);
+    // Written the same data twice
+    String dataString2 = new String(data2, UTF_8);
+    dataString = dataString.concat(dataString2);
+    validateData(keyName, dataString.getBytes(UTF_8));
+  }
+
 }

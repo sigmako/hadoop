@@ -246,12 +246,13 @@ public class ITestDynamoDBMetadataStore extends MetadataStoreTestBase {
   }
 
   @Override
-  FileStatus basicFileStatus(Path path, int size, boolean isDir)
+  S3AFileStatus basicFileStatus(Path path, int size, boolean isDir)
       throws IOException {
     String owner = UserGroupInformation.getCurrentUser().getShortUserName();
     return isDir
         ? new S3AFileStatus(true, path, owner)
-        : new S3AFileStatus(size, getModTime(), path, BLOCK_SIZE, owner);
+        : new S3AFileStatus(size, getModTime(), path, BLOCK_SIZE, owner,
+            null, null);
   }
 
   private DynamoDBMetadataStore getDynamoMetadataStore() throws IOException {
@@ -269,7 +270,8 @@ public class ITestDynamoDBMetadataStore extends MetadataStoreTestBase {
   @Test
   public void testInitialize() throws IOException {
     final S3AFileSystem s3afs = this.fileSystem;
-    final String tableName = "testInitialize";
+    final String tableName =
+        getTestTableName("testInitialize");
     final Configuration conf = s3afs.getConf();
     conf.set(S3GUARD_DDB_TABLE_NAME_KEY, tableName);
     try (DynamoDBMetadataStore ddbms = new DynamoDBMetadataStore()) {
@@ -293,7 +295,8 @@ public class ITestDynamoDBMetadataStore extends MetadataStoreTestBase {
    */
   @Test
   public void testInitializeWithConfiguration() throws IOException {
-    final String tableName = "testInitializeWithConfiguration";
+    final String tableName =
+        getTestTableName("testInitializeWithConfiguration");
     final Configuration conf = getFileSystem().getConf();
     conf.unset(S3GUARD_DDB_TABLE_NAME_KEY);
     String savedRegion = conf.get(S3GUARD_DDB_REGION_KEY,
@@ -430,7 +433,7 @@ public class ITestDynamoDBMetadataStore extends MetadataStoreTestBase {
    */
   @Test
   public void testTableVersionRequired() throws Exception {
-    String tableName = "testTableVersionRequired";
+    String tableName = getTestTableName("testTableVersionRequired");
     Configuration conf = getFileSystem().getConf();
     int maxRetries = conf.getInt(S3GUARD_DDB_MAX_RETRIES,
         S3GUARD_DDB_MAX_RETRIES_DEFAULT);
@@ -457,7 +460,7 @@ public class ITestDynamoDBMetadataStore extends MetadataStoreTestBase {
    */
   @Test
   public void testTableVersionMismatch() throws Exception {
-    String tableName = "testTableVersionMismatch";
+    String tableName = getTestTableName("testTableVersionMismatch");
     Configuration conf = getFileSystem().getConf();
     conf.set(S3GUARD_DDB_TABLE_NAME_KEY, tableName);
 
@@ -484,7 +487,8 @@ public class ITestDynamoDBMetadataStore extends MetadataStoreTestBase {
    */
   @Test
   public void testFailNonexistentTable() throws IOException {
-    final String tableName = "testFailNonexistentTable";
+    final String tableName =
+        getTestTableName("testFailNonexistentTable");
     final S3AFileSystem s3afs = getFileSystem();
     final Configuration conf = s3afs.getConf();
     conf.set(S3GUARD_DDB_TABLE_NAME_KEY, tableName);
@@ -600,7 +604,8 @@ public class ITestDynamoDBMetadataStore extends MetadataStoreTestBase {
 
   @Test
   public void testProvisionTable() throws Exception {
-    final String tableName =  "testProvisionTable-" + UUID.randomUUID();
+    final String tableName
+        = getTestTableName("testProvisionTable-" + UUID.randomUUID());
     Configuration conf = getFileSystem().getConf();
     conf.set(S3GUARD_DDB_TABLE_NAME_KEY, tableName);
 
@@ -631,7 +636,7 @@ public class ITestDynamoDBMetadataStore extends MetadataStoreTestBase {
 
   @Test
   public void testDeleteTable() throws Exception {
-    final String tableName = "testDeleteTable";
+    final String tableName = getTestTableName("testDeleteTable");
     Path testPath = new Path(new Path(fsUri), "/" + tableName);
     final S3AFileSystem s3afs = getFileSystem();
     final Configuration conf = s3afs.getConf();
@@ -666,7 +671,8 @@ public class ITestDynamoDBMetadataStore extends MetadataStoreTestBase {
         propKey -> conf.unset(S3GUARD_DDB_TABLE_TAG + propKey)
     );
 
-    String tableName = "testTableTagging-" + UUID.randomUUID();
+    String tableName =
+        getTestTableName("testTableTagging-" + UUID.randomUUID());
     conf.set(S3GUARD_DDB_TABLE_NAME_KEY, tableName);
     conf.set(S3GUARD_DDB_TABLE_CREATE_KEY, "true");
 
@@ -765,4 +771,7 @@ public class ITestDynamoDBMetadataStore extends MetadataStoreTestBase {
         () -> dynamoDB.getTable(tableName).describe());
   }
 
+  private String getTestTableName(String suffix) {
+    return getTestDynamoTablePrefix(s3AContract.getConf()) + suffix;
+  }
 }

@@ -74,7 +74,7 @@ public class SimplePipelineProvider implements PipelineProvider {
   }
 
   @Override
-  public void close() {
-    // Nothing to do in here.
+  public void shutdown() {
+    // Do nothing.
   }
 }

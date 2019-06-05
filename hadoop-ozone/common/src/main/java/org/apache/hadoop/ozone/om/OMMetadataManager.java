@@ -24,8 +24,11 @@ import org.apache.hadoop.ozone.common.BlockGroup;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmPrefixInfo;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
+import org.apache.hadoop.ozone.om.helpers.S3SecretValue;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.VolumeList;
+import org.apache.hadoop.ozone.security.OzoneTokenIdentifier;
 import org.apache.hadoop.utils.db.DBStore;
 import org.apache.hadoop.utils.db.Table;
 
@@ -246,15 +249,27 @@ public interface OMMetadataManager {
   Table<String, OmKeyInfo> getOpenKeyTable();
 
   /**
+   * Gets the DelegationTokenTable.
+   *
+   * @return Table.
+   */
+  Table<OzoneTokenIdentifier, Long> getDelegationTokenTable();
+
+  /**
    * Gets the S3Bucket to Ozone Volume/bucket mapping table.
    *
    * @return Table.
    */
 
-  Table<byte[], byte[]> getS3Table();
+  Table<String, String> getS3Table();
 
   /**
-<<<<<<< HEAD
+   * Gets the Ozone prefix path to its acl mapping table.
+   * @return Table.
+   */
+  Table<String, OmPrefixInfo> getPrefixTable();
+
+  /**
    * Returns the DB key name of a multipart upload key in OM metadata store.
    *
    * @param volume - volume name
@@ -278,7 +293,7 @@ public interface OMMetadataManager {
    * Gets the S3 Secrets table.
    * @return Table
    */
-  Table<byte[], byte[]> getS3SecretTable();
+  Table<String, S3SecretValue> getS3SecretTable();
 
   /**
    * Returns number of rows in a table.  This should not be used for very

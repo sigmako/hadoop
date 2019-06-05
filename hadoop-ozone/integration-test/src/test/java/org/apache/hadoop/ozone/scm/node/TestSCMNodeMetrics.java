@@ -35,6 +35,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 import static org.apache.hadoop.test.MetricsAsserts.assertCounter;
+import static org.apache.hadoop.test.MetricsAsserts.assertGauge;
 import static org.apache.hadoop.test.MetricsAsserts.getLongCounter;
 import static org.apache.hadoop.test.MetricsAsserts.getMetrics;
 
@@ -100,9 +101,9 @@ public class TestSCMNodeMetrics {
     NodeReportProto nodeReport = NodeReportProto.newBuilder()
         .addStorageReport(storageReport).build();
     datanode.getDatanodeStateMachine().getContext().addReport(nodeReport);
-    datanode.getDatanodeStateMachine().triggerHeartbeat();
-    // Give some time so that SCM receives and processes the heartbeat.
-    Thread.sleep(100L);
+    cluster.getStorageContainerManager().getScmNodeManager()
+        .processNodeReport(datanode.getDatanodeDetails(), nodeReport);
+
     assertCounter("NumNodeReportProcessed", nrProcessed + 1,
         getMetrics(SCMNodeMetrics.class.getSimpleName()));
   }
@@ -125,6 +126,44 @@ public class TestSCMNodeMetrics {
     cluster.getStorageContainerManager().getScmNodeManager()
         .processNodeReport(datanode, nodeReport);
     assertCounter("NumNodeReportProcessingFailed", nrProcessed + 1,
+        getMetrics(SCMNodeMetrics.class.getSimpleName()));
+  }
+
+  /**
+   * Verify that datanode aggregated state and capacity metrics are reported.
+   */
+  @Test
+  public void testNodeCountAndInfoMetricsReported() throws Exception {
+    HddsDatanodeService datanode = cluster.getHddsDatanodes().get(0);
+    StorageReportProto storageReport = TestUtils.createStorageReport(
+        datanode.getDatanodeDetails().getUuid(), "/tmp", 100, 10, 90, null);
+    NodeReportProto nodeReport = NodeReportProto.newBuilder()
+        .addStorageReport(storageReport).build();
+    datanode.getDatanodeStateMachine().getContext().addReport(nodeReport);
+    cluster.getStorageContainerManager().getScmNodeManager()
+        .processNodeReport(datanode.getDatanodeDetails(), nodeReport);
+
+    assertGauge("HealthyNodes", 1,
+        getMetrics(SCMNodeMetrics.class.getSimpleName()));
+    assertGauge("StaleNodes", 0,
+        getMetrics(SCMNodeMetrics.class.getSimpleName()));
+    assertGauge("DeadNodes", 0,
+        getMetrics(SCMNodeMetrics.class.getSimpleName()));
+    assertGauge("DecommissioningNodes", 0,
+        getMetrics(SCMNodeMetrics.class.getSimpleName()));
+    assertGauge("DecommissionedNodes", 0,
+        getMetrics(SCMNodeMetrics.class.getSimpleName()));
+    assertGauge("DiskCapacity", 100L,
+        getMetrics(SCMNodeMetrics.class.getSimpleName()));
+    assertGauge("DiskUsed", 10L,
+        getMetrics(SCMNodeMetrics.class.getSimpleName()));
+    assertGauge("DiskRemaining", 90L,
+        getMetrics(SCMNodeMetrics.class.getSimpleName()));
+    assertGauge("SSDCapacity", 0L,
+        getMetrics(SCMNodeMetrics.class.getSimpleName()));
+    assertGauge("SSDUsed", 0L,
+        getMetrics(SCMNodeMetrics.class.getSimpleName()));
+    assertGauge("SSDRemaining", 0L,
         getMetrics(SCMNodeMetrics.class.getSimpleName()));
   }
 

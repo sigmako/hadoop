@@ -25,6 +25,7 @@ import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
 import org.apache.hadoop.hdds.scm.container.ContainerID;
 import org.apache.hadoop.hdds.scm.pipeline.PipelineID;
+import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.ozone.container.common.interfaces.Container;
 import org.apache.hadoop.ozone.container.common.statemachine
     .DatanodeStateMachine;
@@ -39,6 +40,7 @@ import org.apache.ratis.protocol.RaftGroupId;
 import org.apache.ratis.protocol.RaftPeer;
 import org.apache.ratis.retry.RetryPolicy;
 import org.apache.ratis.rpc.SupportedRpcType;
+import org.apache.ratis.util.TimeDuration;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Test;
@@ -49,6 +51,7 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.Random;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Test cases to verify CloseContainerCommandHandler in datanode.
@@ -66,7 +69,7 @@ public class TestCloseContainerCommandHandler {
     final DatanodeDetails datanodeDetails = randomDatanodeDetails();
     final OzoneContainer ozoneContainer =
         getOzoneContainer(conf, datanodeDetails);
-    ozoneContainer.start();
+    ozoneContainer.start(UUID.randomUUID().toString());
     try {
       final Container container =
           createContainer(conf, datanodeDetails, ozoneContainer);
@@ -103,7 +106,7 @@ public class TestCloseContainerCommandHandler {
     final DatanodeDetails datanodeDetails = randomDatanodeDetails();
     final OzoneContainer ozoneContainer =
         getOzoneContainer(conf, datanodeDetails);
-    ozoneContainer.start();
+    ozoneContainer.start(UUID.randomUUID().toString());
     try {
       final Container container =
           createContainer(conf, datanodeDetails, ozoneContainer);
@@ -138,7 +141,7 @@ public class TestCloseContainerCommandHandler {
     final DatanodeDetails datanodeDetails = randomDatanodeDetails();
     final OzoneContainer ozoneContainer =
         getOzoneContainer(conf, datanodeDetails);
-    ozoneContainer.start();
+    ozoneContainer.start(UUID.randomUUID().toString());
     try {
       final Container container =
           createContainer(conf, datanodeDetails, ozoneContainer);
@@ -186,7 +189,7 @@ public class TestCloseContainerCommandHandler {
     final DatanodeDetails datanodeDetails = randomDatanodeDetails();
     final OzoneContainer ozoneContainer =
         getOzoneContainer(conf, datanodeDetails);
-    ozoneContainer.start();
+    ozoneContainer.start(UUID.randomUUID().toString());
     try {
       final Container container =
           createContainer(conf, datanodeDetails, ozoneContainer);
@@ -222,7 +225,7 @@ public class TestCloseContainerCommandHandler {
     final DatanodeDetails datanodeDetails = randomDatanodeDetails();
     final OzoneContainer ozoneContainer = getOzoneContainer(
         conf, datanodeDetails);
-    ozoneContainer.start();
+    ozoneContainer.start(UUID.randomUUID().toString());
     try {
       final Container container = createContainer(
           conf, datanodeDetails, ozoneContainer);
@@ -267,6 +270,8 @@ public class TestCloseContainerCommandHandler {
         TestCloseContainerCommandHandler.class.getName() + UUID.randomUUID());
     conf.set(HddsConfigKeys.OZONE_METADATA_DIRS, testDir.getPath());
     conf.set(ScmConfigKeys.HDDS_DATANODE_DIR_KEY, testDir.getPath());
+    conf.setBoolean(OzoneConfigKeys.DFS_CONTAINER_RATIS_IPC_RANDOM_PORT, true);
+    conf.setBoolean(OzoneConfigKeys.DFS_CONTAINER_IPC_RANDOM_PORT, true);
 
     final DatanodeStateMachine datanodeStateMachine = Mockito.mock(
         DatanodeStateMachine.class);
@@ -274,8 +279,7 @@ public class TestCloseContainerCommandHandler {
         .thenReturn(datanodeDetails);
     Mockito.when(context.getParent()).thenReturn(datanodeStateMachine);
     final OzoneContainer ozoneContainer = new  OzoneContainer(
-        datanodeDetails, conf, context);
-    ozoneContainer.getDispatcher().setScmId(UUID.randomUUID().toString());
+        datanodeDetails, conf, context, null);
     return ozoneContainer;
   }
 
@@ -289,8 +293,10 @@ public class TestCloseContainerCommandHandler {
     final RaftGroup group = RatisHelper.newRaftGroup(raftGroupId,
         Collections.singleton(datanodeDetails));
     final int maxOutstandingRequests = 100;
-    final RaftClient client = RatisHelper.newRaftClient(SupportedRpcType.GRPC,
-        peer, retryPolicy, maxOutstandingRequests, null);
+    final RaftClient client = RatisHelper
+        .newRaftClient(SupportedRpcType.GRPC, peer, retryPolicy,
+            maxOutstandingRequests,
+            TimeDuration.valueOf(3, TimeUnit.SECONDS));
     Assert.assertTrue(client.groupAdd(group, peer.getId()).isSuccess());
     Thread.sleep(2000);
     final ContainerID containerId = ContainerID.valueof(
@@ -301,7 +307,6 @@ public class TestCloseContainerCommandHandler {
     request.setContainerID(containerId.getId());
     request.setCreateContainer(
         ContainerProtos.CreateContainerRequestProto.getDefaultInstance());
-    request.setTraceID(UUID.randomUUID().toString());
     request.setDatanodeUuid(datanodeDetails.getUuidString());
     ozoneContainer.getWriteChannel().submitRequest(
         request.build(), pipelineID.getProtobuf());

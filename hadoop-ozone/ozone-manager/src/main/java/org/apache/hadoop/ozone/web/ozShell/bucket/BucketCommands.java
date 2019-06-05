@@ -39,8 +39,7 @@ import picocli.CommandLine.ParentCommand;
         ListBucketHandler.class,
         CreateBucketHandler.class,
         UpdateBucketHandler.class,
-        DeleteBucketHandler.class,
-        S3BucketMapping.class
+        DeleteBucketHandler.class
     },
     mixinStandardHelpOptions = true,
     versionProvider = HddsVersionProvider.class)
@@ -52,7 +51,7 @@ public class BucketCommands implements GenericParentCommand, Callable<Void> {
   @Override
   public Void call() throws Exception {
     throw new MissingSubcommandException(
-        this.shell.getCmd().getSubcommands().get("bucket").getUsageMessage());
+        this.shell.getCmd().getSubcommands().get("bucket"));
   }
 
   @Override
