@@ -151,8 +151,9 @@ Example:
 
 For S3a encryption tests to run correctly, the
 `fs.s3a.server-side-encryption.key` must be configured in the s3a contract xml
-file with a AWS KMS encryption key arn as this value is different for each AWS
-KMS.
+file or `auth-keys.xml` file with a AWS KMS encryption key arn as this value is
+different for each AWS KMS. Please note this KMS key should be created in the
+same region as your S3 bucket. Otherwise, you may get `KMS.NotFoundException`.
 
 Example:
 
@@ -812,6 +813,31 @@ sequential one afterwards. The IO heavy ones must also be subclasses of
 
 This is invaluable for debugging test failures.
 
+How to set test options in your hadoop configuration rather
+than on the maven command line:
+
+As an example let's assume you want to run S3Guard integration tests using IDE.
+Please add the following properties in
+`hadoop-tools/hadoop-aws/src/test/resources/auth-keys.xml` file.
+ Local configuration is stored in auth-keys.xml. The changes to this file won't be committed,
+ so it's safe to store local config here.
+```xml
+<property>
+  <name>fs.s3a.s3guard.test.enabled</name>
+  <value>true</value>
+</property>
+```
+
+```xml
+<property>
+  <name>fs.s3a.s3guard.test.implementation</name>
+  <value>dynamo</value>
+</property>
+```
+
+Warning : Although this is easier for IDE debugging setups, once you do this,
+you cannot change configurations on the mvn command line, such as testing without s3guard.
+
 ### Keeping AWS Costs down
 
 Most of the base S3 tests are designed to use public AWS data
@@ -845,7 +871,7 @@ it can be manually done:
       hadoop s3guard uploads -abort -force s3a://test-bucket/
 * If you don't need it, destroy the S3Guard DDB table.
 
-      hadoop s3guard destroy s3a://hwdev-steve-ireland-new/
+      hadoop s3guard destroy s3a://test-bucket/
 
 The S3Guard tests will automatically create the Dynamo DB table in runs with
 `-Ds3guard -Ddynamo` set; default capacity of these buckets
@@ -854,12 +880,8 @@ and, for test runs in or near the S3/DDB stores, throttling events.
 
 If you want to manage capacity, use `s3guard set-capacity` to increase it
 (performance) or decrease it (costs).
-For remote `hadoop-aws` test runs, the read/write capacities of "10" each should suffice;
+For remote `hadoop-aws` test runs, the read/write capacities of "0" each should suffice;
 increase it if parallel test run logs warn of throttling.
-
-Tip: for agility, use DynamoDB autoscaling, setting the minimum to something very low (e.g 5 units), the maximum to the largest amount you are willing to pay.
-This will automatically reduce capacity when you are not running tests against
-the bucket, slowly increase it over multiple test runs, if the load justifies it.
 
 ## <a name="tips"></a> Tips
 
@@ -881,7 +903,7 @@ using an absolute XInclude reference to it.
 </configuration>
 ```
 
-#  <a name="failure-injection"></a>Failure Injection
+## <a name="failure-injection"></a>Failure Injection
 
 **Warning do not enable any type of failure injection in production.  The
 following settings are for testing only.**
@@ -1014,7 +1036,7 @@ The inconsistent client is shipped in the `hadoop-aws` JAR, so it can
 be used in applications which work with S3 to see how they handle
 inconsistent directory listings.
 
-##<a name="s3guard"></a> Testing S3Guard
+## <a name="s3guard"></a> Testing S3Guard
 
 [S3Guard](./s3guard.html) is an extension to S3A which adds consistent metadata
 listings to the S3A client. As it is part of S3A, it also needs to be tested.
@@ -1052,7 +1074,7 @@ The basic strategy for testing S3Guard correctness consists of:
     No charges are incurred for using this store, and its consistency
     guarantees are that of the underlying object store instance. <!-- :) -->
 
-## Testing S3A with S3Guard Enabled
+### Testing S3A with S3Guard Enabled
 
 All the S3A tests which work with a private repository can be configured to
 run with S3Guard by using the `s3guard` profile. When set, this will run
@@ -1082,15 +1104,16 @@ mvn -T 1C verify -Dtest=skip -Dit.test=ITestS3AMiscOperations -Ds3guard -Ddynamo
 ### Notes
 
 1. If the `s3guard` profile is not set, then the S3Guard properties are those
-of the test configuration set in `contract-test-options.xml` or `auth-keys.xml`
+of the test configuration set in s3a contract xml file or `auth-keys.xml`
 
-If the `s3guard` profile *is* set,
+If the `s3guard` profile *is* set:
 1. The S3Guard options from maven (the dynamo and authoritative flags)
   overwrite any previously set in the configuration files.
 1. DynamoDB will be configured to create any missing tables.
-1. When using DynamoDB and running ITestDynamoDBMetadataStore, the fs.s3a.s3guard.ddb.test.table
-property should be configured, and the name of that table should be different
- than what is used for fs.s3a.s3guard.ddb.table. The test table is destroyed
+1. When using DynamoDB and running `ITestDynamoDBMetadataStore`,
+  the `fs.s3a.s3guard.ddb.test.table`
+property MUST be configured, and the name of that table MUST be different
+ than what is used for `fs.s3a.s3guard.ddb.table`. The test table is destroyed
  and modified multiple times during the test.
  1. Several of the tests create and destroy DynamoDB tables. The table names
  are prefixed with the value defined by
@@ -1099,6 +1122,88 @@ property should be configured, and the name of that table should be different
  tables. If the tests abort uncleanly, these tables may be left behind,
  incurring AWS charges.
 
+
+### How to Dump the Table and Metastore State
+
+There's an unstable entry point to list the contents of a table
+and S3 filesystem ot a set of Tab Separated Value files:
+
+```
+hadoop org.apache.hadoop.fs.s3a.s3guard.DumpS3GuardDynamoTable s3a://bucket/ dir/out
+```
+
+This generates a set of files prefixed `dir/out-` with different views of the
+world which can then be viewed on the command line or editor:
+
+```
+"type" "deleted" "path" "is_auth_dir" "is_empty_dir" "len" "updated" "updated_s" "last_modified" "last_modified_s" "etag" "version"
+"file" "true" "s3a://bucket/fork-0001/test/ITestS3AContractDistCp/testDirectWrite/remote" "false" "UNKNOWN" 0 1562171244451 "Wed Jul 03 17:27:24 BST 2019" 1562171244451 "Wed Jul 03 17:27:24 BST 2019" "" ""
+"file" "true" "s3a://bucket/Users/stevel/Projects/hadoop-trunk/hadoop-tools/hadoop-aws/target/test-dir/1/5xlPpalRwv/test/new/newdir/file1" "false" "UNKNOWN" 0 1562171518435 "Wed Jul 03 17:31:58 BST 2019" 1562171518435 "Wed Jul 03 17:31:58 BST 2019" "" ""
+"file" "true" "s3a://bucket/Users/stevel/Projects/hadoop-trunk/hadoop-tools/hadoop-aws/target/test-dir/1/5xlPpalRwv/test/new/newdir/subdir" "false" "UNKNOWN" 0 1562171518535 "Wed Jul 03 17:31:58 BST 2019" 1562171518535 "Wed Jul 03 17:31:58 BST 2019" "" ""
+"file" "true" "s3a://bucket/test/DELAY_LISTING_ME/testMRJob" "false" "UNKNOWN" 0 1562172036299 "Wed Jul 03 17:40:36 BST 2019" 1562172036299 "Wed Jul 03 17:40:36 BST 2019" "" ""
+```
+
+This is unstable: the output format may change without warning.
+To understand the meaning of the fields, consult the documentation.
+They are, currently:
+
+| field | meaning | source |
+|-------|---------| -------|
+| `type` | type | filestatus |
+| `deleted` | tombstone marker | metadata |
+| `path` | path of an entry | filestatus |
+| `is_auth_dir` | directory entry authoritative status | metadata |
+| `is_empty_dir` | does the entry represent an empty directory | metadata |
+| `len` | file length | filestatus |
+| `last_modified` | file status last modified | filestatus |
+| `last_modified_s` | file status last modified as string | filestatus |
+| `updated` | time (millis) metadata was updated | metadata |
+| `updated_s` | updated time as a string | metadata |
+| `etag` | any etag | filestatus |
+| `version` |  any version| filestatus |
+
+Files generated
+
+| suffix        | content |
+|---------------|---------|
+| `-scan.csv`   | Full scan/dump of the metastore |
+| `-store.csv`  | Recursive walk through the metastore |
+| `-tree.csv`   | Treewalk through filesystem `listStatus("/")` calls |
+| `-flat.csv`   | Flat listing through filesystem `listFiles("/", recursive)` |
+| `-s3.csv`     | Dump of the S3 Store *only* |
+| `-scan-2.csv` | Scan of the store after the previous operations |
+
+Why the two scan entries? The S3A listing and treewalk operations
+may add new entries to the metastore/DynamoDB table.
+
+Note 1: this is unstable; entry list and meaning may change, sorting of output,
+the listing algorithm, representation of types, etc. It's expected
+uses are: diagnostics, support calls and helping us developers
+work out what we've just broken.
+
+Note 2: This *is* safe to use against an active store; the tables may appear
+to be inconsistent due to changes taking place during the dump sequence.
+
+### Resetting the Metastore: `PurgeS3GuardDynamoTable`
+
+The `PurgeS3GuardDynamoTable` entry point
+`org.apache.hadoop.fs.s3a.s3guard.PurgeS3GuardDynamoTable` can
+list all entries in a store for a specific filesystem, and delete them.
+It *only* deletes those entries in the store for that specific filesystem,
+even if the store is shared.
+
+```bash
+hadoop org.apache.hadoop.fs.s3a.s3guard.PurgeS3GuardDynamoTable \
+  -force s3a://bucket/
+```
+
+Without the `-force` option the table is scanned, but no entries deleted;
+with it then all entries for that filesystem are deleted.
+No attempt is made to order the deletion; while the operation is under way
+the store is not fully connected (i.e. there may be entries whose parent has
+already been deleted).
+
+Needless to say: *it is not safe to use this against a table in active use.*
 
 ### Scale Testing MetadataStore Directly
 
@@ -1178,6 +1283,27 @@ during the use of a S3Guarded S3A filesystem are wrapped by retry logic.
 
 *The best way to verify resilience is to run the entire `hadoop-aws` test suite,
 or even a real application, with throttling enabled.
+
+### Testing encrypted DynamoDB tables
+
+By default, a DynamoDB table is encrypted using AWS owned customer master key
+(CMK). You can enable server side encryption (SSE) using AWS managed CMK or
+customer managed CMK in KMS before running the S3Guard tests.
+1. To enable AWS managed CMK, set the config
+`fs.s3a.s3guard.ddb.table.sse.enabled` to true in `auth-keys.xml`.
+1. To enable customer managed CMK, you need to create a KMS key and set the
+config in `auth-keys.xml`. The value can be the key ARN or alias. Example:
+```
+  <property>
+    <name>fs.s3a.s3guard.ddb.table.sse.enabled</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>fs.s3a.s3guard.ddb.table.sse.cmk</name>
+    <value>arn:aws:kms:us-west-2:360379543683:key/071a86ff-8881-4ba0-9230-95af6d01ca01</value>
+  </property>
+```
+For more details about SSE on DynamoDB table, please see [S3Guard doc](./s3guard.html).
 
 ### Testing only: Local Metadata Store
 
@@ -1334,6 +1460,7 @@ bin/hadoop fs -mv $BUCKET/file $BUCKET/file2
 # expect "No such file or directory"
 bin/hadoop fs -stat $BUCKET/file
 bin/hadoop fs -stat $BUCKET/file2
+bin/hadoop fs -mkdir $BUCKET/dir-no-trailing
 bin/hadoop fs -mv $BUCKET/file2 $BUCKET/dir-no-trailing
 bin/hadoop fs -stat $BUCKET/dir-no-trailing/file2
 # treated the same as the file stat
@@ -1348,6 +1475,9 @@ bin/hadoop fs -test -d  $BUCKET/dir-no-trailing/file2 ; echo $?
 bin/hadoop fs -checksum $BUCKET/dir-no-trailing/file2
 # expect "etag" + a long string
 bin/hadoop fs -D fs.s3a.etag.checksum.enabled=true -checksum $BUCKET/dir-no-trailing/file2
+bin/hadoop fs -expunge -immediate -fs $BUCKET
+bin/hdfs fetchdt --webservice $BUCKET secrets.bin
+bin/hdfs fetchdt -D fs.s3a.delegation.token.binding=org.apache.hadoop.fs.s3a.auth.delegation.SessionTokenBinding --webservice $BUCKET secrets.bin
 ```
 
 ### Other tests

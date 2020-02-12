@@ -86,6 +86,7 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Cont
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.monitor.ContainersMonitor;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.resourceplugin.ResourcePlugin;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.resourceplugin.ResourcePluginManager;
+import org.apache.hadoop.yarn.server.nodemanager.health.NodeHealthCheckerService;
 import org.apache.hadoop.yarn.server.nodemanager.metrics.NodeManagerMetrics;
 import org.apache.hadoop.yarn.server.nodemanager.nodelabels.NodeAttributesProvider;
 import org.apache.hadoop.yarn.server.nodemanager.nodelabels.NodeLabelsProvider;
@@ -582,6 +583,11 @@ public class NodeStatusUpdaterImpl extends AbstractService implements
   private void updateNMResource(Resource resource) {
     metrics.addResource(Resources.subtract(resource, totalResource));
     this.totalResource = resource;
+
+    // Update the containers monitor
+    ContainersMonitor containersMonitor =
+        this.context.getContainerManager().getContainersMonitor();
+    containersMonitor.setAllocatedResourcesForContainers(totalResource);
   }
 
   // Iterate through the NMContext and clone and get all the containers'

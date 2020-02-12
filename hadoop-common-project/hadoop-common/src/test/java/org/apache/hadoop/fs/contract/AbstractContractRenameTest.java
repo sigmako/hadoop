@@ -204,7 +204,10 @@ public abstract class AbstractContractRenameTest extends
     assertPathExists("not created in src/sub dir",
         new Path(srcSubDir, "subfile.txt"));
 
-    fs.rename(srcDir, finalDir);
+    boolean rename = fs.rename(srcDir, finalDir);
+    assertTrue("rename(" + srcDir + ", " + finalDir + ") failed",
+        rename);
+
     // Accept both POSIX rename behavior and CLI rename behavior
     if (renameRemoveEmptyDest) {
       // POSIX rename behavior
@@ -268,7 +271,7 @@ public abstract class AbstractContractRenameTest extends
    * @param dst the destination root to move
    * @param nestedPath the nested path to move
    */
-  private void validateAncestorsMoved(Path src, Path dst, String nestedPath)
+  protected void validateAncestorsMoved(Path src, Path dst, String nestedPath)
       throws IOException {
     assertIsDirectory(dst);
     assertPathDoesNotExist("src path should not exist", path(src + nestedPath));

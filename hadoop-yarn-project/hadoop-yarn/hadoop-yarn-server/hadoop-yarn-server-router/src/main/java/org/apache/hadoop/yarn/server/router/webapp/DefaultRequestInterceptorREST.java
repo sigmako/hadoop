@@ -172,7 +172,7 @@ public class DefaultRequestInterceptorREST
       Set<String> statesQuery, String finalStatusQuery, String userQuery,
       String queueQuery, String count, String startedBegin, String startedEnd,
       String finishBegin, String finishEnd, Set<String> applicationTypes,
-      Set<String> applicationTags, Set<String> unselectedFields) {
+      Set<String> applicationTags, String name, Set<String> unselectedFields) {
     // all the params are specified inside hsr
     return RouterWebServiceUtil.genericForward(webAppAddress, hsr,
         AppsInfo.class, HTTPMethods.GET,
@@ -192,7 +192,8 @@ public class DefaultRequestInterceptorREST
   @Override
   public AppActivitiesInfo getAppActivities(HttpServletRequest hsr,
       String appId, String time, Set<String> requestPriorities,
-      Set<String> allocationRequestIds, String groupBy) {
+      Set<String> allocationRequestIds, String groupBy, String limit,
+      Set<String> actions, boolean summarize) {
     // time and appId are specified inside hsr
     return RouterWebServiceUtil.genericForward(webAppAddress, hsr,
         AppActivitiesInfo.class, HTTPMethods.GET,

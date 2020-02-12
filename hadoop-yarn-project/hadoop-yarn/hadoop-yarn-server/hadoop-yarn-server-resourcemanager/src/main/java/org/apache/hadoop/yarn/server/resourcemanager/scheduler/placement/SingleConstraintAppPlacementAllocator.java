@@ -255,7 +255,10 @@ public class SingleConstraintAppPlacementAllocator<N extends SchedulerNode>
   // Currently only single constraint is handled.
   private String validateAndGetTargetNodePartition(
       PlacementConstraint placementConstraint) {
-    String nodePartition = RMNodeLabelsManager.NO_LABEL;
+    String defaultNodeLabelExpression =
+        appSchedulingInfo.getDefaultNodeLabelExpression();
+    String nodePartition = defaultNodeLabelExpression == null ?
+        RMNodeLabelsManager.NO_LABEL : defaultNodeLabelExpression;
     if (placementConstraint != null &&
         placementConstraint.getConstraintExpr() != null) {
       PlacementConstraint.AbstractConstraint ac =
@@ -360,6 +363,7 @@ public class SingleConstraintAppPlacementAllocator<N extends SchedulerNode>
           placementConstraintManager, allocationTagsManager, dcOpt);
     } catch (InvalidAllocationTagsQueryException e) {
       LOG.warn("Failed to query node cardinality:", e);
+      this.incrementPlacementAttempt();
       return false;
     }
   }

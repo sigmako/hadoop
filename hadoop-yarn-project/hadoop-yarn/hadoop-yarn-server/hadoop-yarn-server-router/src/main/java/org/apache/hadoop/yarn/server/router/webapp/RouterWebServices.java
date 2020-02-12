@@ -95,6 +95,8 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
 
+import static org.apache.hadoop.yarn.server.resourcemanager.webapp.RMWebServices.DEFAULT_SUMMARIZE;
+
 /**
  * RouterWebServices is a service that runs on each router that can be used to
  * intercept and inspect {@link RMWebServiceProtocol} messages from client to
@@ -431,13 +433,14 @@ public class RouterWebServices implements RMWebServiceProtocol {
       @QueryParam(RMWSConsts.FINISHED_TIME_END) String finishEnd,
       @QueryParam(RMWSConsts.APPLICATION_TYPES) Set<String> applicationTypes,
       @QueryParam(RMWSConsts.APPLICATION_TAGS) Set<String> applicationTags,
+      @QueryParam(RMWSConsts.NAME) String name,
       @QueryParam(RMWSConsts.DESELECTS) Set<String> unselectedFields) {
     init();
     RequestInterceptorChainWrapper pipeline = getInterceptorChain(hsr);
     return pipeline.getRootInterceptor().getApps(hsr, stateQuery, statesQuery,
         finalStatusQuery, userQuery, queueQuery, count, startedBegin,
         startedEnd, finishBegin, finishEnd, applicationTypes, applicationTags,
-        unselectedFields);
+        name, unselectedFields);
   }
 
   @GET
@@ -465,11 +468,16 @@ public class RouterWebServices implements RMWebServiceProtocol {
       @QueryParam(RMWSConsts.REQUEST_PRIORITIES) Set<String> requestPriorities,
       @QueryParam(RMWSConsts.ALLOCATION_REQUEST_IDS)
           Set<String> allocationRequestIds,
-      @QueryParam(RMWSConsts.GROUP_BY) String groupBy) {
+      @QueryParam(RMWSConsts.GROUP_BY) String groupBy,
+      @QueryParam(RMWSConsts.LIMIT) String limit,
+      @QueryParam(RMWSConsts.ACTIONS) Set<String> actions,
+      @QueryParam(RMWSConsts.SUMMARIZE) @DefaultValue(DEFAULT_SUMMARIZE)
+          boolean summarize) {
     init();
     RequestInterceptorChainWrapper pipeline = getInterceptorChain(hsr);
     return pipeline.getRootInterceptor().getAppActivities(hsr, appId, time,
-        requestPriorities, allocationRequestIds, groupBy);
+        requestPriorities, allocationRequestIds, groupBy, limit, actions,
+        summarize);
   }
 
   @GET

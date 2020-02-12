@@ -26,6 +26,7 @@ import org.apache.hadoop.hdfs.server.datanode.DNConf;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -40,13 +41,21 @@ public class PmemMappableBlockLoader extends MappableBlockLoader {
   private static final Logger LOG =
       LoggerFactory.getLogger(PmemMappableBlockLoader.class);
   private PmemVolumeManager pmemVolumeManager;
+  private boolean cacheRecoveryEnabled;
 
   @Override
-  void initialize(FsDatasetCache cacheManager) throws IOException {
+  CacheStats initialize(DNConf dnConf) throws IOException {
     LOG.info("Initializing cache loader: " + this.getClass().getName());
-    DNConf dnConf = cacheManager.getDnConf();
-    PmemVolumeManager.init(dnConf.getPmemVolumes());
+    PmemVolumeManager.init(dnConf.getPmemVolumes(),
+        dnConf.getPmemCacheRecoveryEnabled());
     pmemVolumeManager = PmemVolumeManager.getInstance();
+    cacheRecoveryEnabled = dnConf.getPmemCacheRecoveryEnabled();
+    // The configuration for max locked memory is shaded.
+    LOG.info("Persistent memory is used for caching data instead of " +
+        "DRAM. Max locked memory is set to zero to disable DRAM cache");
+    // TODO: PMem is not supporting Lazy Writer now, will refine this stats
+    // while implementing it.
+    return new CacheStats(0L);
   }
 
   /**
@@ -54,8 +63,8 @@ public class PmemMappableBlockLoader extends MappableBlockLoader {
    *
    * Map the block and verify its checksum.
    *
-   * The block will be mapped to PmemDir/BlockPoolId-BlockId, in which PmemDir
-   * is a persistent memory volume chosen by PmemVolumeManager.
+   * The block will be mapped to PmemDir/BlockPoolId/subdir#/subdir#/BlockId,
+   * in which PmemDir is a persistent memory volume chosen by PmemVolumeManager.
    *
    * @param length         The current length of the block.
    * @param blockIn        The block input stream. Should be positioned at the
@@ -137,8 +146,31 @@ public class PmemMappableBlockLoader extends MappableBlockLoader {
   }
 
   @Override
+  public MappableBlock getRecoveredMappableBlock(
+      File cacheFile, String bpid, byte volumeIndex) throws IOException {
+    ExtendedBlockId key = new ExtendedBlockId(getBlockId(cacheFile), bpid);
+    MappableBlock mappableBlock = new PmemMappedBlock(cacheFile.length(), key);
+    PmemVolumeManager.getInstance().recoverBlockKeyToVolume(key, volumeIndex);
+
+    String path = PmemVolumeManager.getInstance().getCachePath(key);
+    long length = mappableBlock.getLength();
+    LOG.info("Recovering persistent memory cache for block {}, " +
+        "path = {}, length = {}", key, path, length);
+    return mappableBlock;
+  }
+
+  /**
+   * Parse the file name and get the BlockId.
+   */
+  public long getBlockId(File file) {
+    return Long.parseLong(file.getName());
+  }
+
+  @Override
   void shutdown() {
-    LOG.info("Clean up cache on persistent memory during shutdown.");
-    PmemVolumeManager.getInstance().cleanup();
+    if (!cacheRecoveryEnabled) {
+      LOG.info("Clean up cache on persistent memory during shutdown.");
+      PmemVolumeManager.getInstance().cleanup();
+    }
   }
 }

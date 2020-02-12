@@ -62,6 +62,22 @@ with the S3A data, in which case the normal S3 consistency guarantees apply.
 
 ## Setting up S3Guard
 
+### S3A to warn or fail if S3Guard is disabled
+A seemingly recurrent problem with S3Guard is that people think S3Guard is
+turned on but it isn't.
+You can set `org.apache.hadoop.fs.s3a.s3guard.disabled.warn.level`
+to avoid this. The property sets what to do when an S3A FS is instantiated
+without S3Guard. The following values are available:
+
+* `SILENT`: Do nothing.
+* `INFORM`: Log at info level that FS is instantiated without S3Guard.
+* `WARN`: Warn that data may be at risk in workflows.
+* `FAIL`: S3AFileSystem instantiation will fail.
+
+The default setting is INFORM. The setting is case insensitive.
+The required level can be set in the `core-site.xml`.
+
+---
 The latest configuration parameters are defined in `core-default.xml`.  You
 should consult that file for full information, but a summary is provided here.
 
@@ -113,9 +129,14 @@ two different reasons:
     stored in metadata store.
     * This mode can be set as a configuration property
     `fs.s3a.metadatastore.authoritative`
+    * It can also be set only on specific directories by setting
+    `fs.s3a.authoritative.path` to one or more prefixes, for example
+    `s3a://bucket/path` or "/auth1,/auth2".
     * All interactions with the S3 bucket(s) must be through S3A clients sharing
     the same metadata store.
     * This is independent from which metadata store implementation is used.
+    * In authoritative mode the metadata TTL metadata expiry is not effective.
+    This means that the metadata entries won't expire on authoritative paths.
 
 * Authoritative directory listings (isAuthoritative bit)
     * Tells if the stored directory listing metadata is complete.
@@ -174,15 +195,19 @@ In particular: **If the Metadata Store is declared as authoritative,
 all interactions with the S3 bucket(s) must be through S3A clients sharing
 the same Metadata Store**
 
-It can be configured how long a directory listing in the MetadataStore is
-considered as authoritative. If `((lastUpdated + ttl) <= now)` is false, the
-directory  listing is no longer considered authoritative, so the flag will be
-removed on `S3AFileSystem` level.
+#### TTL metadata expiry
+
+It can be configured how long an entry is valid in the MetadataStore
+**if the authoritative mode is turned off**, or the path is not
+configured to be authoritative.
+If `((lastUpdated + ttl) <= now)` is false for an entry, the entry will
+be expired, so the S3 bucket will be queried for fresh metadata.
+The time for expiry of metadata can be set as the following:
 
 ```xml
 <property>
-    <name>fs.s3a.metadatastore.authoritative.dir.ttl</name>
-    <value>3600000</value>
+    <name>fs.s3a.metadatastore.metadata.ttl</name>
+    <value>15m</value>
 </property>
 ```
 
@@ -202,7 +227,7 @@ hadoop s3guard import [-meta URI] s3a://my-bucket/file-with-bad-metadata
 ```
 
 Programmatic retries of the original operation would require overwrite=true.
-Suppose the original operation was FileSystem.create(myFile, overwrite=false).
+Suppose the original operation was `FileSystem.create(myFile, overwrite=false)`.
 If this operation failed with `MetadataPersistenceException` a repeat of the
 same operation would result in `FileAlreadyExistsException` since the original
 operation successfully created the file in S3 and only failed in writing the
@@ -219,7 +244,7 @@ by setting the following configuration:
 ```
 
 Setting this false is dangerous as it could result in the type of issue S3Guard
-is designed to avoid.  For example, a reader may see an inconsistent listing
+is designed to avoid. For example, a reader may see an inconsistent listing
 after a recent write since S3Guard may not contain metadata about the recently
 written file due to a metadata write error.
 
@@ -251,9 +276,11 @@ this sets the table name to `my-ddb-table-name`
 </property>
 ```
 
-It is good to share a table across multiple buckets for multiple reasons.
+It is good to share a table across multiple buckets for multiple reasons,
+especially if you are *not* using on-demand DynamoDB tables, and instead
+prepaying for provisioned I/O capacity.
 
-1. You are billed for the I/O capacity allocated to the table,
+1. You are billed for the provisioned I/O capacity allocated to the table,
 *even when the table is not used*. Sharing capacity can reduce costs.
 
 1. You can share the "provision burden" across the buckets. That is, rather
@@ -265,8 +292,13 @@ lower.
 S3Guard, because there is only one table to review and configure in the
 AWS management console.
 
+1. When you don't grant the permission to create DynamoDB tables to users.
+A single pre-created table for all buckets avoids the needs for an administrator
+to create one for every bucket.
+
 When wouldn't you want to share a table?
 
+1. When you are using on-demand DynamoDB and want to keep each table isolated.
 1. When you do explicitly want to provision I/O capacity to a specific bucket
 and table, isolated from others.
 
@@ -315,18 +347,25 @@ Next, you can choose whether or not the table will be automatically created
 </property>
 ```
 
-### 7. If creating a table: Set your DynamoDB I/O Capacity
+### 7. If creating a table: Choose your billing mode (and perhaps I/O Capacity)
 
-Next, you need to set the DynamoDB read and write throughput requirements you
-expect to need for your cluster.  Setting higher values will cost you more
-money.  *Note* that these settings only affect table creation when
+Next, you need to decide whether to use On-Demand DynamoDB and its
+pay-per-request billing (recommended), or to explicitly request a
+provisioned IO capacity.
+
+Before AWS offered pay-per-request billing, the sole billing mechanism,
+was "provisioned capacity". This mechanism requires you to choose 
+the DynamoDB read and write throughput requirements you
+expect to need for your expected uses of the S3Guard table.
+Setting higher values cost you more money -*even when the table was idle*
+  *Note* that these settings only affect table creation when
 `fs.s3a.s3guard.ddb.table.create` is enabled.  To change the throughput for
 an existing table, use the AWS console or CLI tool.
 
 For more details on DynamoDB capacity units, see the AWS page on [Capacity
 Unit Calculations](http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/WorkingWithTables.html#CapacityUnitCalculations).
 
-The charges are incurred per hour for the life of the table, *even when the
+Provisioned IO capacity is billed per hour for the life of the table, *even when the
 table and the underlying S3 buckets are not being used*.
 
 There are also charges incurred for data storage and for data I/O outside of the
@@ -334,34 +373,89 @@ region of the DynamoDB instance. S3Guard only stores metadata in DynamoDB: path 
 and summary details of objects —the actual data is stored in S3, so billed at S3
 rates.
 
+With provisioned I/O capacity, attempting to perform more I/O than the capacity
+requested throttles the operation and may result in operations failing.
+Larger I/O capacities cost more.
+
+With the introduction of On-Demand DynamoDB, you can now avoid paying for
+provisioned capacity by creating an on-demand table.
+With an on-demand table you are not throttled if your DynamoDB requests exceed
+any pre-provisioned limit, nor do you pay per hour even when a table is idle.
+
+You do, however, pay more per DynamoDB operation.
+Even so, the ability to cope with sudden bursts of read or write requests, combined
+with the elimination of charges for idle tables, suit the use patterns made of 
+S3Guard tables by applications interacting with S3. That is: periods when the table
+is rarely used, with intermittent high-load operations when directory trees
+are scanned (query planning and similar), or updated (rename and delete operations).
+
+
+We recommending using On-Demand DynamoDB for maximum performance in operations
+such as query planning, and lowest cost when S3 buckets are not being accessed.
+
+This is the default, as configured in the default configuration options.
+
 ```xml
 <property>
   <name>fs.s3a.s3guard.ddb.table.capacity.read</name>
-  <value>500</value>
+  <value>0</value>
   <description>
     Provisioned throughput requirements for read operations in terms of capacity
-    units for the DynamoDB table.  This config value will only be used when
-    creating a new DynamoDB table, though later you can manually provision by
-    increasing or decreasing read capacity as needed for existing tables.
-    See DynamoDB documents for more information.
+    units for the DynamoDB table. This config value will only be used when
+    creating a new DynamoDB table.
+    If set to 0 (the default), new tables are created with "per-request" capacity.
+    If a positive integer is provided for this and the write capacity, then
+    a table with "provisioned capacity" will be created.
+    You can change the capacity of an existing provisioned-capacity table
+    through the "s3guard set-capacity" command.
   </description>
 </property>
 
 <property>
   <name>fs.s3a.s3guard.ddb.table.capacity.write</name>
-  <value>100</value>
+  <value>0</value>
   <description>
     Provisioned throughput requirements for write operations in terms of
-    capacity units for the DynamoDB table.  Refer to related config
-    fs.s3a.s3guard.ddb.table.capacity.read before usage.
+    capacity units for the DynamoDB table.
+    If set to 0 (the default), new tables are created with "per-request" capacity.
+    Refer to related configuration option fs.s3a.s3guard.ddb.table.capacity.read
   </description>
 </property>
 ```
 
-Attempting to perform more I/O than the capacity requested throttles the
-I/O, and may result in operations failing. Larger I/O capacities cost more.
-We recommending using small read and write capacities when initially experimenting
-with S3Guard, and considering DynamoDB On-Demand.
+### 8.  If creating a table: Enable server side encryption (SSE)
+
+Encryption at rest can help you protect sensitive data in your DynamoDB table.
+When creating a new table, you can set server side encryption on the table
+using the default AWS owned customer master key (CMK), AWS managed CMK, or
+customer managed CMK. S3Guard code accessing the table is all the same whether
+SSE is enabled or not. For more details on DynamoDB table server side
+encryption, see the AWS page on [Encryption at Rest: How It Works](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/encryption.howitworks.html).
+
+These are the default configuration options, as configured in `core-default.xml`.
+
+```xml
+<property>
+  <name>fs.s3a.s3guard.ddb.table.sse.enabled</name>
+  <value>false</value>
+  <description>
+    Whether server-side encryption (SSE) is enabled or disabled on the table.
+    By default it's disabled, meaning SSE is set to AWS owned CMK.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3a.s3guard.ddb.table.sse.cmk</name>
+  <value/>
+  <description>
+    The KMS Customer Master Key (CMK) used for the KMS encryption on the table.
+    To specify a CMK, this config value can be its key ID, Amazon Resource Name
+    (ARN), alias name, or alias ARN. Users only need to provide this config if
+    the key is different from the default DynamoDB KMS Master Key, which is
+    alias/aws/dynamodb.
+  </description>
+</property>
+```
 
 ## Authenticating with S3Guard
 
@@ -369,9 +463,7 @@ The DynamoDB metadata store takes advantage of the fact that the DynamoDB
 service uses the same authentication mechanisms as S3. S3Guard
 gets all its credentials from the S3A client that is using it.
 
-All existing S3 authentication mechanisms can be used, except for one
-exception. Credentials placed in URIs are not supported for S3Guard, for security
-reasons.
+All existing S3 authentication mechanisms can be used.
 
 ## Per-bucket S3Guard configuration
 
@@ -512,10 +604,26 @@ hadoop s3guard init -meta URI ( -region REGION | s3a://BUCKET )
 Creates and initializes an empty metadata store.
 
 A DynamoDB metadata store can be initialized with additional parameters
-pertaining to [Provisioned Throughput](http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.ProvisionedThroughput.html):
+pertaining to capacity. 
+
+If these values are both zero, then an on-demand DynamoDB table is created;
+if positive values then they set the
+[Provisioned Throughput](http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.ProvisionedThroughput.html)
+of the table.
+
 
 ```bash
 [-write PROVISIONED_WRITES] [-read PROVISIONED_READS]
+```
+
+Server side encryption (SSE) can be enabled with AWS managed customer master key
+(CMK), or customer managed CMK. By default the DynamoDB table will be encrypted
+with AWS owned CMK. To use a customer managed CMK, you can specify its KMS key
+ID, ARN, alias name, or alias ARN. If not specified, the default AWS managed CMK
+for DynamoDB "alias/aws/dynamodb" will be used.
+
+```bash
+[-sse [-cmk KMS_CMK_ID]]
 ```
 
 Tag argument can be added with a key=value list of tags. The table for the
@@ -525,20 +633,21 @@ metadata store will be created with these tags in DynamoDB.
 [-tag key=value;]
 ```
 
+
 Example 1
 
 ```bash
-hadoop s3guard init -meta dynamodb://ireland-team -write 5 -read 10 s3a://ireland-1
+hadoop s3guard init -meta dynamodb://ireland-team -write 0 -read 0 s3a://ireland-1
 ```
 
-Creates a table "ireland-team" with a capacity of 5 for writes, 10 for reads,
-in the same location as the bucket "ireland-1".
+Creates an on-demand table "ireland-team",
+in the same location as the S3 bucket "ireland-1".
 
 
 Example 2
 
 ```bash
-hadoop s3guard init -meta dynamodb://ireland-team -region eu-west-1
+hadoop s3guard init -meta dynamodb://ireland-team -region eu-west-1 --read 0 --write 0
 ```
 
 Creates a table "ireland-team" in the region "eu-west-1.amazonaws.com"
@@ -550,25 +659,83 @@ Example 3
 hadoop s3guard init -meta dynamodb://ireland-team -tag tag1=first;tag2=second;
 ```
 
-Creates a table "ireland-team" with tags "first" and "second".
+Creates a table "ireland-team" with tags "first" and "second". The read and
+write capacity will be those of the site configuration's values of
+`fs.s3a.s3guard.ddb.table.capacity.read` and `fs.s3a.s3guard.ddb.table.capacity.write`;
+if these are both zero then it will be an on-demand table.
+
+
+Example 4
+
+```bash
+hadoop s3guard init -meta dynamodb://ireland-team -sse
+```
+
+Creates a table "ireland-team" with server side encryption enabled. The CMK will
+be using the default AWS managed "alias/aws/dynamodb".
+
 
 ### Import a bucket: `s3guard import`
 
 ```bash
-hadoop s3guard import [-meta URI] s3a://BUCKET
+hadoop s3guard import [-meta URI] [-authoritative] [-verbose] s3a://PATH
 ```
 
 Pre-populates a metadata store according to the current contents of an S3
-bucket. If the `-meta` option is omitted, the binding information is taken
+bucket/path. If the `-meta` option is omitted, the binding information is taken
 from the `core-site.xml` configuration.
 
+Usage
+
+```
+hadoop s3guard import
+
+import [OPTIONS] [s3a://PATH]
+    import metadata from existing S3 data
+
+Common options:
+  -authoritative - Mark imported directory data as authoritative.
+  -verbose - Verbose Output.
+  -meta URL - Metadata repository details (implementation-specific)
+
+Amazon DynamoDB-specific options:
+  -region REGION - Service region for connections
+
+  URLs for Amazon DynamoDB are of the form dynamodb://TABLE_NAME.
+  Specifying both the -region option and an S3A path
+  is not supported.
+```
+
 Example
+
+Import all files and directories in a bucket into the S3Guard table.
 
 ```bash
 hadoop s3guard import s3a://ireland-1
 ```
 
-### Audit a table: `s3guard diff`
+Import a directory tree, marking directories as authoritative.
+
+```bash
+hadoop s3guard import -authoritative -verbose s3a://ireland-1/fork-0008
+
+2020-01-03 12:05:18,321 [main] INFO - Metadata store DynamoDBMetadataStore{region=eu-west-1,
+ tableName=s3guard-metadata, tableArn=arn:aws:dynamodb:eu-west-1:980678866538:table/s3guard-metadata} is initialized.
+2020-01-03 12:05:18,324 [main] INFO - Starting: Importing s3a://ireland-1/fork-0008
+2020-01-03 12:05:18,324 [main] INFO - Importing directory s3a://ireland-1/fork-0008
+2020-01-03 12:05:18,537 [main] INFO - Dir  s3a://ireland-1/fork-0008/test/doTestListFiles-0-0-0-false
+2020-01-03 12:05:18,630 [main] INFO - Dir  s3a://ireland-1/fork-0008/test/doTestListFiles-0-0-0-true
+2020-01-03 12:05:19,142 [main] INFO - Dir  s3a://ireland-1/fork-0008/test/doTestListFiles-2-0-0-false/dir-0
+2020-01-03 12:05:19,191 [main] INFO - Dir  s3a://ireland-1/fork-0008/test/doTestListFiles-2-0-0-false/dir-1
+2020-01-03 12:05:19,240 [main] INFO - Dir  s3a://ireland-1/fork-0008/test/doTestListFiles-2-0-0-true/dir-0
+2020-01-03 12:05:19,289 [main] INFO - Dir  s3a://ireland-1/fork-0008/test/doTestListFiles-2-0-0-true/dir-1
+2020-01-03 12:05:19,314 [main] INFO - Updated S3Guard with 0 files and 6 directory entries
+2020-01-03 12:05:19,315 [main] INFO - Marking directory tree s3a://ireland-1/fork-0008 as authoritative
+2020-01-03 12:05:19,342 [main] INFO - Importing s3a://ireland-1/fork-0008: duration 0:01.018s
+Inserted 6 items into Metadata Store
+```
+
+### Compare a S3Guard table and the S3 Store: `s3guard diff`
 
 ```bash
 hadoop s3guard diff [-meta URI] s3a://BUCKET
@@ -588,7 +755,7 @@ hadoop s3guard diff s3a://ireland-1
 Prints and optionally checks the s3guard and encryption status of a bucket.
 
 ```bash
-hadoop s3guard bucket-info [ -guarded ] [-unguarded] [-auth] [-nonauth] [-magic] [-encryption ENCRYPTION] s3a://BUCKET
+hadoop s3guard bucket-info [-guarded] [-unguarded] [-auth] [-nonauth] [-magic] [-encryption ENCRYPTION] s3a://BUCKET
 ```
 
 Options
@@ -751,7 +918,7 @@ time" is older than the specified age.
 
 ```bash
 hadoop s3guard prune [-days DAYS] [-hours HOURS] [-minutes MINUTES]
-    [-seconds SECONDS] [-m URI] ( -region REGION | s3a://BUCKET )
+    [-seconds SECONDS] [-tombstone] [-meta URI] ( -region REGION | s3a://BUCKET )
 ```
 
 A time value of hours, minutes and/or seconds must be supplied.
@@ -761,6 +928,13 @@ A time value of hours, minutes and/or seconds must be supplied.
 in the S3 Bucket.
 1. If an S3A URI is supplied, only the entries in the table specified by the
 URI and older than a specific age are deleted.
+
+
+The `-tombstone` option instructs the operation to only purge "tombstones",
+markers of deleted files. These tombstone markers are only used briefly,
+to indicate that a recently deleted file should not be found in listings.
+As a result, there is no adverse consequences in regularly pruning old
+tombstones.
 
 Example
 
@@ -772,23 +946,162 @@ Deletes all entries in the S3Guard table for files older than seven days from
 the table associated with `s3a://ireland-1`.
 
 ```bash
-hadoop s3guard prune -days 7 s3a://ireland-1/path_prefix/
+hadoop s3guard prune -tombstone -days 7 s3a://ireland-1/path_prefix/
 ```
 
-Deletes all entries in the S3Guard table for files older than seven days from
-the table associated with `s3a://ireland-1` and with the prefix "path_prefix"
+Deletes all entries in the S3Guard table for tombstones older than seven days from
+the table associated with `s3a://ireland-1` and with the prefix `path_prefix`
 
 ```bash
 hadoop s3guard prune -hours 1 -minutes 30 -meta dynamodb://ireland-team -region eu-west-1
 ```
 
-Delete all entries more than 90 minutes old from the table "ireland-team" in
-the region "eu-west-1".
+Delete all file entries more than 90 minutes old from the table "`ireland-team"` in
+the region `eu-west-1`.
 
+
+### Audit the "authoritative state of a DynamoDB Table, `s3guard authoritative`
+
+This recursively checks a S3Guard table to verify that all directories
+underneath are marked as "authoritative", and/or that the configuration
+is set for the S3A client to treat files and directories urnder the path
+as authoritative.
+
+```
+hadoop s3guard authoritative
+
+authoritative [OPTIONS] [s3a://PATH]
+    Audits a DynamoDB S3Guard repository for all the entries being 'authoritative'
+
+Options:
+  -required Require directories under the path to be authoritative.
+  -check-config Check the configuration for the path to be authoritative
+  -verbose Verbose Output.
+```
+
+Verify that a path under an object store is declared to be authoritative
+in the cluster configuration -and therefore that file entries will not be
+validated against S3, and that directories marked as "authoritative" in the
+S3Guard table will be treated as complete.
+
+```bash
+hadoop s3guard authoritative -check-config s3a:///ireland-1/fork-0003/test/
+
+2020-01-03 11:42:29,147 [main] INFO  Metadata store DynamoDBMetadataStore{
+  region=eu-west-1, tableName=s3guard-metadata, tableArn=arn:aws:dynamodb:eu-west-1:980678866538:table/s3guard-metadata} is initialized.
+Path /fork-0003/test is not configured to be authoritative
+```
+
+Scan a store and report which directories are not marked as authoritative.
+
+```bash
+hadoop s3guard authoritative s3a://ireland-1/
+
+2020-01-03 11:51:58,416 [main] INFO  - Metadata store DynamoDBMetadataStore{region=eu-west-1, tableName=s3guard-metadata, tableArn=arn:aws:dynamodb:eu-west-1:980678866538:table/s3guard-metadata} is initialized.
+2020-01-03 11:51:58,419 [main] INFO  - Starting: audit s3a://ireland-1/
+2020-01-03 11:51:58,422 [main] INFO  - Root directory s3a://ireland-1/
+2020-01-03 11:51:58,469 [main] INFO  -   files 4; directories 12
+2020-01-03 11:51:58,469 [main] INFO  - Directory s3a://ireland-1/Users
+2020-01-03 11:51:58,521 [main] INFO  -   files 0; directories 1
+2020-01-03 11:51:58,522 [main] INFO  - Directory s3a://ireland-1/fork-0007
+2020-01-03 11:51:58,573 [main] INFO  - Directory s3a://ireland-1/fork-0001
+2020-01-03 11:51:58,626 [main] INFO  -   files 0; directories 1
+2020-01-03 11:51:58,626 [main] INFO  - Directory s3a://ireland-1/fork-0006
+2020-01-03 11:51:58,676 [main] INFO  - Directory s3a://ireland-1/path
+2020-01-03 11:51:58,734 [main] INFO  -   files 0; directories 1
+2020-01-03 11:51:58,735 [main] INFO  - Directory s3a://ireland-1/fork-0008
+2020-01-03 11:51:58,802 [main] INFO  -   files 0; directories 1
+2020-01-03 11:51:58,802 [main] INFO  - Directory s3a://ireland-1/fork-0004
+2020-01-03 11:51:58,854 [main] INFO  -   files 0; directories 1
+2020-01-03 11:51:58,855 [main] WARN   - Directory s3a://ireland-1/fork-0003 is not authoritative
+2020-01-03 11:51:58,905 [main] INFO  -   files 0; directories 1
+2020-01-03 11:51:58,906 [main] INFO  - Directory s3a://ireland-1/fork-0005
+2020-01-03 11:51:58,955 [main] INFO  - Directory s3a://ireland-1/customsignerpath2
+2020-01-03 11:51:59,006 [main] INFO  - Directory s3a://ireland-1/fork-0002
+2020-01-03 11:51:59,063 [main] INFO  -   files 0; directories 1
+2020-01-03 11:51:59,064 [main] INFO  - Directory s3a://ireland-1/customsignerpath1
+2020-01-03 11:51:59,121 [main] INFO  - Directory s3a://ireland-1/Users/stevel
+2020-01-03 11:51:59,170 [main] INFO  -   files 0; directories 1
+2020-01-03 11:51:59,171 [main] INFO  - Directory s3a://ireland-1/fork-0001/test
+2020-01-03 11:51:59,233 [main] INFO  - Directory s3a://ireland-1/path/style
+2020-01-03 11:51:59,282 [main] INFO  -   files 0; directories 1
+2020-01-03 11:51:59,282 [main] INFO  - Directory s3a://ireland-1/fork-0008/test
+2020-01-03 11:51:59,338 [main] INFO  -   files 15; directories 10
+2020-01-03 11:51:59,339 [main] INFO  - Directory s3a://ireland-1/fork-0004/test
+2020-01-03 11:51:59,394 [main] WARN   - Directory s3a://ireland-1/fork-0003/test is not authoritative
+2020-01-03 11:51:59,451 [main] INFO  -   files 35; directories 1
+2020-01-03 11:51:59,451 [main] INFO  - Directory s3a://ireland-1/fork-0002/test
+2020-01-03 11:51:59,508 [main] INFO  - Directory s3a://ireland-1/Users/stevel/Projects
+2020-01-03 11:51:59,558 [main] INFO  -   files 0; directories 1
+2020-01-03 11:51:59,559 [main] INFO  - Directory s3a://ireland-1/path/style/access
+2020-01-03 11:51:59,610 [main] INFO  - Directory s3a://ireland-1/fork-0008/test/doTestListFiles-0-2-0-false
+2020-01-03 11:51:59,660 [main] INFO  - Directory s3a://ireland-1/fork-0008/test/doTestListFiles-0-2-1-false
+2020-01-03 11:51:59,719 [main] INFO  - Directory s3a://ireland-1/fork-0008/test/doTestListFiles-0-0-0-true
+2020-01-03 11:51:59,773 [main] INFO  - Directory s3a://ireland-1/fork-0008/test/doTestListFiles-2-0-0-true
+2020-01-03 11:51:59,824 [main] INFO  -   files 0; directories 2
+2020-01-03 11:51:59,824 [main] INFO  - Directory s3a://ireland-1/fork-0008/test/doTestListFiles-0-2-1-true
+2020-01-03 11:51:59,879 [main] INFO  - Directory s3a://ireland-1/fork-0008/test/doTestListFiles-0-0-1-false
+2020-01-03 11:51:59,939 [main] INFO  - Directory s3a://ireland-1/fork-0008/test/doTestListFiles-0-0-0-false
+2020-01-03 11:51:59,990 [main] INFO  - Directory s3a://ireland-1/fork-0008/test/doTestListFiles-0-2-0-true
+2020-01-03 11:52:00,042 [main] INFO  - Directory s3a://ireland-1/fork-0008/test/doTestListFiles-2-0-0-false
+2020-01-03 11:52:00,094 [main] INFO  -   files 0; directories 2
+2020-01-03 11:52:00,094 [main] INFO  - Directory s3a://ireland-1/fork-0008/test/doTestListFiles-0-0-1-true
+2020-01-03 11:52:00,144 [main] WARN   - Directory s3a://ireland-1/fork-0003/test/ancestor is not authoritative
+2020-01-03 11:52:00,197 [main] INFO  - Directory s3a://ireland-1/Users/stevel/Projects/hadoop-trunk
+2020-01-03 11:52:00,245 [main] INFO  -   files 0; directories 1
+2020-01-03 11:52:00,245 [main] INFO  - Directory s3a://ireland-1/fork-0008/test/doTestListFiles-2-0-0-true/dir-0
+2020-01-03 11:52:00,296 [main] INFO  - Directory s3a://ireland-1/fork-0008/test/doTestListFiles-2-0-0-true/dir-1
+2020-01-03 11:52:00,346 [main] INFO  - Directory s3a://ireland-1/fork-0008/test/doTestListFiles-2-0-0-false/dir-0
+2020-01-03 11:52:00,397 [main] INFO  - Directory s3a://ireland-1/fork-0008/test/doTestListFiles-2-0-0-false/dir-1
+2020-01-03 11:52:00,479 [main] INFO  - Directory s3a://ireland-1/Users/stevel/Projects/hadoop-trunk/hadoop-tools
+2020-01-03 11:52:00,530 [main] INFO  -   files 0; directories 1
+2020-01-03 11:52:00,530 [main] INFO  - Directory s3a://ireland-1/Users/stevel/Projects/hadoop-trunk/hadoop-tools/hadoop-aws
+2020-01-03 11:52:00,582 [main] INFO  -   files 0; directories 1
+2020-01-03 11:52:00,582 [main] INFO  - Directory s3a://ireland-1/Users/stevel/Projects/hadoop-trunk/hadoop-tools/hadoop-aws/target
+2020-01-03 11:52:00,636 [main] INFO  -   files 0; directories 1
+2020-01-03 11:52:00,637 [main] INFO  - Directory s3a://ireland-1/Users/stevel/Projects/hadoop-trunk/hadoop-tools/hadoop-aws/target/test-dir
+2020-01-03 11:52:00,691 [main] INFO  -   files 0; directories 3
+2020-01-03 11:52:00,691 [main] INFO  - Directory s3a://ireland-1/Users/stevel/Projects/hadoop-trunk/hadoop-tools/hadoop-aws/target/test-dir/2
+2020-01-03 11:52:00,752 [main] INFO  - Directory s3a://ireland-1/Users/stevel/Projects/hadoop-trunk/hadoop-tools/hadoop-aws/target/test-dir/5
+2020-01-03 11:52:00,807 [main] INFO  - Directory s3a://ireland-1/Users/stevel/Projects/hadoop-trunk/hadoop-tools/hadoop-aws/target/test-dir/8
+2020-01-03 11:52:00,862 [main] INFO   - Scanned 45 directories - 3 were not marked as authoritative
+2020-01-03 11:52:00,863 [main] INFO  - audit s3a://ireland-1/: duration 0:02.444s
+```
+
+Scan the path/bucket and fail if any entry is non-authoritative.
+
+```bash
+hadoop s3guard authoritative -verbose -required s3a://ireland-1/
+
+2020-01-03 11:47:40,288 [main] INFO  - Metadata store DynamoDBMetadataStore{region=eu-west-1, tableName=s3guard-metadata, tableArn=arn:aws:dynamodb:eu-west-1:980678866538:table/s3guard-metadata} is initialized.
+2020-01-03 11:47:40,291 [main] INFO  - Starting: audit s3a://ireland-1/
+2020-01-03 11:47:40,295 [main] INFO  - Root directory s3a://ireland-1/
+2020-01-03 11:47:40,336 [main] INFO  -  files 4; directories 12
+2020-01-03 11:47:40,336 [main] INFO  - Directory s3a://ireland-1/Users
+2020-01-03 11:47:40,386 [main] INFO  -  files 0; directories 1
+2020-01-03 11:47:40,386 [main] INFO  - Directory s3a://ireland-1/fork-0007
+2020-01-03 11:47:40,435 [main] INFO  -  files 1; directories 0
+2020-01-03 11:47:40,435 [main] INFO  - Directory s3a://ireland-1/fork-0001
+2020-01-03 11:47:40,486 [main] INFO  -  files 0; directories 1
+2020-01-03 11:47:40,486 [main] INFO  - Directory s3a://ireland-1/fork-0006
+2020-01-03 11:47:40,534 [main] INFO  -  files 1; directories 0
+2020-01-03 11:47:40,535 [main] INFO  - Directory s3a://ireland-1/path
+2020-01-03 11:47:40,587 [main] INFO  -  files 0; directories 1
+2020-01-03 11:47:40,588 [main] INFO  - Directory s3a://ireland-1/fork-0008
+2020-01-03 11:47:40,641 [main] INFO  -  files 0; directories 1
+2020-01-03 11:47:40,642 [main] INFO  - Directory s3a://ireland-1/fork-0004
+2020-01-03 11:47:40,692 [main] INFO  -  files 0; directories 1
+2020-01-03 11:47:40,693 [main] WARN  - Directory s3a://ireland-1/fork-0003 is not authoritative
+2020-01-03 11:47:40,693 [main] INFO  - audit s3a://ireland-1/: duration 0:00.402s
+2020-01-03 11:47:40,698 [main] INFO  - Exiting with status 46: `s3a://ireland-1/fork-0003': Directory is not marked as authoritative in the S3Guard store
+```
+
+This command is primarily for testing.
 
 ### Tune the I/O capacity of the DynamoDB Table, `s3guard set-capacity`
 
-Alter the read and/or write capacity of a s3guard table.
+Alter the read and/or write capacity of a s3guard table created with provisioned
+I/O capacity.
 
 ```bash
 hadoop s3guard set-capacity [--read UNIT] [--write UNIT] ( -region REGION | s3a://BUCKET )
@@ -796,6 +1109,9 @@ hadoop s3guard set-capacity [--read UNIT] [--write UNIT] ( -region REGION | s3a:
 
 The `--read` and `--write` units are those of `s3guard init`.
 
+It cannot be used to change the I/O capacity of an on demand table (there is
+no need), and nor can it be used to convert an existing table to being
+on-demand. For that the AWS console must be used.
 
 Example
 
@@ -845,9 +1161,46 @@ Metadata Store Diagnostics:
   table={ ... }
   write-capacity=20
 ```
-
 *Note*: There is a limit to how many times in a 24 hour period the capacity
 of a bucket can be changed, either through this command or the AWS console.
+
+### Check the consistency of the metadata store, `s3guard fsck`
+
+Compares S3 with MetadataStore, and returns a failure status if any
+rules or invariants are violated. Only works with DynamoDB metadata stores.
+
+```bash
+hadoop s3guard fsck [-check | -internal] (s3a://BUCKET | s3a://PATH_PREFIX)
+```
+
+`-check` operation checks the metadata store from the S3 perspective, but
+does not fix any issues.
+The consistency issues will be logged in ERROR loglevel.
+
+`-internal` operation checks the internal consistency of the metadata store,
+but does not fix any issues.
+
+The errors found will be logged at the ERROR log level.
+
+*Note*: `-check` and `-internal` operations can be used only as separate
+commands. Running `fsck` with both will result in an error.
+
+Example
+
+```bash
+hadoop s3guard fsck -check s3a://ireland-1/path_prefix/
+```
+
+Checks the metadata store while iterating through the S3 bucket.
+The path_prefix will be used as the root element of the check.
+
+```bash
+hadoop s3guard fsck -internal s3a://ireland-1/path_prefix/
+```
+
+Checks the metadata store internal consistency.
+The path_prefix will be used as the root element of the check.
+
 
 ## Debugging and Error Handling
 
@@ -895,9 +1248,33 @@ logged.
 
 ### Versioning
 
-S3Guard tables are created with a version marker, an entry with the primary
-key and child entry of `../VERSION`; the use of a relative path guarantees
-that it will not be resolved.
+S3Guard tables are created with a version marker entry and table tag.
+The entry is created with the primary key and child entry of `../VERSION`; 
+the use of a relative path guarantees that it will not be resolved.
+Table tag key is named `s3guard_version`.
+
+When the table is initialized by S3Guard, the table will be tagged during the 
+creating and the version marker entry will be created in the table.
+If the table lacks the version marker entry or tag, S3Guard will try to create
+it according to the following rules:
+
+1. If the table lacks both version markers AND it's empty, both markers will be added. 
+If the table is not empty the check throws IOException
+1. If there's no version marker ITEM, the compatibility with the TAG
+will be checked, and the version marker ITEM will be added if the
+TAG version is compatible.
+If the TAG version is not compatible, the check throws OException
+1. If there's no version marker TAG, the compatibility with the ITEM
+version marker will be checked, and the version marker ITEM will be
+added if the ITEM version is compatible.
+If the ITEM version is not compatible, the check throws IOException
+1. If the TAG and ITEM versions are both present then both will be checked
+for compatibility. If the ITEM or TAG version marker is not compatible,
+the check throws IOException
+
+*Note*: If the user does not have sufficient rights to tag the table the 
+initialization of S3Guard will not fail, but there will be no version marker tag
+on the dynamo table.
 
 *Versioning policy*
 
@@ -932,10 +1309,10 @@ merits more testing before it could be considered reliable.
 
 ## Managing DynamoDB I/O Capacity
 
-By default, DynamoDB is not only billed on use (data and I/O requests)
--it is billed on allocated I/O Capacity.
+Historically, DynamoDB has been not only billed on use (data and I/O requests)
+-but on provisioned I/O Capacity.
 
-When an application makes more requests than
+With Provisioned IO, when an application makes more requests than
 the allocated capacity permits, the request is rejected; it is up to
 the calling application to detect when it is being so throttled and
 react. S3Guard does this, but as a result: when the client is being
@@ -943,7 +1320,7 @@ throttled, operations are slower. This capacity throttling is averaged
 over a few minutes: a briefly overloaded table will not be throttled,
 but the rate cannot be sustained.
 
-The load on a table isvisible in the AWS console: go to the
+The load on a table is visible in the AWS console: go to the
 DynamoDB page for the table and select the "metrics" tab.
 If the graphs of throttled read or write
 requests show that a lot of throttling has taken place, then there is not
@@ -1015,20 +1392,33 @@ for S3Guard applications.
 * There's no explicit limit on I/O capacity, so operations which make
 heavy use of S3Guard tables (for example: SQL query planning) do not
 get throttled.
+* You are charged more per DynamoDB API call, in exchange for paying nothing
+when you are not interacting with DynamoDB.
 * There's no way put a limit on the I/O; you may unintentionally run up
 large bills through sustained heavy load.
 * The `s3guard set-capacity` command fails: it does not make sense any more.
 
 When idle, S3Guard tables are only billed for the data stored, not for
-any unused capacity. For this reason, there is no benefit from sharing
-a single S3Guard table across multiple buckets.
+any unused capacity. For this reason, there is no performance benefit
+from sharing a single S3Guard table across multiple buckets.
 
-*Enabling DynamoDB On-Demand for a S3Guard table*
+*Creating a S3Guard Table with On-Demand Tables*
 
-You cannot currently enable DynamoDB on-demand from the `s3guard` command
-when creating or updating a bucket.
+The default settings for S3Guard are to create on-demand tables; this
+can also be done explicitly in the `s3guard init` command by setting the
+read and write capacities to zero.
 
-Instead it must be done through the AWS console or [the CLI](https://docs.aws.amazon.com/cli/latest/reference/dynamodb/update-table.html).
+
+```bash
+hadoop s3guard init -meta dynamodb://ireland-team -write 0 -read 0 s3a://ireland-1
+```
+
+*Enabling DynamoDB On-Demand for an existing S3Guard table*
+
+You cannot currently convert an existing S3Guard table to being an on-demand
+table through the `s3guard` command.
+
+It can be done through the AWS console or [the CLI](https://docs.aws.amazon.com/cli/latest/reference/dynamodb/update-table.html).
 From the Web console or the command line, switch the billing to pay-per-request.
 
 Once enabled, the read and write capacities of the table listed in the
@@ -1078,7 +1468,7 @@ Metadata Store Diagnostics:
 The "magic" committer is supported
 ```
 
-### <a name="autoscaling"></a> Autoscaling S3Guard tables.
+### <a name="autoscaling"></a> Autoscaling (Provisioned Capacity) S3Guard tables.
 
 [DynamoDB Auto Scaling](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/AutoScaling.html)
 can automatically increase and decrease the allocated capacity.
@@ -1093,7 +1483,7 @@ until any extra capacity is allocated. Furthermore, as this retrying will
 block the threads from performing other operations -including more I/O, the
 the autoscale may not scale fast enough.
 
-This is why the DynamoDB On-Demand appears to be a better option for
+This is why the DynamoDB On-Demand appears is a better option for
 workloads with Hadoop, Spark, Hive and other applications.
 
 If autoscaling is to be used, we recommend experimenting with the option,
@@ -1259,18 +1649,18 @@ Error Code: ProvisionedThroughputExceededException;
 ```
 The I/O load of clients of the (shared) DynamoDB table was exceeded.
 
-1. Increase the capacity of the DynamoDB table.
-1. Increase the retry count and/or sleep time of S3Guard on throttle events.
-1. Enable capacity autoscaling for the table in the AWS console.
+1. Switch to On-Demand Dynamo DB tables (AWS console)
+1. Increase the capacity of the DynamoDB table (AWS console or `s3guard set-capacity`)/
+1. Increase the retry count and/or sleep time of S3Guard on throttle events (Hadoop configuration).
 
 ### Error `Max retries exceeded`
 
 The I/O load of clients of the (shared) DynamoDB table was exceeded, and
 the number of attempts to retry the operation exceeded the configured amount.
 
+1. Switch to On-Demand Dynamo DB tables (AWS console).
 1. Increase the capacity of the DynamoDB table.
 1. Increase the retry count and/or sleep time of S3Guard on throttle events.
-1. Enable capacity autoscaling for the table in the AWS console.
 
 
 ### Error when running `set-capacity`: `org.apache.hadoop.fs.s3a.AWSServiceThrottledException: ProvisionTable`
@@ -1286,7 +1676,7 @@ Next decrease can be made at Wednesday, July 25, 2018 9:48:14 PM UTC
 ```
 
 There's are limit on how often you can change the capacity of an DynamoDB table;
-if you call set-capacity too often, it fails. Wait until the after the time indicated
+if you call `set-capacity` too often, it fails. Wait until the after the time indicated
 and try again.
 
 ### Error `Invalid region specified`
@@ -1414,6 +1804,18 @@ Caused by: java.lang.NullPointerException
   at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
   ... 1 more
 ```
+
+### Error `Attempt to change a resource which is still in use: Table is being deleted`
+
+```
+com.amazonaws.services.dynamodbv2.model.ResourceInUseException:
+  Attempt to change a resource which is still in use: Table is being deleted:
+   s3guard.test.testDynamoDBInitDestroy351245027
+    (Service: AmazonDynamoDBv2; Status Code: 400; Error Code: ResourceInUseException;)
+```
+
+You have attempted to call `hadoop s3guard destroy` on a table which is already
+being destroyed.
 
 ## Other Topics
 

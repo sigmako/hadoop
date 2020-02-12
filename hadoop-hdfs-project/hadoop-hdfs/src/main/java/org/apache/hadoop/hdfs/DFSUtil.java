@@ -39,6 +39,7 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_SERVER_HTTPS_TRUSTSTORE_P
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.net.InetAddress;
@@ -52,10 +53,13 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedSet;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
@@ -63,6 +67,12 @@ import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.cli.PosixParser;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.hadoop.fs.ParentNotDirectoryException;
+import org.apache.hadoop.fs.UnresolvedLinkException;
+import org.apache.hadoop.hdfs.server.namenode.FSDirectory;
+import org.apache.hadoop.hdfs.server.namenode.INodesInPath;
+import org.apache.hadoop.security.AccessControlException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.HadoopIllegalArgumentException;
@@ -74,17 +84,21 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.common.Util;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
+import org.apache.hadoop.hdfs.web.AuthFilterInitializer;
 import org.apache.hadoop.http.HttpConfig;
 import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.ipc.ProtobufRpcEngine;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.security.AuthenticationFilterInitializer;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.authentication.server.ProxyUserAuthenticationFilterInitializer;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.ToolRunner;
@@ -94,7 +108,7 @@ import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
-import com.google.protobuf.BlockingService;
+import org.apache.hadoop.thirdparty.protobuf.BlockingService;
 
 @InterfaceAudience.Private
 public class DFSUtil {
@@ -1471,7 +1485,7 @@ public class DFSUtil {
         DFSConfigKeys.DFS_HTTP_POLICY_DEFAULT);
     HttpConfig.Policy policy = HttpConfig.Policy.fromString(policyStr);
     if (policy == null) {
-      throw new HadoopIllegalArgumentException("Unregonized value '"
+      throw new HadoopIllegalArgumentException("Unrecognized value '"
           + policyStr + "' for " + DFSConfigKeys.DFS_HTTP_POLICY_KEY);
     }
 
@@ -1609,6 +1623,28 @@ public class DFSUtil {
       String spnegoKeytabFileKey) throws IOException {
     HttpConfig.Policy policy = getHttpPolicy(conf);
 
+    String filterInitializerConfKey = "hadoop.http.filter.initializers";
+    String initializers = conf.get(filterInitializerConfKey, "");
+
+    String[] parts = initializers.split(",");
+    Set<String> target = new LinkedHashSet<String>();
+    for (String filterInitializer : parts) {
+      filterInitializer = filterInitializer.trim();
+      if (filterInitializer.equals(
+          AuthenticationFilterInitializer.class.getName()) ||
+          filterInitializer.equals(
+          ProxyUserAuthenticationFilterInitializer.class.getName()) ||
+          filterInitializer.isEmpty()) {
+        continue;
+      }
+      target.add(filterInitializer);
+    }
+    target.add(AuthFilterInitializer.class.getName());
+    initializers = StringUtils.join(target, ",");
+    conf.set(filterInitializerConfKey, initializers);
+
+    LOG.info("Filter initializers set : " + initializers);
+
     HttpServer2.Builder builder = new HttpServer2.Builder().setName(name)
         .setConf(conf).setACL(new AccessControlList(conf.get(DFS_ADMIN, " ")))
         .setSecurityEnabled(UserGroupInformation.isSecurityEnabled())
@@ -1707,5 +1743,95 @@ public class DFSUtil {
       id.readFields(in);
     }
     return id;
+  }
+
+  /**
+   * Throw if the given directory has any non-empty protected descendants
+   * (including itself).
+   *
+   * @param iip directory whose descendants are to be checked.
+   * @throws AccessControlException if a non-empty protected descendant
+   *                                was found.
+   * @throws ParentNotDirectoryException
+   * @throws UnresolvedLinkException
+   * @throws FileNotFoundException
+   */
+  public static void checkProtectedDescendants(
+      FSDirectory fsd, INodesInPath iip)
+          throws AccessControlException, UnresolvedLinkException,
+          ParentNotDirectoryException {
+    final SortedSet<String> protectedDirs = fsd.getProtectedDirectories();
+    if (protectedDirs.isEmpty()) {
+      return;
+    }
+
+    String src = iip.getPath();
+    // Is src protected? Caller has already checked it is non-empty.
+    if (protectedDirs.contains(src)) {
+      throw new AccessControlException(
+          "Cannot delete/rename non-empty protected directory " + src);
+    }
+
+    // Are any descendants of src protected?
+    // The subSet call returns only the descendants of src since
+    // {@link Path#SEPARATOR} is "/" and '0' is the next ASCII
+    // character after '/'.
+    for (String descendant :
+        protectedDirs.subSet(src + Path.SEPARATOR, src + "0")) {
+      INodesInPath subdirIIP =
+          fsd.getINodesInPath(descendant, FSDirectory.DirOp.WRITE);
+      if (fsd.isNonEmptyDirectory(subdirIIP)) {
+        throw new AccessControlException(
+            "Cannot delete/rename non-empty protected subdirectory "
+            + descendant);
+      }
+    }
+  }
+
+  /**
+   * Generates HdfsFileStatus flags.
+   * @param isEncrypted Sets HAS_CRYPT
+   * @param isErasureCoded Sets HAS_EC
+   * @param isSnapShottable Sets SNAPSHOT_ENABLED
+   * @param hasAcl Sets HAS_ACL
+   * @return HdfsFileStatus Flags
+   */
+  public static EnumSet<HdfsFileStatus.Flags> getFlags(
+      final boolean isEncrypted, final boolean isErasureCoded,
+      boolean isSnapShottable, boolean hasAcl) {
+    EnumSet<HdfsFileStatus.Flags> flags =
+        EnumSet.noneOf(HdfsFileStatus.Flags.class);
+    if (hasAcl) {
+      flags.add(HdfsFileStatus.Flags.HAS_ACL);
+    }
+    if (isEncrypted) {
+      flags.add(HdfsFileStatus.Flags.HAS_CRYPT);
+    }
+    if (isErasureCoded) {
+      flags.add(HdfsFileStatus.Flags.HAS_EC);
+    }
+    if (isSnapShottable) {
+      flags.add(HdfsFileStatus.Flags.SNAPSHOT_ENABLED);
+    }
+    return flags;
+  }
+
+  /**
+   * Check if the given path is the child of parent path.
+   * @param path Path to be check.
+   * @param parent Parent path.
+   * @return True if parent path is parent entry for given path.
+   */
+  public static boolean isParentEntry(final String path, final String parent) {
+    if (!path.startsWith(parent)) {
+      return false;
+    }
+
+    if (path.equals(parent)) {
+      return true;
+    }
+
+    return path.charAt(parent.length()) == Path.SEPARATOR_CHAR
+        || parent.equals(Path.SEPARATOR);
   }
 }

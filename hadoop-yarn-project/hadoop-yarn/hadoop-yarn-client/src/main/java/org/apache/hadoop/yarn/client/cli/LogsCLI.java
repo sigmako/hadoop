@@ -25,6 +25,7 @@ import com.sun.jersey.api.client.ClientRequest;
 import com.sun.jersey.api.client.ClientResponse;
 import com.sun.jersey.api.client.UniformInterfaceException;
 import com.sun.jersey.api.client.WebResource;
+import com.sun.jersey.api.client.WebResource.Builder;
 import com.sun.jersey.api.client.filter.ClientFilter;
 import com.sun.jersey.client.urlconnection.HttpURLConnectionFactory;
 import com.sun.jersey.client.urlconnection.URLConnectionClientHandler;
@@ -86,6 +87,7 @@ import org.apache.hadoop.yarn.logaggregation.ContainerLogsRequest;
 import org.apache.hadoop.yarn.logaggregation.LogCLIHelpers;
 import org.apache.hadoop.yarn.logaggregation.LogToolUtils;
 import org.apache.hadoop.yarn.server.metrics.AppAttemptMetricsConstants;
+import org.apache.hadoop.yarn.util.Apps;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
 import org.apache.hadoop.yarn.webapp.util.YarnWebServiceUtils;
 import org.codehaus.jettison.json.JSONArray;
@@ -156,6 +158,9 @@ public class LogsCLI extends Configured implements Tool {
     } finally {
       if (yarnClient != null) {
         yarnClient.close();
+      }
+      if (webServiceClient != null) {
+        webServiceClient.destroy();
       }
     }
   }
@@ -351,9 +356,9 @@ public class LogsCLI extends Configured implements Tool {
     }
 
 
-    ContainerLogsRequest request = new ContainerLogsRequest(appId,
-        isApplicationFinished(appState), appOwner, nodeAddress, null,
-        containerIdStr, localDir, logs, bytes, null);
+    ContainerLogsRequest request = new ContainerLogsRequest(appId, null,
+        Apps.isApplicationFinalState(appState), appOwner, nodeAddress,
+        null, containerIdStr, localDir, logs, bytes, null);
 
     if (showContainerLogInfo) {
       return showContainerLogInfo(request, logCliHelper);
@@ -420,24 +425,34 @@ public class LogsCLI extends Configured implements Tool {
   }
 
   protected List<JSONObject> getAMContainerInfoForRMWebService(
-      Configuration conf, String appId) throws ClientHandlerException,
+      Configuration conf, String appId) throws Exception {
+    return WebAppUtils.execOnActiveRM(conf, this::getAMContainerInfoFromRM,
+        appId);
+  }
+
+  private List<JSONObject> getAMContainerInfoFromRM(
+      String webAppAddress, String appId) throws ClientHandlerException,
       UniformInterfaceException, JSONException {
-    String webAppAddress = WebAppUtils.getRMWebAppURLWithScheme(conf);
-
-    WebResource webResource = webServiceClient.resource(webAppAddress);
-
-    ClientResponse response =
-        webResource.path("ws").path("v1").path("cluster").path("apps")
-          .path(appId).path("appattempts").accept(MediaType.APPLICATION_JSON)
-          .get(ClientResponse.class);
-    JSONObject json =
-        response.getEntity(JSONObject.class).getJSONObject("appAttempts");
-    JSONArray requests = json.getJSONArray("appAttempt");
     List<JSONObject> amContainersList = new ArrayList<JSONObject>();
-    for (int i = 0; i < requests.length(); i++) {
-      amContainersList.add(requests.getJSONObject(i));
+    ClientResponse response = null;
+    try {
+      Builder builder = webServiceClient.resource(webAppAddress)
+          .path("ws").path("v1").path("cluster")
+          .path("apps").path(appId).path("appattempts")
+          .accept(MediaType.APPLICATION_JSON);
+      response = builder.get(ClientResponse.class);
+      JSONObject json = response.getEntity(JSONObject.class)
+          .getJSONObject("appAttempts");
+      JSONArray requests = json.getJSONArray("appAttempt");
+      for (int j = 0; j < requests.length(); j++) {
+        amContainersList.add(requests.getJSONObject(j));
+      }
+      return amContainersList;
+    } finally {
+      if (response != null) {
+        response.close();
+      }
     }
-    return amContainersList;
   }
 
   private List<JSONObject> getAMContainerInfoForAHSWebService(
@@ -583,7 +598,7 @@ public class LogsCLI extends Configured implements Tool {
       for (String logFile : request.getLogTypes()) {
         InputStream is = null;
         try {
-          ClientResponse response = getResponeFromNMWebService(conf,
+          ClientResponse response = getResponseFromNMWebService(conf,
               webServiceClient, request, logFile);
           if (response != null && response.getStatusInfo().getStatusCode() ==
               ClientResponse.Status.OK.getStatusCode()) {
@@ -629,12 +644,6 @@ public class LogsCLI extends Configured implements Tool {
       throws YarnException, IOException {
     return yarnClient.getContainerReport(
         ContainerId.fromString(containerIdStr));
-  }
-
-  private boolean isApplicationFinished(YarnApplicationState appState) {
-    return appState == YarnApplicationState.FINISHED
-        || appState == YarnApplicationState.FAILED
-        || appState == YarnApplicationState.KILLED; 
   }
 
   private int printAMContainerLogs(Configuration conf,
@@ -1448,16 +1457,10 @@ public class LogsCLI extends Configured implements Tool {
   }
 
   @VisibleForTesting
-  public ClientResponse getResponeFromNMWebService(Configuration conf,
+  public ClientResponse getResponseFromNMWebService(Configuration conf,
       Client webServiceClient, ContainerLogsRequest request, String logFile) {
-    WebResource webResource =
-        webServiceClient.resource(WebAppUtils.getHttpSchemePrefix(conf)
-        + request.getNodeHttpAddress());
-    return webResource.path("ws").path("v1").path("node")
-        .path("containers").path(request.getContainerId()).path("logs")
-        .path(logFile)
-        .queryParam("size", Long.toString(request.getBytes()))
-        .accept(MediaType.TEXT_PLAIN).get(ClientResponse.class);
+    return LogToolUtils.getResponseFromNMWebService(
+        conf, webServiceClient, request, logFile);
   }
 
   @VisibleForTesting

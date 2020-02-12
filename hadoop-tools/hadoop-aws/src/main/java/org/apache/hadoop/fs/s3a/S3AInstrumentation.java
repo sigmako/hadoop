@@ -25,6 +25,7 @@ import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.FileSystem.Statistics;
+import org.apache.hadoop.fs.s3a.s3guard.MetastoreInstrumentation;
 import org.apache.hadoop.metrics2.AbstractMetric;
 import org.apache.hadoop.metrics2.MetricStringBuilder;
 import org.apache.hadoop.metrics2.MetricsCollector;
@@ -183,10 +184,15 @@ public class S3AInstrumentation implements Closeable, MetricsSource {
       COMMITTER_MAGIC_FILES_CREATED,
       S3GUARD_METADATASTORE_PUT_PATH_REQUEST,
       S3GUARD_METADATASTORE_INITIALIZATION,
+      S3GUARD_METADATASTORE_RECORD_DELETES,
+      S3GUARD_METADATASTORE_RECORD_READS,
+      S3GUARD_METADATASTORE_RECORD_WRITES,
       S3GUARD_METADATASTORE_RETRY,
       S3GUARD_METADATASTORE_THROTTLED,
+      S3GUARD_METADATASTORE_AUTHORITATIVE_DIRECTORIES_UPDATED,
       STORE_IO_THROTTLED,
-      DELEGATION_TOKENS_ISSUED
+      DELEGATION_TOKENS_ISSUED,
+      FILES_DELETE_REJECTED
   };
 
   private static final Statistic[] GAUGES_TO_CREATE = {
@@ -558,11 +564,11 @@ public class S3AInstrumentation implements Closeable, MetricsSource {
   }
 
   /**
-   * Create a S3Guard instrumentation instance.
+   * Create a MetastoreInstrumentation instrumentation instance.
    * There's likely to be at most one instance of this per FS instance.
    * @return the S3Guard instrumentation point.
    */
-  public S3GuardInstrumentation getS3GuardInstrumentation() {
+  public MetastoreInstrumentation getS3GuardInstrumentation() {
     return s3GuardInstrumentation;
   }
 
@@ -607,11 +613,14 @@ public class S3AInstrumentation implements Closeable, MetricsSource {
 
   public void close() {
     synchronized (metricsSystemLock) {
+      // it is critical to close each quantile, as they start a scheduled
+      // task in a shared thread pool.
       putLatencyQuantile.stop();
       throttleRateQuantile.stop();
       metricsSystem.unregisterSource(metricsSourceName);
       int activeSources = --metricsSourceActiveCounter;
       if (activeSources == 0) {
+        LOG.debug("Shutting down metrics publisher");
         metricsSystem.publishMetricsNow();
         metricsSystem.shutdown();
         metricsSystem = null;
@@ -647,6 +656,7 @@ public class S3AInstrumentation implements Closeable, MetricsSource {
     public long inputPolicy;
     /** This is atomic so that it can be passed as a reference. */
     private final AtomicLong versionMismatches = new AtomicLong(0);
+    private InputStreamStatistics mergedStats;
 
     private InputStreamStatistics() {
     }
@@ -759,7 +769,7 @@ public class S3AInstrumentation implements Closeable, MetricsSource {
      */
     @Override
     public void close() {
-      mergeInputStreamStatistics(this);
+      merge(true);
     }
 
     /**
@@ -815,6 +825,88 @@ public class S3AInstrumentation implements Closeable, MetricsSource {
       sb.append(", versionMismatches=").append(versionMismatches.get());
       sb.append('}');
       return sb.toString();
+    }
+
+    /**
+     * Merge the statistics into the filesystem's instrumentation instance.
+     * Takes a diff between the current version of the stats and the
+     * version of the stats when merge was last called, and merges the diff
+     * into the instrumentation instance. Used to periodically merge the
+     * stats into the fs-wide stats. <b>Behavior is undefined if called on a
+     * closed instance.</b>
+     */
+    void merge(boolean isClosed) {
+      if (mergedStats != null) {
+        mergeInputStreamStatistics(diff(mergedStats));
+      } else {
+        mergeInputStreamStatistics(this);
+      }
+      // If stats are closed, no need to create another copy
+      if (!isClosed) {
+        mergedStats = copy();
+      }
+    }
+
+    /**
+     * Returns a diff between this {@link InputStreamStatistics} instance and
+     * the given {@link InputStreamStatistics} instance.
+     */
+    private InputStreamStatistics diff(InputStreamStatistics inputStats) {
+      InputStreamStatistics diff = new InputStreamStatistics();
+      diff.openOperations = openOperations - inputStats.openOperations;
+      diff.closeOperations = closeOperations - inputStats.closeOperations;
+      diff.closed = closed - inputStats.closed;
+      diff.aborted = aborted - inputStats.aborted;
+      diff.seekOperations = seekOperations - inputStats.seekOperations;
+      diff.readExceptions = readExceptions - inputStats.readExceptions;
+      diff.forwardSeekOperations =
+              forwardSeekOperations - inputStats.forwardSeekOperations;
+      diff.backwardSeekOperations =
+              backwardSeekOperations - inputStats.backwardSeekOperations;
+      diff.bytesRead = bytesRead - inputStats.bytesRead;
+      diff.bytesSkippedOnSeek =
+              bytesSkippedOnSeek - inputStats.bytesSkippedOnSeek;
+      diff.bytesBackwardsOnSeek =
+              bytesBackwardsOnSeek - inputStats.bytesBackwardsOnSeek;
+      diff.readOperations = readOperations - inputStats.readOperations;
+      diff.readFullyOperations =
+              readFullyOperations - inputStats.readFullyOperations;
+      diff.readsIncomplete = readsIncomplete - inputStats.readsIncomplete;
+      diff.bytesReadInClose = bytesReadInClose - inputStats.bytesReadInClose;
+      diff.bytesDiscardedInAbort =
+              bytesDiscardedInAbort - inputStats.bytesDiscardedInAbort;
+      diff.policySetCount = policySetCount - inputStats.policySetCount;
+      diff.inputPolicy = inputPolicy - inputStats.inputPolicy;
+      diff.versionMismatches.set(versionMismatches.longValue() -
+              inputStats.versionMismatches.longValue());
+      return diff;
+    }
+
+    /**
+     * Returns a new {@link InputStreamStatistics} instance with all the same
+     * values as this {@link InputStreamStatistics}.
+     */
+    private InputStreamStatistics copy() {
+      InputStreamStatistics copy = new InputStreamStatistics();
+      copy.openOperations = openOperations;
+      copy.closeOperations = closeOperations;
+      copy.closed = closed;
+      copy.aborted = aborted;
+      copy.seekOperations = seekOperations;
+      copy.readExceptions = readExceptions;
+      copy.forwardSeekOperations = forwardSeekOperations;
+      copy.backwardSeekOperations = backwardSeekOperations;
+      copy.bytesRead = bytesRead;
+      copy.bytesSkippedOnSeek = bytesSkippedOnSeek;
+      copy.bytesBackwardsOnSeek = bytesBackwardsOnSeek;
+      copy.readOperations = readOperations;
+      copy.readFullyOperations = readFullyOperations;
+      copy.readsIncomplete = readsIncomplete;
+      copy.bytesReadInClose = bytesReadInClose;
+      copy.bytesDiscardedInAbort = bytesDiscardedInAbort;
+      copy.policySetCount = policySetCount;
+      copy.inputPolicy = inputPolicy;
+      return copy;
     }
   }
 
@@ -1037,30 +1129,62 @@ public class S3AInstrumentation implements Closeable, MetricsSource {
   /**
    * Instrumentation exported to S3Guard.
    */
-  public final class S3GuardInstrumentation {
+  private final class S3GuardInstrumentation
+      implements MetastoreInstrumentation {
 
-    /** Initialized event. */
+    @Override
     public void initialized() {
       incrementCounter(S3GUARD_METADATASTORE_INITIALIZATION, 1);
     }
 
+    @Override
     public void storeClosed() {
 
     }
 
-    /**
-     * Throttled request.
-     */
+    @Override
     public void throttled() {
       // counters are incremented by owner.
     }
 
-    /**
-     * S3Guard is retrying after a (retryable) failure.
-     */
+    @Override
     public void retrying() {
       // counters are incremented by owner.
     }
+
+    @Override
+    public void recordsDeleted(int count) {
+      incrementCounter(S3GUARD_METADATASTORE_RECORD_DELETES, count);
+    }
+
+    @Override
+    public void recordsRead(int count) {
+      incrementCounter(S3GUARD_METADATASTORE_RECORD_READS, count);
+    }
+
+    /**
+     * records have been written (including deleted).
+     * @param count number of records written.
+     */
+    @Override
+    public void recordsWritten(int count) {
+      incrementCounter(S3GUARD_METADATASTORE_RECORD_WRITES, count);
+    }
+
+    @Override
+    public void directoryMarkedAuthoritative() {
+      incrementCounter(S3GUARD_METADATASTORE_AUTHORITATIVE_DIRECTORIES_UPDATED,
+          1);
+    }
+
+    @Override
+    public void entryAdded(final long durationNanos) {
+      addValueToQuantiles(
+          S3GUARD_METADATASTORE_PUT_PATH_LATENCY,
+          durationNanos);
+      incrementCounter(S3GUARD_METADATASTORE_PUT_PATH_REQUEST, 1);
+    }
+
   }
 
   /**

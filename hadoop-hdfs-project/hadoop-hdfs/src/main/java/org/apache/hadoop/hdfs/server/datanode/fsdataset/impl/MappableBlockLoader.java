@@ -24,10 +24,12 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.hdfs.ExtendedBlockId;
 import org.apache.hadoop.hdfs.server.datanode.BlockMetadataHeader;
+import org.apache.hadoop.hdfs.server.datanode.DNConf;
 import org.apache.hadoop.util.DataChecksum;
 
 import java.io.BufferedInputStream;
 import java.io.DataInputStream;
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -43,7 +45,7 @@ public abstract class MappableBlockLoader {
   /**
    * Initialize a specific MappableBlockLoader.
    */
-  abstract void initialize(FsDatasetCache cacheManager) throws IOException;
+  abstract CacheStats initialize(DNConf dnConf) throws IOException;
 
   /**
    * Load the block.
@@ -109,6 +111,12 @@ public abstract class MappableBlockLoader {
    * Check whether this is a native pmem cache loader.
    */
   abstract boolean isNativeLoader();
+
+  /**
+   * Get mappableBlock recovered from persistent memory.
+   */
+  abstract MappableBlock getRecoveredMappableBlock(
+      File cacheFile, String bpid, byte volumeIndex) throws IOException;
 
   /**
    * Clean up cache, can be used during DataNode shutdown.

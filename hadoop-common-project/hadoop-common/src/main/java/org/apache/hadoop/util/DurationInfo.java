@@ -18,10 +18,12 @@
 
 package org.apache.hadoop.util;
 
+import java.util.function.Supplier;
+
 import org.slf4j.Logger;
 
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.classification.InterfaceAudience.Public;
+import org.apache.hadoop.classification.InterfaceStability.Unstable;
 
 /**
  * A duration with logging of final state at info or debug
@@ -29,11 +31,14 @@ import org.apache.hadoop.classification.InterfaceStability;
  * This allows it to be used in a try-with-resources clause, and have the
  * duration automatically logged.
  */
-@InterfaceAudience.Private
-@InterfaceStability.Unstable
+@Public
+@Unstable
 public class DurationInfo extends OperationDuration
     implements AutoCloseable {
-  private final String text;
+
+  private final Supplier<String> text;
+
+  private String textStr;
 
   private final Logger log;
 
@@ -65,19 +70,25 @@ public class DurationInfo extends OperationDuration
       boolean logAtInfo,
       String format,
       Object... args) {
-    this.text = String.format(format, args);
+    this.text = () -> String.format(format, args);
     this.log = log;
     this.logAtInfo = logAtInfo;
     if (logAtInfo) {
-      log.info("Starting: {}", text);
+      log.info("Starting: {}", getFormattedText());
     } else {
-      log.debug("Starting: {}", text);
+      if (log.isDebugEnabled()) {
+        log.debug("Starting: {}", getFormattedText());
+      }
     }
+  }
+
+  private String getFormattedText() {
+    return (textStr == null) ? (textStr = text.get()) : textStr;
   }
 
   @Override
   public String toString() {
-    return text + ": duration " + super.toString();
+    return getFormattedText() + ": duration " + super.toString();
   }
 
   @Override
@@ -86,7 +97,9 @@ public class DurationInfo extends OperationDuration
     if (logAtInfo) {
       log.info("{}", this);
     } else {
-      log.debug("{}", this);
+      if (log.isDebugEnabled()) {
+        log.debug("{}", this);
+      }
     }
   }
 }
