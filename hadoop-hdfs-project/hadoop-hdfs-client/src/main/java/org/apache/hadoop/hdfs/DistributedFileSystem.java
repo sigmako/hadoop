@@ -220,7 +220,8 @@ public class DistributedFileSystem extends FileSystem
 
   @Override
   public Path getHomeDirectory() {
-    return makeQualified(DFSUtilClient.getHomeDirectory(getConf(), dfs.ugi));
+    return makeQualified(
+        new Path(DFSUtilClient.getHomeDirectory(getConf(), dfs.ugi)));
   }
 
   /**
@@ -3236,8 +3237,7 @@ public class DistributedFileSystem extends FileSystem
       EncryptionZone ez = dfs.getEZForPath(parentSrc);
       if ((ez != null)) {
         return this.makeQualified(
-            new Path(new Path(ez.getPath(), FileSystem.TRASH_PREFIX),
-                dfs.ugi.getShortUserName()));
+            new Path(DFSUtilClient.getEZTrashRoot(ez, dfs.ugi)));
       }
     } catch (IOException e) {
       DFSClient.LOG.warn("Exception in checking the encryption zone for the " +
@@ -3264,7 +3264,8 @@ public class DistributedFileSystem extends FileSystem
       // Get EZ Trash roots
       final RemoteIterator<EncryptionZone> it = dfs.listEncryptionZones();
       while (it.hasNext()) {
-        Path ezTrashRoot = new Path(it.next().getPath(),
+        EncryptionZone ez = it.next();
+        Path ezTrashRoot = new Path(ez.getPath(),
             FileSystem.TRASH_PREFIX);
         if (!exists(ezTrashRoot)) {
           continue;
@@ -3276,7 +3277,7 @@ public class DistributedFileSystem extends FileSystem
             }
           }
         } else {
-          Path userTrash = new Path(ezTrashRoot, dfs.ugi.getShortUserName());
+          Path userTrash = new Path(DFSUtilClient.getEZTrashRoot(ez, dfs.ugi));
           try {
             ret.add(getFileStatus(userTrash));
           } catch (FileNotFoundException ignored) {
@@ -3381,6 +3382,16 @@ public class DistributedFileSystem extends FileSystem
      */
     public HdfsDataOutputStreamBuilder noLocalWrite() {
       getFlags().add(CreateFlag.NO_LOCAL_WRITE);
+      return this;
+    }
+
+    /**
+     * Advise that a block replica NOT be written to the local rack DataNode.
+     *
+     * @see CreateFlag for the details.
+     */
+    public HdfsDataOutputStreamBuilder noLocalRack() {
+      getFlags().add(CreateFlag.NO_LOCAL_RACK);
       return this;
     }
 
