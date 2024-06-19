@@ -43,6 +43,8 @@ allowed_expr+="|^org/apache/hadoop/"
 allowed_expr+="|^META-INF/"
 #   * whatever under the "webapps" directory; for things shipped by yarn
 allowed_expr+="|^webapps/"
+#   * Resources files used by Hadoop YARN mini cluster
+allowed_expr+="|^TERMINAL/"
 #   * Hadoop's default configuration files, which have the form
 #     "_module_-default.xml"
 allowed_expr+="|^[^-]*-default.xml$"
@@ -54,13 +56,14 @@ allowed_expr+="|^org.apache.hadoop.application-classloader.properties$"
 #   * Used by JavaSandboxLinuxContainerRuntime as a default, loaded
 #     from root, so can't relocate. :(
 allowed_expr+="|^java.policy$"
-# * allowing native libraries from rocksdb. Leaving native libraries as it is.
-allowed_expr+="|^librocksdbjni-linux32.so"
-allowed_expr+="|^librocksdbjni-linux64.so"
-allowed_expr+="|^librocksdbjni-osx.jnilib"
-allowed_expr+="|^librocksdbjni-win64.dll"
-allowed_expr+="|^librocksdbjni-linux-ppc64le.so"
-
+#   * Used by javax.annotation
+allowed_expr+="|^jndi.properties$"
+#   * Used by ehcache
+allowed_expr+="|^ehcache-107-ext.xsd$"
+allowed_expr+="|^ehcache-multi.xsd$"
+allowed_expr+="|^.gitkeep$"
+allowed_expr+="|^OSGI-INF.*$"
+allowed_expr+="|^javax.*$"
 
 allowed_expr+=")"
 declare -i bad_artifacts=0

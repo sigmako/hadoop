@@ -22,8 +22,9 @@ import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.retry.RetryNTimes;
 import org.apache.curator.test.TestingServer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.hadoop.metrics2.MetricsRecord;
+import org.apache.hadoop.metrics2.impl.MetricsCollectorImpl;
+import org.apache.hadoop.metrics2.impl.MetricsRecords;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.ha.HAServiceProtocol;
@@ -34,6 +35,7 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.delegation.DelegationKey;
 import org.apache.hadoop.service.Service;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.util.Lists;
 import org.apache.hadoop.yarn.api.records.*;
 import org.apache.hadoop.yarn.api.records.impl.pb.ApplicationSubmissionContextPBImpl;
 import org.apache.hadoop.yarn.api.records.impl.pb.ContainerLaunchContextPBImpl;
@@ -71,10 +73,11 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
-import com.google.common.base.Joiner;
-import com.google.common.base.Supplier;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Lists;
+import org.apache.hadoop.thirdparty.com.google.common.base.Joiner;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ImmutableMap;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertArrayEquals;
@@ -94,6 +97,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 import javax.crypto.SecretKey;
 
@@ -209,7 +213,7 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
 
     private RMStateStore createStore(Configuration conf) throws Exception {
       workingZnode = "/jira/issue/3077/rmstore";
-      conf.set(CommonConfigurationKeys.ZK_ADDRESS,
+      conf.set(YarnConfiguration.RM_ZK_ADDRESS,
           curatorTestingServer.getConnectString());
       conf.set(YarnConfiguration.ZK_RM_STATE_STORE_PARENT_PATH, workingZnode);
       conf.setLong(YarnConfiguration.RM_EPOCH, epoch);
@@ -343,7 +347,7 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
       public RMStateStore getRMStateStore() throws Exception {
         YarnConfiguration conf = new YarnConfiguration();
         workingZnode = "/jira/issue/3077/rmstore";
-        conf.set(CommonConfigurationKeys.ZK_ADDRESS,
+        conf.set(YarnConfiguration.RM_ZK_ADDRESS,
             curatorTestingServer.getConnectString());
         conf.set(YarnConfiguration.ZK_RM_STATE_STORE_PARENT_PATH, workingZnode);
         this.store = new TestZKRMStateStoreInternal(conf, workingZnode) {
@@ -384,7 +388,7 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
     conf.set(YarnConfiguration.RM_HA_IDS, rmIds);
     conf.setBoolean(YarnConfiguration.RECOVERY_ENABLED, true);
     conf.set(YarnConfiguration.RM_STORE, ZKRMStateStore.class.getName());
-    conf.set(CommonConfigurationKeys.ZK_ADDRESS,
+    conf.set(YarnConfiguration.RM_ZK_ADDRESS,
         curatorTestServer.getConnectString());
     conf.setInt(CommonConfigurationKeys.ZK_TIMEOUT_MS, ZK_TIMEOUT_MS);
     conf.set(YarnConfiguration.RM_HA_ID, rmId);
@@ -572,7 +576,7 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
             store.getCredentialsFromAppAttempt(mockAttempt),
             startTime, RMAppAttemptState.FINISHED, "testUrl", 
             "test", FinalApplicationStatus.SUCCEEDED, 100, 
-            finishTime, new HashMap<>(), new HashMap<>());
+            finishTime, new HashMap<>(), new HashMap<>(), 0);
     store.updateApplicationAttemptState(newAttemptState);
     assertEquals("RMStateStore should have been in fenced state",
             true, store.isFencedState());
@@ -810,19 +814,19 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
       ApplicationAttemptId attemptId, Container container, long startTime,
       int amExitStatus) {
     Map<String, Long> resourceSecondsMap = new HashMap<>();
-    Map<String, Long> preemptedResoureSecondsMap = new HashMap<>();
+    Map<String, Long> preemptedResourceSecondsMap = new HashMap<>();
     resourceSecondsMap
         .put(ResourceInformation.MEMORY_MB.getName(), 0L);
     resourceSecondsMap
         .put(ResourceInformation.VCORES.getName(), 0L);
-    preemptedResoureSecondsMap.put(ResourceInformation.MEMORY_MB.getName(),
+    preemptedResourceSecondsMap.put(ResourceInformation.MEMORY_MB.getName(),
         0L);
-    preemptedResoureSecondsMap
+    preemptedResourceSecondsMap
         .put(ResourceInformation.VCORES.getName(), 0L);
     return ApplicationAttemptStateData.newInstance(attemptId,
         container, null, startTime, RMAppAttemptState.FINISHED,
         "myTrackingUrl", "attemptDiagnostics", FinalApplicationStatus.SUCCEEDED,
-        amExitStatus, 0, resourceSecondsMap, preemptedResoureSecondsMap);
+        amExitStatus, 0, resourceSecondsMap, preemptedResourceSecondsMap, 0);
   }
 
   private ApplicationAttemptId storeAttempt(RMStateStore store,
@@ -1567,4 +1571,40 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
         Collections.emptyMap(), ctx.getApplicationSchedulingPropertiesMap());
     store.close();
   }
+
+  @Test
+  public void testMetricsInited() throws Exception  {
+    TestZKRMStateStoreTester zkTester = new TestZKRMStateStoreTester();
+    Configuration conf = createConfForDelegationTokenNodeSplit(1);
+    MetricsCollectorImpl collector = new MetricsCollectorImpl();
+    ZKRMStateStoreOpDurations opDurations =
+        ((ZKRMStateStore)zkTester.getRMStateStore(conf)).opDurations;
+
+    long anyDuration = 10;
+    opDurations.addLoadStateCallDuration(anyDuration);
+    opDurations.addStoreApplicationStateCallDuration(anyDuration);
+    opDurations.addUpdateApplicationStateCallDuration(anyDuration);
+    opDurations.addRemoveApplicationStateCallDuration(anyDuration);
+
+    Thread.sleep(110);
+
+    opDurations.getMetrics(collector, true);
+    assertEquals("Incorrect number of perf metrics", 1,
+        collector.getRecords().size());
+    MetricsRecord record = collector.getRecords().get(0);
+    MetricsRecords.assertTag(record,
+        ZKRMStateStoreOpDurations.RECORD_INFO.name(),
+        "ZKRMStateStoreOpDurations");
+
+    double expectAvgTime = anyDuration;
+    MetricsRecords.assertMetric(record,
+        "LoadStateCallAvgTime",  expectAvgTime);
+    MetricsRecords.assertMetric(record,
+        "StoreApplicationStateCallAvgTime", expectAvgTime);
+    MetricsRecords.assertMetric(record,
+        "UpdateApplicationStateCallAvgTime", expectAvgTime);
+    MetricsRecords.assertMetric(record,
+        "RemoveApplicationStateCallAvgTime", expectAvgTime);
+  }
+
 }

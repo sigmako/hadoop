@@ -35,6 +35,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.placement.SpecifiedPlacemen
 import org.apache.hadoop.yarn.server.resourcemanager.placement.UserPlacementRule;
 import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationSchedulerConfiguration;
 
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.QueuePath;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.allocationfile.AllocationFileQueue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.allocationfile.AllocationFileQueuePlacementPolicy;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.allocationfile.AllocationFileQueuePlacementRule;
@@ -736,6 +737,72 @@ public class TestAllocationFileLoaderService {
     }
   }
 
+  /**
+   * Verify that a parent queue (type = parent) cannot have a maxAMShare element
+   * as dynamic queues won't be able to inherit this setting.
+   */
+  @Test
+  public void testParentTagWithMaxAMShare() throws Exception {
+    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
+
+    AllocationFileWriter.create()
+        .addQueue(new AllocationFileQueue.Builder("parent")
+            .parent(true)
+            .maxAMShare(0.75)
+            .build())
+        .writeToFile(ALLOC_FILE);
+
+    AllocationFileLoaderService allocLoader =
+        new AllocationFileLoaderService(scheduler);
+    allocLoader.init(conf);
+    ReloadListener confHolder = new ReloadListener();
+    allocLoader.setReloadListener(confHolder);
+    try {
+      allocLoader.reloadAllocations();
+      fail("Expect allocation parsing to fail as maxAMShare cannot be set for"
+          + " a parent queue.");
+    } catch (AllocationConfigurationException ex) {
+      assertEquals(ex.getMessage(), "The configuration settings for root.parent"
+          + " are invalid. A queue element that contains child queue elements"
+          + " or that has the type='parent' attribute cannot also include a"
+          + " maxAMShare element.");
+    }
+  }
+
+  /**
+   * Verify that a parent queue that is not explicitly tagged with "type"
+   * as "parent" but has a child queue (implicit parent) cannot have a
+   * maxAMShare element.
+   */
+  @Test
+  public void testParentWithMaxAMShare() throws Exception {
+    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
+
+    AllocationFileWriter.create()
+        .addQueue(new AllocationFileQueue.Builder("parent")
+            .parent(false)
+            .maxAMShare(0.76)
+            .subQueue(new AllocationFileQueue.Builder("child").build())
+            .build())
+        .writeToFile(ALLOC_FILE);
+
+    AllocationFileLoaderService allocLoader =
+        new AllocationFileLoaderService(scheduler);
+    allocLoader.init(conf);
+    ReloadListener confHolder = new ReloadListener();
+    allocLoader.setReloadListener(confHolder);
+    try {
+      allocLoader.reloadAllocations();
+      fail("Expect allocation parsing to fail as maxAMShare cannot be set for"
+          + " a parent queue.");
+    } catch (AllocationConfigurationException ex) {
+      assertEquals(ex.getMessage(), "The configuration settings for root.parent"
+          + " are invalid. A queue element that contains child queue elements"
+          + " or that has the type='parent' attribute cannot also include a"
+          + " maxAMShare element.");
+    }
+  }
+
   @Test
   public void testParentTagWithChild() throws Exception {
     conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
@@ -823,8 +890,10 @@ public class TestAllocationFileLoaderService {
     AllocationConfiguration allocConf = confHolder.allocConf;
     String reservableQueueName = "root.reservable";
     String nonreservableQueueName = "root.other";
-    assertFalse(allocConf.isReservable(nonreservableQueueName));
-    assertTrue(allocConf.isReservable(reservableQueueName));
+    QueuePath nonreservableQueuePath = new QueuePath(nonreservableQueueName);
+    QueuePath reservableQueuePath = new QueuePath(reservableQueueName);
+    assertFalse(allocConf.isReservable(nonreservableQueuePath));
+    assertTrue(allocConf.isReservable(reservableQueuePath));
     Map<FSQueueType, Set<String>> configuredQueues =
         allocConf.getConfiguredQueues();
     assertTrue("reservable queue is expected be to a parent queue",
@@ -833,23 +902,23 @@ public class TestAllocationFileLoaderService {
         configuredQueues.get(FSQueueType.LEAF)
           .contains(reservableQueueName));
 
-    assertTrue(allocConf.getMoveOnExpiry(reservableQueueName));
+    assertTrue(allocConf.getMoveOnExpiry(reservableQueuePath));
     assertEquals(ReservationSchedulerConfiguration.DEFAULT_RESERVATION_WINDOW,
-        allocConf.getReservationWindow(reservableQueueName));
+        allocConf.getReservationWindow(reservableQueuePath));
     assertEquals(100,
-        allocConf.getInstantaneousMaxCapacity(reservableQueueName), 0.0001);
+        allocConf.getInstantaneousMaxCapacity(reservableQueuePath), 0.0001);
     assertEquals("DummyAgentName",
-        allocConf.getReservationAgent(reservableQueueName));
-    assertEquals(100, allocConf.getAverageCapacity(reservableQueueName), 0.001);
-    assertFalse(allocConf.getShowReservationAsQueues(reservableQueueName));
+        allocConf.getReservationAgent(reservableQueuePath));
+    assertEquals(100, allocConf.getAverageCapacity(reservableQueuePath), 0.001);
+    assertFalse(allocConf.getShowReservationAsQueues(reservableQueuePath));
     assertEquals("AnyAdmissionPolicy",
-        allocConf.getReservationAdmissionPolicy(reservableQueueName));
+        allocConf.getReservationAdmissionPolicy(reservableQueuePath));
     assertEquals(ReservationSchedulerConfiguration
         .DEFAULT_RESERVATION_PLANNER_NAME,
-        allocConf.getReplanner(reservableQueueName));
+        allocConf.getReplanner(reservableQueuePath));
     assertEquals(ReservationSchedulerConfiguration
         .DEFAULT_RESERVATION_ENFORCEMENT_WINDOW,
-        allocConf.getEnforcementWindow(reservableQueueName));
+        allocConf.getEnforcementWindow(reservableQueuePath));
   }
 
   /**

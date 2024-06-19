@@ -32,7 +32,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.curator.test.TestingServer;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.hdfs.server.federation.FederationTestUtils;
 import org.apache.hadoop.hdfs.server.federation.MiniRouterDFSCluster;
 import org.apache.hadoop.hdfs.server.federation.MiniRouterDFSCluster.RouterContext;
@@ -81,7 +80,7 @@ public class TestRouterMountTableCacheRefresh {
     conf.setClass(RBFConfigKeys.FEDERATION_FILE_RESOLVER_CLIENT_CLASS,
         RBFConfigKeys.FEDERATION_FILE_RESOLVER_CLIENT_CLASS_DEFAULT,
         FileSubclusterResolver.class);
-    conf.set(CommonConfigurationKeys.ZK_ADDRESS, connectString);
+    conf.set(RBFConfigKeys.FEDERATION_STORE_ZK_ADDRESS, connectString);
     conf.setBoolean(RBFConfigKeys.DFS_ROUTER_STORE_ENABLE, true);
     cluster.addRouterOverrides(conf);
     cluster.startCluster();
@@ -308,9 +307,9 @@ public class TestRouterMountTableCacheRefresh {
         TimeUnit.SECONDS);
     mountTableRefresherService.init(config);
     // One router is not responding for 1 minute, still refresh should
-    // finished in 5 second as cache update timeout is set 5 second.
+    // finish in 5 second as cache update timeout is set 5 second.
     mountTableRefresherService.refresh();
-    // Test case timeout is assert for this test case.
+    // Test case timeout is asserted for this test case.
   }
 
   /**
@@ -349,7 +348,7 @@ public class TestRouterMountTableCacheRefresh {
     mountTableRefresherService.refresh();
     assertNotEquals("No RouterClient is created.", 0, createCounter.get());
     /*
-     * Wait for clients to expire. Lets wait triple the cache eviction period.
+     * Wait for clients to expire. Let's wait triple the cache eviction period.
      * After cache eviction period all created client must be removed and
      * closed.
      */

@@ -24,6 +24,7 @@ import static org.mockito.Mockito.*;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
@@ -32,7 +33,7 @@ import javax.servlet.ServletContext;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import com.google.common.collect.ImmutableMap;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ImmutableMap;
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.StartupProgress;
 import org.junit.Before;
 import org.junit.Test;
@@ -245,7 +246,7 @@ public class TestStartupProgressServlet {
    */
   private String doGetAndReturnResponseBody() throws IOException {
     servlet.doGet(req, resp);
-    return new String(respOut.toByteArray(), "UTF-8");
+    return new String(respOut.toByteArray(), StandardCharsets.UTF_8);
   }
 
   /**

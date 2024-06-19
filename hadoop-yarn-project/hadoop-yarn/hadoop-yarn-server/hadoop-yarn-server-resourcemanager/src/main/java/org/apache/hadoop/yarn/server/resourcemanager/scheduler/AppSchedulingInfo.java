@@ -33,13 +33,14 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.yarn.server.resourcemanager.ClusterMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
-import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ExecutionType;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
@@ -103,11 +104,15 @@ public class AppSchedulingInfo {
   private final Map<String, String> applicationSchedulingEnvs = new HashMap<>();
   private final RMContext rmContext;
   private final int retryAttempts;
+  private boolean unmanagedAM;
+
+  private final String defaultResourceRequestAppPlacementType;
 
   public AppSchedulingInfo(ApplicationAttemptId appAttemptId, String user,
       Queue queue, AbstractUsersManager abstractUsersManager, long epoch,
       ResourceUsage appResourceUsage,
-      Map<String, String> applicationSchedulingEnvs, RMContext rmContext) {
+      Map<String, String> applicationSchedulingEnvs, RMContext rmContext,
+      boolean unmanagedAM) {
     this.applicationAttemptId = appAttemptId;
     this.applicationId = appAttemptId.getApplicationId();
     this.queue = queue;
@@ -121,11 +126,37 @@ public class AppSchedulingInfo {
     this.retryAttempts = rmContext.getYarnConfiguration().getInt(
          YarnConfiguration.RM_PLACEMENT_CONSTRAINTS_RETRY_ATTEMPTS,
          YarnConfiguration.DEFAULT_RM_PLACEMENT_CONSTRAINTS_RETRY_ATTEMPTS);
+    this.unmanagedAM = unmanagedAM;
 
     ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
     updateContext = new ContainerUpdateContext(this);
     readLock = lock.readLock();
     writeLock = lock.writeLock();
+
+    this.defaultResourceRequestAppPlacementType =
+        getDefaultResourceRequestAppPlacementType();
+  }
+
+  /**
+   * Set default App Placement Allocator.
+   *
+   * @return app placement class.
+   */
+  public String getDefaultResourceRequestAppPlacementType() {
+    if (this.rmContext != null
+        && this.rmContext.getYarnConfiguration() != null) {
+
+      String appPlacementClass = applicationSchedulingEnvs.get(
+          ApplicationSchedulingConfig.ENV_APPLICATION_PLACEMENT_TYPE_CLASS);
+      if (null != appPlacementClass) {
+        return appPlacementClass;
+      } else {
+        Configuration conf = rmContext.getYarnConfiguration();
+        return conf.get(
+            YarnConfiguration.APPLICATION_PLACEMENT_TYPE_CLASS);
+      }
+    }
+    return null;
   }
 
   public ApplicationId getApplicationId() {
@@ -155,6 +186,14 @@ public class AppSchedulingInfo {
 
   public boolean isPending() {
     return pending;
+  }
+
+  public void setUnmanagedAM(boolean unmanagedAM) {
+    this.unmanagedAM = unmanagedAM;
+  }
+
+  public boolean isUnmanagedAM() {
+    return unmanagedAM;
   }
 
   public Set<String> getRequestedPartitions() {
@@ -320,8 +359,7 @@ public class AppSchedulingInfo {
       SchedulerRequestKey schedulerRequestKey = entry.getKey();
       AppPlacementAllocator<SchedulerNode> appPlacementAllocator =
           getAndAddAppPlacementAllocatorIfNotExist(schedulerRequestKey,
-              applicationSchedulingEnvs.get(
-                  ApplicationSchedulingConfig.ENV_APPLICATION_PLACEMENT_TYPE_CLASS));
+              defaultResourceRequestAppPlacementType);
 
       // Update AppPlacementAllocator
       PendingAskUpdateResult pendingAmountChanges =
@@ -573,7 +611,7 @@ public class AppSchedulingInfo {
 
   public ContainerRequest allocate(NodeType type,
       SchedulerNode node, SchedulerRequestKey schedulerKey,
-      Container containerAllocated) {
+      RMContainer containerAllocated) {
     writeLock.lock();
     try {
       if (null != containerAllocated) {
@@ -618,8 +656,10 @@ public class AppSchedulingInfo {
               ap.getPrimaryRequestedNodePartition(), delta);
         }
       }
-      oldMetrics.moveAppFrom(this);
-      newMetrics.moveAppTo(this);
+
+      oldMetrics.moveAppFrom(this, isUnmanagedAM());
+      newMetrics.moveAppTo(this, isUnmanagedAM());
+
       abstractUsersManager.deactivateApplication(user, applicationId);
       abstractUsersManager = newQueue.getAbstractUsersManager();
       if (!schedulerKeys.isEmpty()) {
@@ -650,7 +690,8 @@ public class AppSchedulingInfo {
                   ask.getCount()));
         }
       }
-      metrics.finishAppAttempt(applicationId, pending, user);
+
+      metrics.finishAppAttempt(applicationId, pending, user, unmanagedAM);
 
       // Clear requests themselves
       clearRequests();
@@ -696,7 +737,7 @@ public class AppSchedulingInfo {
         // If there was any container to recover, the application was
         // running from scheduler's POV.
         pending = false;
-        metrics.runAppAttempt(applicationId, user);
+        metrics.runAppAttempt(applicationId, user, isUnmanagedAM());
       }
 
       // Container is completed. Skip recovering resources.
@@ -731,30 +772,36 @@ public class AppSchedulingInfo {
   }
 
   private void updateMetricsForAllocatedContainer(NodeType type,
-      SchedulerNode node, Container containerAllocated) {
+      SchedulerNode node, RMContainer containerAllocated) {
     QueueMetrics metrics = queue.getMetrics();
     if (pending) {
       // once an allocation is done we assume the application is
       // running from scheduler's POV.
       pending = false;
-      metrics.runAppAttempt(applicationId, user);
+      metrics.runAppAttempt(applicationId, user, isUnmanagedAM());
     }
 
     updateMetrics(applicationId, type, node, containerAllocated, user, queue);
   }
 
   public static void updateMetrics(ApplicationId applicationId, NodeType type,
-      SchedulerNode node, Container containerAllocated, String user,
+      SchedulerNode node, RMContainer containerAllocated, String user,
       Queue queue) {
     LOG.debug("allocate: applicationId={} container={} host={} user={}"
-        + " resource={} type={}", applicationId, containerAllocated.getId(),
-        containerAllocated.getNodeId(), user, containerAllocated.getResource(),
+        + " resource={} type={}", applicationId,
+        containerAllocated.getContainer().getId(),
+        containerAllocated.getNodeId(), user,
+        containerAllocated.getContainer().getResource(),
         type);
     if(node != null) {
       queue.getMetrics().allocateResources(node.getPartition(), user, 1,
-          containerAllocated.getResource(), true);
+          containerAllocated.getContainer().getResource(), false);
+      queue.getMetrics().decrPendingResources(
+          containerAllocated.getNodeLabelExpression(), user, 1,
+          containerAllocated.getContainer().getResource());
     }
     queue.getMetrics().incrNodeTypeAggregations(user, type);
+    ClusterMetrics.getMetrics().incrNumContainerAssigned();
   }
 
   // Get AppPlacementAllocator by specified schedulerKey
@@ -830,5 +877,9 @@ public class AppSchedulingInfo {
     } finally {
       this.readLock.unlock();
     }
+  }
+
+  public RMContext getRMContext() {
+    return this.rmContext;
   }
 }

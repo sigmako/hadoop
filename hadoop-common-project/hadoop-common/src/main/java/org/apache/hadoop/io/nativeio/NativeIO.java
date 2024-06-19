@@ -47,7 +47,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import sun.misc.Unsafe;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 
 /**
  * JNI wrappers for various native IO-related calls not available in Java.
@@ -141,7 +141,7 @@ public class NativeIO {
       }
     }
 
-    // Denotes the state of supporting PMDK. The value is set by JNI.
+    // Denotes the state of supporting PMDK. The actual value is set via JNI.
     private static SupportState pmdkSupportState =
         SupportState.UNSUPPORTED;
 
@@ -219,6 +219,9 @@ public class NativeIO {
         return this.length;
       }
     }
+
+    /** Initialize the JNI method ID and class ID cache. */
+    private static native void initNativePosix(boolean doThreadsafeWorkaround);
 
     /**
      * JNI wrapper of persist memory operations.
@@ -331,11 +334,11 @@ public class NativeIO {
       if (NativeCodeLoader.isNativeCodeLoaded()) {
         try {
           Configuration conf = new Configuration();
-          workaroundNonThreadSafePasswdCalls = conf.getBoolean(
-            WORKAROUND_NON_THREADSAFE_CALLS_KEY,
-            WORKAROUND_NON_THREADSAFE_CALLS_DEFAULT);
+          boolean workaroundNonThreadSafePasswdCalls = conf.getBoolean(
+              WORKAROUND_NON_THREADSAFE_CALLS_KEY,
+              WORKAROUND_NON_THREADSAFE_CALLS_DEFAULT);
 
-          initNative();
+          initNativePosix(workaroundNonThreadSafePasswdCalls);
           nativeLoaded = true;
 
           cacheTimeout = conf.getLong(
@@ -355,7 +358,7 @@ public class NativeIO {
     }
 
     /**
-     * Return true if the JNI-based native IO extensions are available.
+     * @return Return true if the JNI-based native IO extensions are available.
      */
     public static boolean isAvailable() {
       return NativeCodeLoader.isNativeCodeLoaded() && nativeLoaded;
@@ -367,7 +370,14 @@ public class NativeIO {
       }
     }
 
-    /** Wrapper around open(2) */
+    /**
+     * Wrapper around open(2) .
+     * @param path input path.
+     * @param flags input flags.
+     * @param mode input mode.
+     * @return FileDescriptor.
+     * @throws IOException raised on errors performing I/O.
+     */
     public static native FileDescriptor open(String path, int flags, int mode) throws IOException;
     /** Wrapper around fstat(2) */
     private static native Stat fstat(FileDescriptor fd) throws IOException;
@@ -428,6 +438,10 @@ public class NativeIO {
      * for this syscall for more information. On systems where this
      * call is not available, does nothing.
      *
+     * @param fd input fd.
+     * @param offset input offset.
+     * @param nbytes input nbytes.
+     * @param flags input flag.
      * @throws NativeIOException if there is an error with the syscall
      */
     public static void syncFileRangeIfPossible(
@@ -668,9 +682,6 @@ public class NativeIO {
         throws IOException;
   }
 
-  private static boolean workaroundNonThreadSafePasswdCalls = false;
-
-
   public static class Windows {
     // Flags for CreateFile() call on Windows
     public static final long GENERIC_READ = 0x80000000L;
@@ -712,7 +723,14 @@ public class NativeIO {
     private static native void createDirectoryWithMode0(String path, int mode)
         throws NativeIOException;
 
-    /** Wrapper around CreateFile() on Windows */
+    /**
+     * @return Wrapper around CreateFile() on Windows.
+     * @param path input path.
+     * @param desiredAccess input desiredAccess.
+     * @param shareMode input shareMode.
+     * @param creationDisposition input creationDisposition.
+     * @throws IOException raised on errors performing I/O.
+     */
     public static native FileDescriptor createFile(String path,
         long desiredAccess, long shareMode, long creationDisposition)
         throws IOException;
@@ -749,7 +767,13 @@ public class NativeIO {
         long desiredAccess, long shareMode, long creationDisposition, int mode)
         throws NativeIOException;
 
-    /** Wrapper around SetFilePointer() on Windows */
+    /**
+     * @return Wrapper around SetFilePointer() on Windows.
+     * @param fd input fd.
+     * @param distanceToMove input distanceToMove.
+     * @param moveMethod input moveMethod.
+     * @throws IOException raised on errors performing I/O.
+     */
     public static native long setFilePointer(FileDescriptor fd,
         long distanceToMove, long moveMethod) throws IOException;
 
@@ -809,7 +833,9 @@ public class NativeIO {
     static {
       if (NativeCodeLoader.isNativeCodeLoaded()) {
         try {
-          initNative();
+          initNativeWindows(false);
+          // As of now there is no change between initNative()
+          // and initNativeWindows() native impls.
           nativeLoaded = true;
         } catch (Throwable t) {
           // This can happen if the user has an older version of libhadoop.so
@@ -819,6 +845,10 @@ public class NativeIO {
         }
       }
     }
+
+    /** Initialize the JNI method ID and class ID cache. */
+    private static native void initNativeWindows(
+        boolean doThreadsafeWorkaround);
   }
 
   private static final Logger LOG = LoggerFactory.getLogger(NativeIO.class);
@@ -828,7 +858,7 @@ public class NativeIO {
   static {
     if (NativeCodeLoader.isNativeCodeLoaded()) {
       try {
-        initNative();
+        initNative(false);
         nativeLoaded = true;
       } catch (Throwable t) {
         // This can happen if the user has an older version of libhadoop.so
@@ -840,14 +870,14 @@ public class NativeIO {
   }
 
   /**
-   * Return true if the JNI-based native IO extensions are available.
+   * @return Return true if the JNI-based native IO extensions are available.
    */
   public static boolean isAvailable() {
     return NativeCodeLoader.isNativeCodeLoaded() && nativeLoaded;
   }
 
   /** Initialize the JNI method ID and class ID cache */
-  private static native void initNative();
+  private static native void initNative(boolean doThreadsafeWorkaround);
 
   /**
    * Get the maximum number of bytes that can be locked into memory at any
@@ -898,6 +928,7 @@ public class NativeIO {
    *
    * @param name the full principal name containing the domain
    * @return name with domain removed
+   * @throws IOException raised on errors performing I/O.
    */
   private static String stripDomain(String name) {
     int i = name.indexOf('\\');
@@ -933,6 +964,11 @@ public class NativeIO {
    * file opened at a given offset, i.e. other process can delete
    * the file the FileDescriptor is reading. Only Windows implementation
    * uses the native interface.
+   *
+   * @param f input f.
+   * @param seekOffset input seekOffset.
+   * @return FileDescriptor.
+   * @throws IOException raised on errors performing I/O.
    */
   public static FileDescriptor getShareDeleteFileDescriptor(
       File f, long seekOffset) throws IOException {
@@ -961,7 +997,7 @@ public class NativeIO {
   }
 
   /**
-   * Create the specified File for write access, ensuring that it does not exist.
+   * @return Create the specified File for write access, ensuring that it does not exist.
    * @param f the file that we want to create
    * @param permissions we want to have on the file (if security is enabled)
    *
@@ -1045,7 +1081,7 @@ public class NativeIO {
    *
    * @param src source file
    * @param dst hardlink location
-   * @throws IOException
+   * @throws IOException raised on errors performing I/O.
    */
   @Deprecated
   public static void link(File src, File dst) throws IOException {
@@ -1103,7 +1139,7 @@ public class NativeIO {
    *
    * @param src                  The source path
    * @param dst                  The destination path
-   * @throws IOException
+   * @throws IOException raised on errors performing I/O.
    */
   public static void copyFileUnbuffered(File src, File dst) throws IOException {
     if (nativeLoaded && Shell.WINDOWS) {

@@ -22,6 +22,7 @@ import static org.junit.Assert.*;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import org.apache.hadoop.test.GenericTestUtils;
@@ -31,8 +32,7 @@ import org.apache.zookeeper.ZooDefs.Perms;
 import org.apache.zookeeper.data.ACL;
 import org.junit.Test;
 
-import com.google.common.base.Charsets;
-import com.google.common.io.Files;
+import org.apache.hadoop.thirdparty.com.google.common.io.Files;
 
 public class TestZKUtil {
   private static final String TEST_ROOT_DIR = GenericTestUtils.getTempPath(
@@ -131,7 +131,7 @@ public class TestZKUtil {
     assertEquals("x", ZKUtil.resolveConfIndirection("x"));
     
     TEST_FILE.getParentFile().mkdirs();
-    Files.asCharSink(TEST_FILE, Charsets.UTF_8).write("hello world");
+    Files.asCharSink(TEST_FILE, StandardCharsets.UTF_8).write("hello world");
     assertEquals("hello world", ZKUtil.resolveConfIndirection(
         "@" + TEST_FILE.getAbsolutePath()));
     

@@ -84,7 +84,7 @@ import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 
 public class ResourceMgrDelegate extends YarnClient {
   private static final Logger LOG =
@@ -397,6 +397,12 @@ public class ResourceMgrDelegate extends YarnClient {
   public org.apache.hadoop.yarn.api.records.QueueInfo getQueueInfo(
       String queueName) throws YarnException, IOException {
     return client.getQueueInfo(queueName);
+  }
+
+  @Override
+  public org.apache.hadoop.yarn.api.records.QueueInfo getQueueInfo(
+      String queueName, String subClusterId) throws YarnException, IOException {
+    return client.getQueueInfo(queueName, subClusterId);
   }
 
   @Override

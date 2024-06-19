@@ -32,9 +32,14 @@ import static org.apache.hadoop.test.Whitebox.setInternalState;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
 import java.net.URISyntaxException;
 import java.util.Arrays;
 import java.util.EnumSet;
+import java.util.Enumeration;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
@@ -67,13 +72,15 @@ import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.ha.HAContext;
 import org.apache.hadoop.io.EnumSetWritable;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.ipc.CallerContext;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.ipc.StandbyException;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.Test;
+import org.slf4j.event.Level;
 
 /**
- * The the RPC interface of the {@link getRouter()} implemented by
+ * The RPC interface of the {@link getRouter()} implemented by
  * {@link RouterRpcServer}.
  */
 public class TestRouterRpcMultiDestination extends TestRouterRpc {
@@ -273,6 +280,14 @@ public class TestRouterRpcMultiDestination extends TestRouterRpc {
   @Test
   public void testPreviousBlockNotNull()
       throws IOException, URISyntaxException {
+    final GenericTestUtils.LogCapturer stateChangeLog =
+        GenericTestUtils.LogCapturer.captureLogs(NameNode.stateChangeLog);
+    GenericTestUtils.setLogLevel(NameNode.stateChangeLog, Level.DEBUG);
+
+    final GenericTestUtils.LogCapturer nameNodeLog =
+        GenericTestUtils.LogCapturer.captureLogs(NameNode.LOG);
+    GenericTestUtils.setLogLevel(NameNode.LOG, Level.DEBUG);
+
     final FederationRPCMetrics metrics = getRouterContext().
         getRouter().getRpcServer().getRPCMetrics();
     final ClientProtocol clientProtocol = getRouterProtocol();
@@ -303,6 +318,7 @@ public class TestRouterRpcMultiDestination extends TestRouterRpc {
       long proxyNumAddBlock = metrics.getProcessingOps();
       assertEquals(2, proxyNumAddBlock - proxyNumCreate);
 
+      stateChangeLog.clearOutput();
       // Add a block via router and previous block is not null.
       LocatedBlock blockTwo = clientProtocol.addBlock(
           testPath, clientName, blockOne.getBlock(), null,
@@ -310,9 +326,11 @@ public class TestRouterRpcMultiDestination extends TestRouterRpc {
       assertNotNull(blockTwo);
       long proxyNumAddBlock2 = metrics.getProcessingOps();
       assertEquals(1, proxyNumAddBlock2 - proxyNumAddBlock);
+      assertTrue(stateChangeLog.getOutput().contains("BLOCK* getAdditionalBlock: " + testPath));
 
+      nameNodeLog.clearOutput();
       // Get additionalDatanode via router and block is not null.
-      DatanodeInfo[] exclusions = new DatanodeInfo[0];
+      DatanodeInfo[] exclusions = DatanodeInfo.EMPTY_ARRAY;
       LocatedBlock newBlock = clientProtocol.getAdditionalDatanode(
           testPath, status.getFileId(), blockTwo.getBlock(),
           blockTwo.getLocations(), blockTwo.getStorageIDs(), exclusions,
@@ -320,12 +338,15 @@ public class TestRouterRpcMultiDestination extends TestRouterRpc {
       assertNotNull(newBlock);
       long proxyNumAdditionalDatanode = metrics.getProcessingOps();
       assertEquals(1, proxyNumAdditionalDatanode - proxyNumAddBlock2);
+      assertTrue(nameNodeLog.getOutput().contains("getAdditionalDatanode: src=" + testPath));
 
+      stateChangeLog.clearOutput();
       // Complete the file via router and last block is not null.
       clientProtocol.complete(testPath, clientName,
           newBlock.getBlock(), status.getFileId());
       long proxyNumComplete = metrics.getProcessingOps();
       assertEquals(1, proxyNumComplete - proxyNumAdditionalDatanode);
+      assertTrue(stateChangeLog.getOutput().contains("DIR* NameSystem.completeFile: " + testPath));
     } finally {
       clientProtocol.delete(testPath, true);
     }
@@ -433,5 +454,83 @@ public class TestRouterRpcMultiDestination extends TestRouterRpc {
     // Restore the HA context and the Router
     setInternalState(ns0, "haContext", nn0haCtx);
     setInternalState(router0ClientProtocol, "allowPartialList", true);
+  }
+
+  @Test
+  public void testCallerContextWithMultiDestinations() throws IOException {
+    GenericTestUtils.LogCapturer auditLog =
+        GenericTestUtils.LogCapturer.captureLogs(FSNamesystem.AUDIT_LOG);
+
+    // set client context
+    CallerContext.setCurrent(
+        new CallerContext.Builder("clientContext").build());
+    // assert the initial caller context as expected
+    assertEquals("clientContext", CallerContext.getCurrent().getContext());
+
+    DistributedFileSystem routerFs =
+        (DistributedFileSystem) getRouterFileSystem();
+    // create a directory via the router
+    Path dirPath = new Path("/test_caller_context_with_multi_destinations");
+    routerFs.mkdirs(dirPath);
+    // invoke concurrently in RouterRpcClient
+    routerFs.listStatus(dirPath);
+    // invoke sequentially in RouterRpcClient
+    routerFs.getFileStatus(dirPath);
+
+    String auditFlag = "src=" + dirPath.toString();
+    Set<String> clientIpInfos = getClientIpInfos();
+    for (String line : auditLog.getOutput().split("\n")) {
+      if (line.contains(auditFlag)) {
+        // assert origin caller context exist in audit log
+        String callerContext = line.substring(line.indexOf("callerContext="));
+        assertTrue(String.format("%s doesn't contain 'clientContext'", callerContext),
+            callerContext.contains("clientContext"));
+        // assert client ip info exist in caller context
+        checkCallerContextContainsClientIp(clientIpInfos, callerContext);
+      }
+    }
+  }
+
+  /**
+   * Check that one of the IP from all local network interfaces is contained
+   * only once in callerContext.
+   *
+   * @param clientIpInfos IP information extracted from all local network interfaces.
+   * @param callerContext current caller context.
+   */
+  private static void checkCallerContextContainsClientIp(Set<String> clientIpInfos,
+      String callerContext) {
+    String clientIpInfo = null;
+    for (String curClientIpInfo : clientIpInfos) {
+      if (callerContext.contains(curClientIpInfo)) {
+        clientIpInfo = curClientIpInfo;
+        // assert client ip info appears only once in caller context
+        assertEquals(String.format("%s contains %s more than once", callerContext, clientIpInfo),
+            callerContext.indexOf(clientIpInfo), callerContext.lastIndexOf(clientIpInfo));
+        break;
+      }
+    }
+    assertNotNull(clientIpInfo);
+  }
+
+  /**
+   * A local machine where we run tests may have more than 1 network interface,
+   * extracting all IP information from them.
+   *
+   * @return A set of 'clientIp:IP' where IP is taken from all local network interfaces.
+   * @throws SocketException
+   */
+  private static Set<String> getClientIpInfos() throws SocketException {
+    Set<String> clientIpInfos = new HashSet<>();
+    Enumeration<NetworkInterface> networkInterfaces = NetworkInterface.getNetworkInterfaces();
+    while (networkInterfaces.hasMoreElements()) {
+      NetworkInterface networkInterface = networkInterfaces.nextElement();
+      Enumeration<InetAddress> inetAddresses = networkInterface.getInetAddresses();
+      while (inetAddresses.hasMoreElements()) {
+        InetAddress inetAddress = inetAddresses.nextElement();
+        clientIpInfos.add("clientIp:" + inetAddress.getHostAddress());
+      }
+    }
+    return clientIpInfos;
   }
 }

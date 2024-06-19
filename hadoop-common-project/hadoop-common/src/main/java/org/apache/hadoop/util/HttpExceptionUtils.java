@@ -26,8 +26,11 @@ import javax.ws.rs.core.Response;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.Writer;
-import java.lang.reflect.Constructor;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.net.HttpURLConnection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -53,6 +56,10 @@ public class HttpExceptionUtils {
 
   private static final String ENTER = System.getProperty("line.separator");
 
+  private static final MethodHandles.Lookup PUBLIC_LOOKUP = MethodHandles.publicLookup();
+  private static final MethodType EXCEPTION_CONSTRUCTOR_TYPE =
+          MethodType.methodType(void.class, String.class);
+
   /**
    * Creates a HTTP servlet response serializing the exception in it as JSON.
    *
@@ -71,8 +78,8 @@ public class HttpExceptionUtils {
     json.put(ERROR_MESSAGE_JSON, getOneLineMessage(ex));
     json.put(ERROR_EXCEPTION_JSON, ex.getClass().getSimpleName());
     json.put(ERROR_CLASSNAME_JSON, ex.getClass().getName());
-    Map<String, Object> jsonResponse = new LinkedHashMap<String, Object>();
-    jsonResponse.put(ERROR_JSON, json);
+    Map<String, Object> jsonResponse =
+        Collections.singletonMap(ERROR_JSON, json);
     Writer writer = response.getWriter();
     JsonSerialization.writer().writeValue(writer, jsonResponse);
     writer.flush();
@@ -91,8 +98,7 @@ public class HttpExceptionUtils {
     json.put(ERROR_MESSAGE_JSON, getOneLineMessage(ex));
     json.put(ERROR_EXCEPTION_JSON, ex.getClass().getSimpleName());
     json.put(ERROR_CLASSNAME_JSON, ex.getClass().getName());
-    Map<String, Object> response = new LinkedHashMap<String, Object>();
-    response.put(ERROR_JSON, json);
+    Map<String, Object> response = Collections.singletonMap(ERROR_JSON, json);
     return Response.status(status).type(MediaType.APPLICATION_JSON).
         entity(response).build();
   }
@@ -150,9 +156,12 @@ public class HttpExceptionUtils {
           try {
             ClassLoader cl = HttpExceptionUtils.class.getClassLoader();
             Class klass = cl.loadClass(exClass);
-            Constructor constr = klass.getConstructor(String.class);
-            toThrow = (Exception) constr.newInstance(exMsg);
-          } catch (Exception ex) {
+            Preconditions.checkState(Exception.class.isAssignableFrom(klass),
+                "Class [%s] is not a subclass of Exception", klass);
+            MethodHandle methodHandle = PUBLIC_LOOKUP.findConstructor(
+                    klass, EXCEPTION_CONSTRUCTOR_TYPE);
+            toThrow = (Exception) methodHandle.invoke(exMsg);
+          } catch (Throwable t) {
             toThrow = new IOException(String.format(
                 "HTTP status [%d], exception [%s], message [%s], URL [%s]",
                 conn.getResponseCode(), exClass, exMsg, conn.getURL()));

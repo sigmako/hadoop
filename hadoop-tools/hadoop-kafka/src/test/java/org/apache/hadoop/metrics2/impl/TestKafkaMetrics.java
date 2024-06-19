@@ -18,7 +18,7 @@
 
 package org.apache.hadoop.metrics2.impl;
 
-import com.google.common.collect.Lists;
+import org.apache.hadoop.util.Lists;
 import org.apache.commons.configuration2.SubsetConfiguration;
 import org.apache.hadoop.metrics2.AbstractMetric;
 import org.apache.hadoop.metrics2.MetricType;
@@ -159,7 +159,7 @@ public class TestKafkaMetrics {
     String date = dateFormat.format(currDate);
     SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm:ss");
     String time = timeFormat.format(currDate);
-    String hostname = new String("null");
+    String hostname = "null";
     try {
       hostname = InetAddress.getLocalHost().getHostName();
     } catch (Exception e) {

@@ -29,7 +29,8 @@ import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.HadoopIllegalArgumentException;
@@ -111,21 +112,39 @@ public class DFSZKFailoverController extends ZKFailoverController {
   @Override
   protected InetSocketAddress getRpcAddressToBindTo() {
     int zkfcPort = getZkfcPort(conf);
-    return new InetSocketAddress(localTarget.getAddress().getAddress(),
-          zkfcPort);
+    String zkfcBindAddr = getZkfcServerBindHost(conf);
+    if (zkfcBindAddr == null || zkfcBindAddr.isEmpty()) {
+      zkfcBindAddr = localTarget.getAddress().getAddress().getHostAddress();
+    }
+    return new InetSocketAddress(zkfcBindAddr, zkfcPort);
   }
-  
 
   @Override
   protected PolicyProvider getPolicyProvider() {
     return new HDFSPolicyProvider();
   }
-  
+
   static int getZkfcPort(Configuration conf) {
     return conf.getInt(DFSConfigKeys.DFS_HA_ZKFC_PORT_KEY,
         DFSConfigKeys.DFS_HA_ZKFC_PORT_DEFAULT);
   }
-  
+
+  /**
+   * Given a configuration get the bind host that could be used by ZKFC.
+   * We derive it from NN service rpc bind host or NN rpc bind host.
+   *
+   * @param conf input configuration
+   * @return the bind host address found in conf
+   */
+  private static String getZkfcServerBindHost(Configuration conf) {
+    String addr = conf.getTrimmed(
+        DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_BIND_HOST_KEY);
+    if (addr == null || addr.isEmpty()) {
+      addr = conf.getTrimmed(DFSConfigKeys.DFS_NAMENODE_RPC_BIND_HOST_KEY);
+    }
+    return addr;
+  }
+
   public static DFSZKFailoverController create(Configuration conf) {
     Configuration localNNConf = DFSHAAdmin.addSecurityConfiguration(conf);
     String nsId = DFSUtil.getNamenodeNameServiceId(conf);
@@ -275,5 +294,12 @@ public class DFSZKFailoverController extends ZKFailoverController {
       targets.add(new NNHAServiceTarget(conf, nsId, nnId));
     }
     return targets;
+  }
+
+  @Override
+  protected boolean isSSLEnabled() {
+    return conf.getBoolean(CommonConfigurationKeys.ZK_CLIENT_SSL_ENABLED,
+        conf.getBoolean(DFSConfigKeys.ZK_CLIENT_SSL_ENABLED,
+            DFSConfigKeys.DEFAULT_ZK_CLIENT_SSL_ENABLED));
   }
 }

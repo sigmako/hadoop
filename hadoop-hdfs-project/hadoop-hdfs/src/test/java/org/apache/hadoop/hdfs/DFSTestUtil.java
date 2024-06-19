@@ -45,8 +45,6 @@ import java.io.InputStream;
 import java.io.InterruptedIOException;
 import java.io.PrintStream;
 import java.io.RandomAccessFile;
-import java.lang.reflect.Field;
-import java.lang.reflect.Modifier;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -55,6 +53,7 @@ import java.net.URI;
 import java.net.URL;
 import java.net.URLConnection;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
@@ -72,16 +71,15 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeoutException;
 
-import com.google.common.base.Charsets;
-import com.google.common.base.Joiner;
-import com.google.common.base.Preconditions;
-import com.google.common.base.Strings;
-import com.google.common.base.Supplier;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
+import org.apache.hadoop.thirdparty.com.google.common.base.Joiner;
+import org.apache.hadoop.util.Preconditions;
+import org.apache.hadoop.thirdparty.com.google.common.base.Strings;
+import java.util.function.Supplier;
+import org.apache.hadoop.thirdparty.com.google.common.collect.Maps;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.hdfs.tools.DFSck;
+import org.apache.hadoop.util.Lists;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -131,7 +129,6 @@ import org.apache.hadoop.hdfs.protocol.SystemErasureCodingPolicies;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
-import org.apache.hadoop.hdfs.protocol.LayoutVersion;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.protocol.datatransfer.Sender;
@@ -147,12 +144,10 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
-import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
-import org.apache.hadoop.hdfs.server.datanode.DataNodeLayoutVersion;
 import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
 import org.apache.hadoop.hdfs.server.datanode.TestTransferRbw;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
@@ -195,12 +190,12 @@ import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.VersionInfo;
-import org.apache.log4j.Level;
 import org.junit.Assert;
 import org.junit.Assume;
 import org.apache.hadoop.util.ToolRunner;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.slf4j.event.Level;
 
 /** Utilities for HDFS tests */
 public class DFSTestUtil {
@@ -799,41 +794,48 @@ public class DFSTestUtil {
 
   /**
    * Wait for the given file to reach the given replication factor.
-   * @throws TimeoutException if we fail to sufficiently replicate the file
+   *
+   * @param fs the defined filesystem.
+   * @param fileName being written.
+   * @param replFactor desired replication
+   * @throws IOException getting block locations
+   * @throws InterruptedException during sleep
+   * @throws TimeoutException if 40 seconds passed before reaching the desired
+   *                          replication.
    */
-  public static void waitReplication(FileSystem fs, Path fileName, short replFactor)
+  public static void waitReplication(FileSystem fs, Path fileName,
+      short replFactor)
       throws IOException, InterruptedException, TimeoutException {
     boolean correctReplFactor;
-    final int ATTEMPTS = 40;
-    int count = 0;
-
+    int attempt = 0;
     do {
       correctReplFactor = true;
+      if (attempt++ > 0) {
+        Thread.sleep(1000);
+      }
       BlockLocation locs[] = fs.getFileBlockLocations(
-        fs.getFileStatus(fileName), 0, Long.MAX_VALUE);
-      count++;
-      for (int j = 0; j < locs.length; j++) {
-        String[] hostnames = locs[j].getNames();
+          fs.getFileStatus(fileName), 0, Long.MAX_VALUE);
+      for (int currLoc = 0; currLoc < locs.length; currLoc++) {
+        String[] hostnames = locs[currLoc].getNames();
         if (hostnames.length != replFactor) {
+          LOG.info(
+              "Block {} of file {} has replication factor {} "
+                  + "(desired {}); locations: {}",
+              currLoc, fileName, hostnames.length, replFactor,
+              Joiner.on(' ').join(hostnames));
           correctReplFactor = false;
-          System.out.println("Block " + j + " of file " + fileName
-              + " has replication factor " + hostnames.length
-              + " (desired " + replFactor + "); locations "
-              + Joiner.on(' ').join(hostnames));
-          Thread.sleep(1000);
           break;
         }
       }
-      if (correctReplFactor) {
-        System.out.println("All blocks of file " + fileName
-            + " verified to have replication factor " + replFactor);
-      }
-    } while (!correctReplFactor && count < ATTEMPTS);
+    } while (!correctReplFactor && attempt < 40);
 
-    if (count == ATTEMPTS) {
-      throw new TimeoutException("Timed out waiting for " + fileName +
-          " to reach " + replFactor + " replicas");
+    if (!correctReplFactor) {
+      throw new TimeoutException("Timed out waiting for file ["
+          + fileName + "] to reach [" + replFactor + "] replicas");
     }
+
+    LOG.info("All blocks of file {} verified to have replication factor {}",
+        fileName, replFactor);
   }
   
   /** delete directory and everything underneath it.*/
@@ -983,7 +985,7 @@ public class DFSTestUtil {
    * @return url content as string (UTF-8 encoding assumed)
    */
   public static String urlGet(URL url) throws IOException {
-    return new String(urlGetBytes(url), Charsets.UTF_8);
+    return new String(urlGetBytes(url), StandardCharsets.UTF_8);
   }
   
   /**
@@ -1122,7 +1124,7 @@ public class DFSTestUtil {
       return BlockOpResponseProto.parseDelimitedFrom(in);
     }
   }
-  
+
   public static void setFederatedConfiguration(MiniDFSCluster cluster,
       Configuration conf) {
     Set<String> nameservices = new HashSet<String>();
@@ -1436,7 +1438,7 @@ public class DFSTestUtil {
     Short permission = 0777;
     filesystem.setPermission(pathFileCreate, new FsPermission(permission));
     // OP_SET_OWNER 8
-    filesystem.setOwner(pathFileCreate, new String("newOwner"), null);
+    filesystem.setOwner(pathFileCreate, "newOwner", null);
     // OP_CLOSE 9 see above
     // OP_SET_GENSTAMP 10 see above
     // OP_SET_NS_QUOTA 11 obsolete
@@ -1874,6 +1876,33 @@ public class DFSTestUtil {
   }
 
   /**
+   * Helper function to delete a key in the Key Provider. Defaults
+   * to the first indexed NameNode's Key Provider.
+   *
+   * @param keyName The name of the key to create
+   * @param cluster The cluster to create it in
+   */
+  public static void deleteKey(String keyName, MiniDFSCluster cluster)
+      throws NoSuchAlgorithmException, IOException {
+    deleteKey(keyName, cluster, 0);
+  }
+
+  /**
+   * Helper function to delete a key in the Key Provider.
+   *
+   * @param keyName The name of the key to create
+   * @param cluster The cluster to create it in
+   * @param idx The NameNode index
+   */
+  public static void deleteKey(String keyName, MiniDFSCluster cluster, int idx)
+      throws NoSuchAlgorithmException, IOException {
+    NameNode nn = cluster.getNameNode(idx);
+    KeyProvider provider = nn.getNamesystem().getProvider();
+    provider.deleteKey(keyName);
+    provider.flush();
+  }
+
+  /**
    * @return the node which is expected to run the recovery of the
    * given block, which is known to be under construction inside the
    * given NameNOde.
@@ -1953,39 +1982,6 @@ public class DFSTestUtil {
     FsShellRun(cmd, 0, null, conf);
   }
 
-  public static void addDataNodeLayoutVersion(final int lv, final String description)
-      throws NoSuchFieldException, IllegalAccessException {
-    Preconditions.checkState(lv < DataNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
-
-    // Override {@link DataNodeLayoutVersion#CURRENT_LAYOUT_VERSION} via reflection.
-    Field modifiersField = Field.class.getDeclaredField("modifiers");
-    modifiersField.setAccessible(true);
-    Field field = DataNodeLayoutVersion.class.getField("CURRENT_LAYOUT_VERSION");
-    field.setAccessible(true);
-    modifiersField.setInt(field, field.getModifiers() & ~Modifier.FINAL);
-    field.setInt(null, lv);
-
-    field = HdfsServerConstants.class.getField("DATANODE_LAYOUT_VERSION");
-    field.setAccessible(true);
-    modifiersField.setInt(field, field.getModifiers() & ~Modifier.FINAL);
-    field.setInt(null, lv);
-
-    // Inject the feature into the FEATURES map.
-    final LayoutVersion.FeatureInfo featureInfo =
-        new LayoutVersion.FeatureInfo(lv, lv + 1, description, false);
-    final LayoutVersion.LayoutFeature feature =
-        new LayoutVersion.LayoutFeature() {
-      @Override
-      public LayoutVersion.FeatureInfo getInfo() {
-        return featureInfo;
-      }
-    };
-
-    // Update the FEATURES map with the new layout version.
-    LayoutVersion.updateMap(DataNodeLayoutVersion.FEATURES,
-                            new LayoutVersion.LayoutFeature[] { feature });
-  }
-
   /**
    * Wait for datanode to reach alive or dead state for waitTime given in
    * milliseconds.
@@ -2022,15 +2018,6 @@ public class DFSTestUtil {
   }
 
   public static void setNameNodeLogLevel(Level level) {
-    GenericTestUtils.setLogLevel(FSNamesystem.LOG, level);
-    GenericTestUtils.setLogLevel(BlockManager.LOG, level);
-    GenericTestUtils.setLogLevel(LeaseManager.LOG, level);
-    GenericTestUtils.setLogLevel(NameNode.LOG, level);
-    GenericTestUtils.setLogLevel(NameNode.stateChangeLog, level);
-    GenericTestUtils.setLogLevel(NameNode.blockStateChangeLog, level);
-  }
-
-  public static void setNameNodeLogLevel(org.slf4j.event.Level level) {
     GenericTestUtils.setLogLevel(FSNamesystem.LOG, level);
     GenericTestUtils.setLogLevel(BlockManager.LOG, level);
     GenericTestUtils.setLogLevel(LeaseManager.LOG, level);

@@ -18,6 +18,8 @@
 
 package org.apache.hadoop.fs;
 
+import org.apache.hadoop.classification.InterfaceStability;
+
 /**
  * Common path capabilities.
  */
@@ -122,5 +124,67 @@ public final class CommonPathCapabilities {
    * Value: {@value}.
    */
   public static final String FS_XATTRS = "fs.capability.paths.xattrs";
+
+  /**
+   * Probe for support for {@link BatchListingOperations}.
+   */
+  @InterfaceStability.Unstable
+  public static final String FS_EXPERIMENTAL_BATCH_LISTING =
+      "fs.capability.batch.listing";
+
+  /**
+   * Does the store support multipart uploading?
+   * Value: {@value}.
+   */
+  public static final String FS_MULTIPART_UPLOADER =
+      "fs.capability.multipart.uploader";
+
+
+  /**
+   * Stream abort() capability implemented by {@link Abortable#abort()}.
+   * Value: {@value}.
+   */
+  public static final String ABORTABLE_STREAM =
+      "fs.capability.outputstream.abortable";
+
+  /**
+   * Does this FS support etags?
+   * That is: will FileStatus entries from listing/getFileStatus
+   * probes support EtagSource and return real values.
+   */
+  public static final String ETAGS_AVAILABLE =
+      "fs.capability.etags.available";
+
+  /**
+   * Are etags guaranteed to be preserved across rename() operations..
+   * FileSystems MUST NOT declare support for this feature
+   * unless this holds.
+   */
+  public static final String ETAGS_PRESERVED_IN_RENAME =
+      "fs.capability.etags.preserved.in.rename";
+
+  /**
+   * Does this Filesystem support lease recovery operations such as
+   * {@link LeaseRecoverable#recoverLease(Path)} and {@link LeaseRecoverable#isFileClosed(Path)}}?
+   * Value: {@value}.
+   */
+  public static final String LEASE_RECOVERABLE = "fs.capability.lease.recoverable";
+
+  /**
+   * Is this a store where parent directory listings are potentially inconsistent with
+   * direct list/getFileStatus calls?
+   * This can happen with Amazon S3 Express One Zone Storage when there are pending
+   * uploads under a path.
+   * Application code can use this flag to decide whether or not to treat
+   * FileNotFoundExceptions on treewalk as errors or something to downgrade.
+   * Value: {@value}.
+   */
+  public static final String DIRECTORY_LISTING_INCONSISTENT =
+      "fs.capability.directory.listing.inconsistent";
+
+  /**
+   * Capability string to probe for bulk delete: {@value}.
+   */
+  public static final String BULK_DELETE = "fs.capability.bulk.delete";
 
 }

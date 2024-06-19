@@ -61,6 +61,7 @@ public class TestReservedSpaceCalculator {
     checkReserved(StorageType.DISK, 10000, 900);
     checkReserved(StorageType.SSD, 10000, 900);
     checkReserved(StorageType.ARCHIVE, 10000, 900);
+    checkReserved(StorageType.NVDIMM, 10000, 900);
   }
 
   @Test
@@ -76,6 +77,10 @@ public class TestReservedSpaceCalculator {
     // Test SSD
     conf.setLong(DFS_DATANODE_DU_RESERVED_KEY + ".ssd", 750);
     checkReserved(StorageType.SSD, 1550, 750);
+
+    // Test NVDIMM
+    conf.setLong(DFS_DATANODE_DU_RESERVED_KEY + ".nvdimm", 300);
+    checkReserved(StorageType.NVDIMM, 1000, 300);
   }
 
   @Test
@@ -89,11 +94,13 @@ public class TestReservedSpaceCalculator {
     checkReserved(StorageType.DISK, 10000, 1000);
     checkReserved(StorageType.SSD, 10000, 1000);
     checkReserved(StorageType.ARCHIVE, 10000, 1000);
+    checkReserved(StorageType.NVDIMM, 10000, 1000);
 
     conf.setLong(DFS_DATANODE_DU_RESERVED_PERCENTAGE_KEY, 50);
     checkReserved(StorageType.DISK, 4000, 2000);
     checkReserved(StorageType.SSD, 4000, 2000);
     checkReserved(StorageType.ARCHIVE, 4000, 2000);
+    checkReserved(StorageType.NVDIMM, 4000, 2000);
   }
 
   @Test
@@ -109,6 +116,10 @@ public class TestReservedSpaceCalculator {
     // Test SSD
     conf.setLong(DFS_DATANODE_DU_RESERVED_PERCENTAGE_KEY + ".ssd", 50);
     checkReserved(StorageType.SSD, 8001, 4000);
+
+    // Test NVDIMM
+    conf.setLong(DFS_DATANODE_DU_RESERVED_PERCENTAGE_KEY + ".nvdimm", 30);
+    checkReserved(StorageType.NVDIMM, 1000, 300);
   }
 
   @Test
@@ -129,6 +140,12 @@ public class TestReservedSpaceCalculator {
     conf.setLong(DFS_DATANODE_DU_RESERVED_KEY + ".archive", 1300);
     conf.setLong(DFS_DATANODE_DU_RESERVED_PERCENTAGE_KEY + ".archive", 50);
     checkReserved(StorageType.ARCHIVE, 6200, 3100);
+
+    // Test NVDIMM + taking reserved space based on the percentage,
+    // as that gives more reserved space
+    conf.setLong(DFS_DATANODE_DU_RESERVED_KEY + ".nvdimm", 500);
+    conf.setLong(DFS_DATANODE_DU_RESERVED_PERCENTAGE_KEY + ".nvdimm", 20);
+    checkReserved(StorageType.NVDIMM, 3000, 600);
   }
 
   @Test
@@ -151,6 +168,55 @@ public class TestReservedSpaceCalculator {
     checkReserved(StorageType.ARCHIVE, 100000, 5000);
   }
 
+  @Test
+  public void testReservedSpaceAbsolutePerDir() {
+    conf.setClass(DFS_DATANODE_DU_RESERVED_CALCULATOR_KEY, ReservedSpaceCalculatorAbsolute.class,
+        ReservedSpaceCalculator.class);
+
+    String dir1 = "/data/hdfs1/data";
+    String dir2 = "/data/hdfs2/data";
+    String dir3 = "/data/hdfs3/data";
+
+    conf.setLong(DFS_DATANODE_DU_RESERVED_KEY + "." + dir1 + ".ssd", 900);
+    conf.setLong(DFS_DATANODE_DU_RESERVED_KEY + "." + dir1, 1800);
+    conf.setLong(DFS_DATANODE_DU_RESERVED_KEY + "." + dir2, 2700);
+    conf.setLong(DFS_DATANODE_DU_RESERVED_KEY + ".ssd", 3600);
+    conf.setLong(DFS_DATANODE_DU_RESERVED_KEY, 4500);
+
+    checkReserved(StorageType.SSD, 10000, 900, dir1);
+    checkReserved(StorageType.DISK, 10000, 1800, dir1);
+    checkReserved(StorageType.SSD, 10000, 2700, dir2);
+    checkReserved(StorageType.DISK, 10000, 2700, dir2);
+    checkReserved(StorageType.SSD, 10000, 3600, dir3);
+    checkReserved(StorageType.DISK, 10000, 4500, dir3);
+  }
+
+  @Test
+  public void testReservedSpacePercentagePerDir() {
+    conf.setClass(DFS_DATANODE_DU_RESERVED_CALCULATOR_KEY,
+            ReservedSpaceCalculatorPercentage.class,
+            ReservedSpaceCalculator.class);
+
+    String dir1 = "/data/hdfs1/data";
+    String dir2 = "/data/hdfs2/data";
+    String dir3 = "/data/hdfs3/data";
+
+    // Set percentage reserved values for different directories
+    conf.setLong(DFS_DATANODE_DU_RESERVED_PERCENTAGE_KEY + "." + dir1 + ".ssd", 20);
+    conf.setLong(DFS_DATANODE_DU_RESERVED_PERCENTAGE_KEY + "." + dir1, 10);
+    conf.setLong(DFS_DATANODE_DU_RESERVED_PERCENTAGE_KEY + "." + dir2, 25);
+    conf.setLong(DFS_DATANODE_DU_RESERVED_PERCENTAGE_KEY + ".ssd", 30);
+    conf.setLong(DFS_DATANODE_DU_RESERVED_PERCENTAGE_KEY, 40);
+
+    // Verify reserved space calculations for different directories and storage types
+    checkReserved(StorageType.SSD, 10000, 2000, dir1);
+    checkReserved(StorageType.DISK, 10000, 1000, dir1);
+    checkReserved(StorageType.SSD, 10000, 2500, dir2);
+    checkReserved(StorageType.DISK, 10000, 2500, dir2);
+    checkReserved(StorageType.SSD, 10000, 3000, dir3);
+    checkReserved(StorageType.DISK, 10000, 4000, dir3);
+  }
+
   @Test(expected = IllegalStateException.class)
   public void testInvalidCalculator() {
     conf.set(DFS_DATANODE_DU_RESERVED_CALCULATOR_KEY, "INVALIDTYPE");
@@ -162,10 +228,15 @@ public class TestReservedSpaceCalculator {
 
   private void checkReserved(StorageType storageType,
       long totalCapacity, long reservedExpected) {
+    checkReserved(storageType, totalCapacity, reservedExpected, "NULL");
+  }
+
+  private void checkReserved(StorageType storageType,
+      long totalCapacity, long reservedExpected, String dir) {
     when(usage.getCapacity()).thenReturn(totalCapacity);
 
     reserved = new ReservedSpaceCalculator.Builder(conf).setUsage(usage)
-        .setStorageType(storageType).build();
+        .setStorageType(storageType).setDir(dir).build();
     assertEquals(reservedExpected, reserved.getReserved());
   }
 }

@@ -18,7 +18,7 @@
 
 package org.apache.hadoop.yarn.util.resource;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
@@ -115,8 +115,7 @@ public class ResourceUtils {
      * Supporting 'memory', 'memory-mb', 'vcores' also as invalid resource
      * names, in addition to 'MEMORY' for historical reasons
      */
-    String[] keys = { "memory", ResourceInformation.MEMORY_URI,
-        ResourceInformation.VCORES_URI };
+    String[] keys = {"memory", ResourceInformation.MEMORY_URI, ResourceInformation.VCORES_URI};
     for(String key : keys) {
       if (resourceInformationMap.containsKey(key)) {
         LOG.warn("Attempt to define resource '" + key + "', but it is not allowed.");
@@ -234,7 +233,8 @@ public class ResourceUtils {
   }
 
   /**
-   * Get maximum allocation from config, *THIS WILL NOT UPDATE INTERNAL DATA*
+   * Get maximum allocation from config, *THIS WILL NOT UPDATE INTERNAL DATA.
+   *
    * @param conf config
    * @return maximum allocation
    */
@@ -251,7 +251,8 @@ public class ResourceUtils {
   private static Map<String, ResourceInformation> getResourceInformationMapFromConfig(
       Configuration conf) {
     Map<String, ResourceInformation> resourceInformationMap = new HashMap<>();
-    String[] resourceNames = conf.getStrings(YarnConfiguration.RESOURCE_TYPES);
+    String[] resourceNames =
+        conf.getTrimmedStrings(YarnConfiguration.RESOURCE_TYPES);
 
     if (resourceNames != null && resourceNames.length != 0) {
       for (String resourceName : resourceNames) {
@@ -378,7 +379,7 @@ public class ResourceUtils {
 
   /**
    * Get the resource types to be supported by the system.
-   * @return A map of the resource name to a ResouceInformation object
+   * @return A map of the resource name to a ResourceInformation object
    *         which contains details such as the unit.
    */
   public static Map<String, ResourceInformation> getResourceTypes() {
@@ -472,10 +473,10 @@ public class ResourceUtils {
       LOG.debug("Found {}, adding to configuration", resourceFile);
       conf.addResource(ris);
     } catch (FileNotFoundException fe) {
-      LOG.info("Unable to find '" + resourceFile + "'.");
+      LOG.info("Unable to find '{}'.", resourceFile);
     } catch (IOException | YarnException ex) {
-      LOG.error("Exception trying to read resource types configuration '"
-          + resourceFile + "'.", ex);
+      LOG.error("Exception trying to read resource types configuration '{}'.",
+          resourceFile, ex);
       throw new YarnRuntimeException(ex);
     }
   }
@@ -667,7 +668,7 @@ public class ResourceUtils {
   /**
    * Reinitialize all resource types from external source (in case of client,
    * server will send the updated list and local resourceutils cache will be
-   * updated as per server's list of resources)
+   * updated as per server's list of resources).
    *
    * @param resourceTypeInfo
    *          List of resource types
@@ -817,6 +818,28 @@ public class ResourceUtils {
     return res;
   }
 
+  public static Resource multiplyFloor(Resource resource, double multiplier) {
+    Resource newResource = Resource.newInstance(0, 0);
+
+    for (ResourceInformation resourceInformation : resource.getResources()) {
+      newResource.setResourceValue(resourceInformation.getName(),
+          (long) Math.floor(resourceInformation.getValue() * multiplier));
+    }
+
+    return newResource;
+  }
+
+  public static Resource multiplyRound(Resource resource, double multiplier) {
+    Resource newResource = Resource.newInstance(0, 0);
+
+    for (ResourceInformation resourceInformation : resource.getResources()) {
+      newResource.setResourceValue(resourceInformation.getName(),
+          Math.round(resourceInformation.getValue() * multiplier));
+    }
+
+    return newResource;
+  }
+
   @InterfaceAudience.Private
   @InterfaceStability.Unstable
   public static Resource createResourceFromString(
@@ -856,6 +879,7 @@ public class ResourceUtils {
         units = "Gi";
       } else if (units.isEmpty()) {
         // do nothing;
+        LOG.debug("units is empty.");
       } else {
         throw new IllegalArgumentException("Acceptable units are M/G or empty");
       }
@@ -900,5 +924,20 @@ public class ResourceUtils {
                 "Unknown resource: " + resourceName);
       }
     }
+  }
+
+  public static StringBuilder
+      getCustomResourcesStrings(Resource resource) {
+    StringBuilder res = new StringBuilder();
+    if (ResourceUtils.getNumberOfKnownResourceTypes() > 2) {
+      ResourceInformation[] resources =
+          resource.getResources();
+      for (int i = 2; i < resources.length; i++) {
+        ResourceInformation resInfo = resources[i];
+        res.append(","
+            + resInfo.getName() + "=" + resInfo.getValue());
+      }
+    }
+    return  res;
   }
 }

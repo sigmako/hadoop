@@ -17,13 +17,12 @@
  */
 package org.apache.hadoop.yarn.api.resource;
 
-import com.google.common.collect.Sets;
-
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 
+import org.apache.hadoop.util.Sets;
 import org.apache.hadoop.yarn.api.records.NodeAttributeOpCode;
 import org.apache.hadoop.yarn.api.resource.PlacementConstraint.AbstractConstraint;
 import org.apache.hadoop.yarn.api.resource.PlacementConstraint.And;
@@ -568,6 +567,18 @@ class TestPlacementConstraintParser {
       fail("Expected a failure!");
     } catch (Exception e) {
       assertTrue(e instanceof PlacementConstraintParseException);
+    }
+  }
+
+  @Test
+  public void testParseIllegalExprShouldThrowException() {
+    // A single node attribute constraint w/o source tags, it should fail when multiple
+    // attribute kvs are specified.
+    try {
+      PlacementConstraintParser.parseExpression("rm.yarn.io/foo=true,rm.yarn.io/bar=true");
+      fail("Expected a failure!");
+    } catch (PlacementConstraintParseException e) {
+      // ignore
     }
   }
 

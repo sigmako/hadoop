@@ -41,7 +41,11 @@ public abstract class RpcWritable implements Writable {
     if (o instanceof RpcWritable) {
       return (RpcWritable)o;
     } else if (o instanceof Message) {
+      // hadoop shaded protobuf
       return new ProtobufWrapper((Message)o);
+    } else if (ProtobufWrapperLegacy.isUnshadedProtobufMessage(o)) {
+      // unshaded protobuf
+      return new ProtobufWrapperLegacy(o);
     } else if (o instanceof Writable) {
       return new WritableWrapper((Writable)o);
     }

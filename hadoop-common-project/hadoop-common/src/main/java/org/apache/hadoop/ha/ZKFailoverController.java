@@ -31,11 +31,14 @@ import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.UnsupportedFileSystemException;
 import org.apache.hadoop.ha.ActiveStandbyElector.ActiveNotFoundException;
 import org.apache.hadoop.ha.ActiveStandbyElector.ActiveStandbyElectorCallback;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
 import org.apache.hadoop.ha.HAServiceProtocol.StateChangeRequestInfo;
 import org.apache.hadoop.ha.HAServiceProtocol.RequestSource;
+import org.apache.hadoop.security.ProviderUtils;
 import org.apache.hadoop.util.ZKUtil;
 import org.apache.hadoop.util.ZKUtil.ZKAuthInfo;
 import org.apache.hadoop.ha.HealthMonitor.State;
@@ -49,12 +52,14 @@ import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.ZooDefs.Ids;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.zookeeper.data.ACL;
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.apache.hadoop.util.Preconditions;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.hadoop.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import org.apache.hadoop.security.SecurityUtil.TruststoreKeystore;
 
 @InterfaceAudience.LimitedPrivate("HDFS")
 public abstract class ZKFailoverController {
@@ -144,12 +149,15 @@ public abstract class ZKFailoverController {
   protected abstract InetSocketAddress getRpcAddressToBindTo();
   protected abstract PolicyProvider getPolicyProvider();
   protected abstract List<HAServiceTarget> getAllOtherNodes();
+  protected abstract boolean isSSLEnabled();
 
   /**
    * Return the name of a znode inside the configured parent znode in which
    * the ZKFC will do all of its work. This is so that multiple federated
    * nameservices can run on the same ZK quorum without having to manually
    * configure them to separate subdirectories.
+   *
+   * @return ScopeInsideParentNode.
    */
   protected abstract String getScopeInsideParentNode();
 
@@ -318,9 +326,10 @@ public abstract class ZKFailoverController {
     healthMonitor.addServiceStateCallback(new ServiceStateCallBacks());
     healthMonitor.start();
   }
-  
+
   protected void initRPC() throws IOException {
     InetSocketAddress bindAddr = getRpcAddressToBindTo();
+    LOG.info("ZKFC RpcServer binding to {}", bindAddr);
     rpcServer = new ZKFCRpcServer(conf, bindAddr, this, getPolicyProvider());
   }
 
@@ -342,8 +351,19 @@ public abstract class ZKFailoverController {
       zkAcls = Ids.CREATOR_ALL_ACL;
     }
     
-    // Parse authentication from configuration.
-    List<ZKAuthInfo> zkAuths = SecurityUtil.getZKAuthInfos(conf, ZK_AUTH_KEY);
+    // Parse authentication from configuration. Exclude any Credential providers
+    // using the hdfs scheme to avoid a circular dependency. As HDFS is likely
+    // not started when ZKFC is started, we cannot read the credentials from it.
+    Configuration c = conf;
+    try {
+      c = ProviderUtils.excludeIncompatibleCredentialProviders(
+          conf, FileSystem.getFileSystemClass("hdfs", conf));
+    } catch (UnsupportedFileSystemException e) {
+      // Should not happen in a real cluster, as the hdfs FS will always be
+      // present. Inside tests, the hdfs filesystem will not be present
+      LOG.debug("No filesystem found for the hdfs scheme", e);
+    }
+    List<ZKAuthInfo> zkAuths = SecurityUtil.getZKAuthInfos(c, ZK_AUTH_KEY);
 
     // Sanity check configuration.
     Preconditions.checkArgument(zkQuorum != null,
@@ -355,9 +375,10 @@ public abstract class ZKFailoverController {
     int maxRetryNum = conf.getInt(
         CommonConfigurationKeys.HA_FC_ELECTOR_ZK_OP_RETRIES_KEY,
         CommonConfigurationKeys.HA_FC_ELECTOR_ZK_OP_RETRIES_DEFAULT);
+    TruststoreKeystore truststoreKeystore = isSSLEnabled() ? new TruststoreKeystore(conf) : null;
     elector = new ActiveStandbyElector(zkQuorum,
         zkTimeout, getParentZnode(), zkAcls, zkAuths,
-        new ElectorCallbacks(), maxRetryNum);
+        new ElectorCallbacks(), maxRetryNum, truststoreKeystore);
   }
   
   private String getParentZnode() {
@@ -639,6 +660,7 @@ public abstract class ZKFailoverController {
   private void doGracefulFailover()
       throws ServiceFailedException, IOException, InterruptedException {
     int timeout = FailoverController.getGracefulFenceTimeout(conf) * 2;
+    Preconditions.checkArgument(timeout >= 0, "timeout should be non-negative.");
     
     // Phase 1: pre-flight checks
     checkEligibleForFailover();

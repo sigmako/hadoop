@@ -38,6 +38,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
@@ -85,8 +86,7 @@ import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
-import com.google.common.base.Charsets;
-import com.google.common.collect.ImmutableSet;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ImmutableSet;
 
 public class TestRMAdminCLI {
 
@@ -703,7 +703,7 @@ public class TestRMAdminCLI {
               "<\"label1(exclusive=true),label2(exclusive=false),label3\">] " +
               "[-removeFromClusterNodeLabels <label1,label2,label3>] " +
               "[-replaceLabelsOnNode " +
-              "<\"node1[:port]=label1,label2 node2[:port]=label1\"> " +
+              "<\"node1[:port]=label1 node2[:port]=label2\"> " +
               "[-failOnUnknownNodes]] " +
               "[-directlyAccessNodeLabelStore] [-refreshClusterMaxPriority] " +
               "[-updateNodeResource [NodeID] [MemSize] [vCores] "
@@ -795,7 +795,7 @@ public class TestRMAdminCLI {
               + " [username]] [-addToClusterNodeLabels <\"label1(exclusive=true),"
                   + "label2(exclusive=false),label3\">]"
               + " [-removeFromClusterNodeLabels <label1,label2,label3>] [-replaceLabelsOnNode "
-              + "<\"node1[:port]=label1,label2 node2[:port]=label1\"> "
+              + "<\"node1[:port]=label1 node2[:port]=label2\"> "
               + "[-failOnUnknownNodes]] [-directlyAccessNodeLabelStore] "
               + "[-refreshClusterMaxPriority] "
               + "[-updateNodeResource [NodeID] [MemSize] [vCores] "
@@ -1061,7 +1061,7 @@ public class TestRMAdminCLI {
     try {
       String[] args = {"-transitionToActive"};
       assertEquals(-1, rmAdminCLIWithHAEnabled.run(args));
-      String errOut = new String(errOutBytes.toByteArray(), Charsets.UTF_8);
+      String errOut = new String(errOutBytes.toByteArray(), StandardCharsets.UTF_8);
       errOutBytes.reset();
       assertTrue(errOut.contains("Usage: rmadmin"));
     } finally {
@@ -1098,5 +1098,28 @@ public class TestRMAdminCLI {
     errOut = dataErr.toString();
     assertFalse(errOut.contains("-failover"));
     dataErr.reset();
+  }
+
+  @Test
+  public void testParseSubClusterId() throws Exception {
+    rmAdminCLI.getConf().setBoolean(YarnConfiguration.FEDERATION_ENABLED, true);
+
+    // replaceLabelsOnNode
+    String[] replaceLabelsOnNodeArgs = {"-replaceLabelsOnNode",
+        "node1:8000,x node2:8000=y node3,x node4=Y", "-subClusterId", "SC-1"};
+    assertEquals(0, rmAdminCLI.run(replaceLabelsOnNodeArgs));
+
+    String[] refreshQueuesArgs = {"-refreshQueues", "-subClusterId", "SC-1"};
+    assertEquals(0, rmAdminCLI.run(refreshQueuesArgs));
+
+    String[] refreshNodesResourcesArgs = {"-refreshNodesResources", "-subClusterId", "SC-1"};
+    assertEquals(0, rmAdminCLI.run(refreshNodesResourcesArgs));
+
+    String nodeIdStr = "0.0.0.0:0";
+    String resourceTypes = "memory-mb=1024Mi,vcores=1,resource2";
+    String[] updateNodeResourceArgs = {"-updateNodeResource", nodeIdStr,
+        resourceTypes, "-subClusterId", "SC-1"};
+    rmAdminCLI.parseSubClusterId(updateNodeResourceArgs, false);
+    assertEquals(-1, rmAdminCLI.run(updateNodeResourceArgs));
   }
 }

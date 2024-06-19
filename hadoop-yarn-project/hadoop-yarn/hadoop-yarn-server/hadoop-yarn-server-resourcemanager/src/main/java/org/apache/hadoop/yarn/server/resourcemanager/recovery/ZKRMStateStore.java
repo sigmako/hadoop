@@ -18,7 +18,9 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.recovery;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.apache.hadoop.yarn.util.Clock;
+import org.apache.hadoop.yarn.util.SystemClock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.curator.framework.CuratorFramework;
@@ -234,6 +236,10 @@ public class ZKRMStateStore extends RMStateStore {
   /** Manager for the ZooKeeper connection. */
   private ZKCuratorManager zkManager;
 
+  private volatile Clock clock = SystemClock.getInstance();
+  @VisibleForTesting
+  protected ZKRMStateStoreOpDurations opDurations;
+
   /*
    * Indicates different app attempt state store operations.
    */
@@ -328,6 +334,8 @@ public class ZKRMStateStore extends RMStateStore {
                   YarnConfiguration.DEFAULT_ZK_APPID_NODE_SPLIT_INDEX);
       appIdNodeSplitIndex = YarnConfiguration.DEFAULT_ZK_APPID_NODE_SPLIT_INDEX;
     }
+
+    opDurations = ZKRMStateStoreOpDurations.getInstance();
 
     zkAcl = ZKCuratorManager.getZKAcls(conf);
 
@@ -518,6 +526,7 @@ public class ZKRMStateStore extends RMStateStore {
 
   @Override
   public synchronized RMState loadState() throws Exception {
+    long start = clock.getTime();
     RMState rmState = new RMState();
     // recover DelegationTokenSecretManager
     loadRMDTSecretManagerState(rmState);
@@ -529,6 +538,7 @@ public class ZKRMStateStore extends RMStateStore {
     loadReservationSystemState(rmState);
     // recover ProxyCAManager state
     loadProxyCAManagerState(rmState);
+    opDurations.addLoadStateCallDuration(clock.getTime() - start);
     return rmState;
   }
 
@@ -834,6 +844,7 @@ public class ZKRMStateStore extends RMStateStore {
   @Override
   public synchronized void storeApplicationStateInternal(ApplicationId appId,
       ApplicationStateData appStateDataPB) throws Exception {
+    long start = clock.getTime();
     String nodeCreatePath = getLeafAppIdNodePath(appId.toString(), true);
 
     LOG.debug("Storing info for app: {} at: {}", appId, nodeCreatePath);
@@ -850,12 +861,14 @@ public class ZKRMStateStore extends RMStateStore {
           + " exceeds the maximum allowed size for application data. "
           + "See yarn.resourcemanager.zk-max-znode-size.bytes.");
     }
+    opDurations.addStoreApplicationStateCallDuration(clock.getTime() - start);
   }
 
   @Override
   protected synchronized void updateApplicationStateInternal(
       ApplicationId appId, ApplicationStateData appStateDataPB)
       throws Exception {
+    long start = clock.getTime();
     String nodeUpdatePath = getLeafAppIdNodePath(appId.toString(), false);
     boolean pathExists = true;
     // Look for paths based on other split indices if path as per split index
@@ -892,6 +905,7 @@ public class ZKRMStateStore extends RMStateStore {
       LOG.debug("Path {} for {} didn't exist. Creating a new znode to update"
           + " the application state.", nodeUpdatePath, appId);
     }
+    opDurations.addUpdateApplicationStateCallDuration(clock.getTime() - start);
   }
 
   /*
@@ -942,7 +956,7 @@ public class ZKRMStateStore extends RMStateStore {
           zkAcl, fencingNodePath);
       break;
     case REMOVE:
-      zkManager.safeDelete(path, zkAcl, fencingNodePath);
+      safeDeleteAndCheckNode(path, zkAcl, fencingNodePath);
       break;
     default:
       break;
@@ -976,8 +990,10 @@ public class ZKRMStateStore extends RMStateStore {
   @Override
   protected synchronized void removeApplicationStateInternal(
       ApplicationStateData appState) throws Exception {
+    long start = clock.getTime();
     removeApp(appState.getApplicationSubmissionContext().
         getApplicationId().toString(), true, appState.attempts.keySet());
+    opDurations.addRemoveApplicationStateCallDuration(clock.getTime() - start);
   }
 
   private void removeApp(String removeAppId) throws Exception {
@@ -1019,10 +1035,10 @@ public class ZKRMStateStore extends RMStateStore {
         for (ApplicationAttemptId attemptId : attempts) {
           String attemptRemovePath =
               getNodePath(appIdRemovePath, attemptId.toString());
-          zkManager.safeDelete(attemptRemovePath, zkAcl, fencingNodePath);
+          safeDeleteAndCheckNode(attemptRemovePath, zkAcl, fencingNodePath);
         }
       }
-      zkManager.safeDelete(appIdRemovePath, zkAcl, fencingNodePath);
+      safeDeleteAndCheckNode(appIdRemovePath, zkAcl, fencingNodePath);
     } else {
       CuratorFramework curatorFramework = zkManager.getCurator();
       curatorFramework.delete().deletingChildrenIfNeeded().
@@ -1083,7 +1099,7 @@ public class ZKRMStateStore extends RMStateStore {
     LOG.debug("Removing RMDelegationToken_{}",
         rmDTIdentifier.getSequenceNumber());
 
-    zkManager.safeDelete(nodeRemovePath, zkAcl, fencingNodePath);
+    safeDeleteAndCheckNode(nodeRemovePath, zkAcl, fencingNodePath);
 
     // Check if we should remove the parent app node as well.
     checkRemoveParentZnode(nodeRemovePath, splitIndex);
@@ -1144,7 +1160,7 @@ public class ZKRMStateStore extends RMStateStore {
 
     LOG.debug("Removing RMDelegationKey_{}", delegationKey.getKeyId());
 
-    zkManager.safeDelete(nodeRemovePath, zkAcl, fencingNodePath);
+    safeDeleteAndCheckNode(nodeRemovePath, zkAcl, fencingNodePath);
   }
 
   @Override
@@ -1184,12 +1200,12 @@ public class ZKRMStateStore extends RMStateStore {
     LOG.debug("Removing reservationallocation {} for plan {}",
         reservationIdName, planName);
 
-    zkManager.safeDelete(reservationPath, zkAcl, fencingNodePath);
+    safeDeleteAndCheckNode(reservationPath, zkAcl, fencingNodePath);
 
     List<String> reservationNodes = getChildren(planNodePath);
 
     if (reservationNodes.isEmpty()) {
-      zkManager.safeDelete(planNodePath, zkAcl, fencingNodePath);
+      safeDeleteAndCheckNode(planNodePath, zkAcl, fencingNodePath);
     }
   }
 
@@ -1423,6 +1439,29 @@ public class ZKRMStateStore extends RMStateStore {
   @VisibleForTesting
   void delete(final String path) throws Exception {
     zkManager.delete(path);
+  }
+
+  /**
+   * Deletes the path more safe.
+   * When NoNodeException is encountered, if the node does not exist,
+   * it will ignore this exception to avoid triggering
+   * a greater impact of ResourceManager failover on the cluster.
+   * @param path Path to be deleted.
+   * @param fencingACL fencingACL.
+   * @param fencingPath fencingNodePath.
+   * @throws Exception if any problem occurs while performing deletion.
+   */
+  public void safeDeleteAndCheckNode(String path, List<ACL> fencingACL,
+      String fencingPath) throws Exception {
+    try{
+      zkManager.safeDelete(path, fencingACL, fencingPath);
+    } catch (KeeperException.NoNodeException nne) {
+      if(!exists(path)){
+        LOG.info("Node " + path + " doesn't exist to delete");
+      } else {
+        throw new KeeperException.NodeExistsException("Node " + path + " should not exist");
+      }
+    }
   }
 
   /**

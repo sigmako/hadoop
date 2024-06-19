@@ -36,11 +36,10 @@ import org.apache.hadoop.hdfs.server.namenode.FSImageStorageInspector.FSImageFil
 import org.apache.hadoop.hdfs.server.namenode.FileJournalManager.EditLogFile;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
 import org.apache.hadoop.hdfs.util.MD5FileUtils;
+import org.apache.hadoop.util.Lists;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ComparisonChain;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
+import org.apache.hadoop.util.Preconditions;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ComparisonChain;
 
 /**
  * The NNStorageRetentionManager is responsible for inspecting the storage
@@ -80,6 +79,9 @@ public class NNStorageRetentionManager {
         "Must retain at least one checkpoint");
     Preconditions.checkArgument(numExtraEditsToRetain >= 0,
         DFSConfigKeys.DFS_NAMENODE_NUM_EXTRA_EDITS_RETAINED_KEY +
+        " must not be negative");
+    Preconditions.checkArgument(maxExtraEditsSegmentsToRetain >= 0,
+        DFSConfigKeys.DFS_NAMENODE_MAX_EXTRA_EDITS_SEGMENTS_RETAINED_KEY +
         " must not be negative");
     
     this.storage = storage;
@@ -192,7 +194,7 @@ public class NNStorageRetentionManager {
       return 0L;
     }
 
-    TreeSet<Long> imageTxIds = Sets.newTreeSet(Collections.reverseOrder());
+    TreeSet<Long> imageTxIds = new TreeSet<>(Collections.reverseOrder());
     for (FSImageFile image : images) {
       imageTxIds.add(image.getCheckpointTxId());
     }

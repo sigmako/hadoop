@@ -41,6 +41,8 @@ import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.util.Progressable;
 
+import static org.apache.hadoop.fs.impl.PathCapabilitiesSupport.validatePathCapabilityArgs;
+
 /****************************************************************
  * A <code>FilterFileSystem</code> contains
  * some other file system, which it uses as
@@ -231,7 +233,7 @@ public class FilterFileSystem extends FileSystem {
    * 
    * @param src file name
    * @param replication new replication
-   * @throws IOException
+   * @throws IOException raised on errors performing I/O.
    * @return true if successful;
    *         false if file does not exist or is a directory
    */
@@ -302,7 +304,7 @@ public class FilterFileSystem extends FileSystem {
    * Set the current working directory for the given file system. All relative
    * paths will be resolved relative to it.
    * 
-   * @param newDir
+   * @param newDir new dir.
    */
   @Override
   public void setWorkingDirectory(Path newDir) {
@@ -458,6 +460,11 @@ public class FilterFileSystem extends FileSystem {
   @Override
   public FileStatus getFileStatus(Path f) throws IOException {
     return fs.getFileStatus(f);
+  }
+
+  @Override
+  public void msync() throws IOException, UnsupportedOperationException {
+    fs.msync();
   }
 
   @Override
@@ -726,9 +733,23 @@ public class FilterFileSystem extends FileSystem {
   }
 
   @Override
+  public Path getEnclosingRoot(Path path) throws IOException {
+    return fs.getEnclosingRoot(path);
+  }
+
+  @Override
   public boolean hasPathCapability(final Path path, final String capability)
       throws IOException {
-    return fs.hasPathCapability(path, capability);
+    switch (validatePathCapabilityArgs(makeQualified(path), capability)) {
+    case CommonPathCapabilities.FS_MULTIPART_UPLOADER:
+    case CommonPathCapabilities.FS_EXPERIMENTAL_BATCH_LISTING:
+      // operations known to be unsupported, irrespective of what
+      // the wrapped class implements.
+      return false;
+    default:
+      // the feature is not implemented.
+      return fs.hasPathCapability(path, capability);
+    }
   }
 
 }

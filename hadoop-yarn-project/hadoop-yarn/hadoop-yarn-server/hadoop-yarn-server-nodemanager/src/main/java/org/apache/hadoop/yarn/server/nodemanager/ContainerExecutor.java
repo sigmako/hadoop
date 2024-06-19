@@ -24,7 +24,7 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -39,7 +39,7 @@ import org.apache.hadoop.hdfs.protocol.datatransfer.IOStreamPair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
@@ -100,6 +100,9 @@ public abstract class ContainerExecutor implements Configurable {
       new ConcurrentHashMap<>();
   private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
   private String[] whitelistVars;
+  private int exitCodeFileTimeout =
+      YarnConfiguration.DEFAULT_NM_CONTAINER_EXECUTOR_EXIT_FILE_TIMEOUT;
+  private int containerExitCode;
 
   @Override
   public void setConf(Configuration conf) {
@@ -107,6 +110,9 @@ public abstract class ContainerExecutor implements Configurable {
     if (conf != null) {
       whitelistVars = conf.get(YarnConfiguration.NM_ENV_WHITELIST,
           YarnConfiguration.DEFAULT_NM_ENV_WHITELIST).split(",");
+      exitCodeFileTimeout = conf.getInt(
+          YarnConfiguration.NM_CONTAINER_EXECUTOR_EXIT_FILE_TIMEOUT,
+          YarnConfiguration.DEFAULT_NM_CONTAINER_EXECUTOR_EXIT_FILE_TIMEOUT);
     }
   }
 
@@ -298,7 +304,7 @@ public abstract class ContainerExecutor implements Configurable {
 
     if (pidPath == null) {
       LOG.warn("{} is not active, returning terminated error", containerId);
-
+      containerExitCode = ExitCode.TERMINATED.getExitCode();
       return ExitCode.TERMINATED.getExitCode();
     }
 
@@ -323,14 +329,14 @@ public abstract class ContainerExecutor implements Configurable {
 
     // wait for exit code file to appear
     final int sleepMsec = 100;
-    int msecLeft = 2000;
+    int msecLeft = this.exitCodeFileTimeout;
     String exitCodeFile = ContainerLaunch.getExitCodeFile(pidPath.toString());
     File file = new File(exitCodeFile);
 
     while (!file.exists() && msecLeft >= 0) {
       if (!isContainerActive(containerId)) {
         LOG.info("{} was deactivated", containerId);
-
+        containerExitCode = ExitCode.TERMINATED.getExitCode();
         return ExitCode.TERMINATED.getExitCode();
       }
 
@@ -345,8 +351,9 @@ public abstract class ContainerExecutor implements Configurable {
     }
 
     try {
-      return Integer.parseInt(
-          FileUtils.readFileToString(file, Charset.defaultCharset()).trim());
+      containerExitCode = Integer.parseInt(
+          FileUtils.readFileToString(file, StandardCharsets.UTF_8).trim());
+      return containerExitCode;
     } catch (NumberFormatException e) {
       throw new IOException("Error parsing exit code from pid " + pid, e);
     }
@@ -449,9 +456,7 @@ public abstract class ContainerExecutor implements Configurable {
     }
 
     // dump debugging information if configured
-    if (getConf() != null &&
-        getConf().getBoolean(YarnConfiguration.NM_LOG_CONTAINER_DEBUG_INFO,
-        YarnConfiguration.DEFAULT_NM_LOG_CONTAINER_DEBUG_INFO)) {
+    if (shouldWriteDebugInformation(getConf())) {
       sb.echo("Copying debugging information");
       sb.copyDebugInformation(new Path(outFilename),
           new Path(logDir, outFilename));
@@ -482,6 +487,18 @@ public abstract class ContainerExecutor implements Configurable {
    */
   protected File[] readDirAsUser(String user, Path dir) {
     return new File(dir.toString()).listFiles();
+  }
+
+  private boolean shouldWriteDebugInformation(Configuration config) {
+    return config != null && (
+            config.getBoolean(
+                YarnConfiguration.NM_LOG_CONTAINER_DEBUG_INFO,
+                YarnConfiguration.DEFAULT_NM_LOG_CONTAINER_DEBUG_INFO
+            ) || (
+            config.getBoolean(
+                YarnConfiguration.NM_LOG_CONTAINER_DEBUG_INFO_ON_ERROR,
+                YarnConfiguration.DEFAULT_NM_LOG_CONTAINER_DEBUG_INFO_ON_ERROR
+            ) && containerExitCode != 0));
   }
 
   /**

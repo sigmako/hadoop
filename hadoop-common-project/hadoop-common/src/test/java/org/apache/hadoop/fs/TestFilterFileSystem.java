@@ -27,9 +27,7 @@ import java.lang.reflect.Modifier;
 import java.net.URI;
 import java.util.EnumSet;
 import java.util.Iterator;
-import java.util.List;
 
-import org.apache.commons.logging.Log;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.Options.CreateOpts;
@@ -40,10 +38,11 @@ import org.apache.hadoop.security.token.DelegationTokenIssuer;
 import org.apache.hadoop.util.Progressable;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.slf4j.Logger;
 
 public class TestFilterFileSystem {
 
-  private static final Log LOG = FileSystem.LOG;
+  private static final Logger LOG = FileSystem.LOG;
   private static final Configuration conf = new Configuration();
 
   @BeforeClass
@@ -106,10 +105,6 @@ public class TestFilterFileSystem {
     public FileStatus[] listStatusBatch(Path f, byte[] token);
     public FileStatus[] listStatus(Path[] files);
     public FileStatus[] listStatus(Path[] files, PathFilter filter);
-    public RemoteIterator<PartialListing<LocatedFileStatus>> batchedListLocatedStatusIterator(
-        final List<Path> paths) throws IOException;
-    public RemoteIterator<PartialListing<FileStatus>> batchedListStatusIterator(
-        final List<Path> paths) throws IOException;
     public FileStatus[] globStatus(Path pathPattern);
     public FileStatus[] globStatus(Path pathPattern, PathFilter filter);
     public Iterator<LocatedFileStatus> listFiles(Path path,
@@ -142,6 +137,18 @@ public class TestFilterFileSystem {
     void setQuota(Path f, long namespaceQuota, long storagespaceQuota);
     void setQuotaByStorageType(Path f, StorageType type, long quota);
     StorageStatistics getStorageStatistics();
+
+    /*
+    Not passed through as the inner implementation will miss features
+    of the filter such as checksums.
+     */
+    MultipartUploaderBuilder createMultipartUploader(Path basePath);
+
+    FSDataOutputStream append(Path f, boolean appendToNewBlock) throws IOException;
+
+    FSDataOutputStream append(Path f, int bufferSize,
+        Progressable progress, boolean appendToNewBlock) throws IOException;
+    BulkDelete createBulkDelete(Path path) throws IllegalArgumentException, IOException;
   }
 
   @Test
@@ -281,6 +288,23 @@ public class TestFilterFileSystem {
     Rename opt = Rename.TO_TRASH;
     fs.rename(src, dst, opt);
     verify(mockFs).rename(eq(src), eq(dst), eq(opt));
+  }
+
+  /**
+   * Verify that filterFS always returns false, even if local/rawlocal
+   * ever implement multipart uploads.
+   */
+  @Test
+  public void testFilterPathCapabilites() throws Exception {
+    try (FilterFileSystem flfs = new FilterLocalFileSystem()) {
+      flfs.initialize(URI.create("filter:/"), conf);
+      Path src = new Path("/src");
+      assertFalse(
+          "hasPathCapability(FS_MULTIPART_UPLOADER) should have failed for "
+              + flfs,
+          flfs.hasPathCapability(src,
+              CommonPathCapabilities.FS_MULTIPART_UPLOADER));
+    }
   }
 
   private void checkInit(FilterFileSystem fs, boolean expectInit)

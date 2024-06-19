@@ -23,7 +23,11 @@ import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IO_FILE_BUFFER_
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CHECKSUM_TYPE_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_ENCRYPT_DATA_TRANSFER_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SNAPSHOT_DIFF_LISTING_LIMIT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_REPLICATION_KEY;
+import static org.apache.hadoop.hdfs.TestDistributedFileSystem.checkOpStatistics;
+import static org.apache.hadoop.hdfs.TestDistributedFileSystem.checkStatistics;
+import static org.apache.hadoop.hdfs.TestDistributedFileSystem.getOpStatistics;
 import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_BYTES_PER_CHECKSUM_KEY;
 import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_CLIENT_WRITE_PACKET_SIZE_KEY;
 import static org.junit.Assert.assertEquals;
@@ -51,12 +55,16 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.EnumSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Random;
 
-import com.google.common.collect.ImmutableList;
+import org.apache.hadoop.hdfs.DFSUtilClient;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ImmutableList;
 import org.apache.commons.io.IOUtils;
 import org.apache.hadoop.fs.QuotaUsage;
+import org.apache.hadoop.hdfs.DFSOpsCountStatistics;
 import org.apache.hadoop.test.LambdaTestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -81,6 +89,7 @@ import org.apache.hadoop.fs.permission.AclEntryScope;
 import org.apache.hadoop.fs.permission.AclEntryType;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.fs.FsStatus;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DFSUtil;
@@ -102,6 +111,7 @@ import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
 import static org.apache.hadoop.hdfs.protocol.SnapshotDiffReport.DiffType;
 import static org.apache.hadoop.hdfs.protocol.SnapshotDiffReport.DiffReportEntry;
 import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
+import org.apache.hadoop.hdfs.protocol.SnapshotStatus;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
@@ -399,7 +409,7 @@ public class TestWebHDFS {
             try {
               it.next();
               fail("Iterator should error if out of elements.");
-            } catch (IllegalStateException e) {
+            } catch (NoSuchElementException e) {
               // pass
             }
             return null;
@@ -513,6 +523,38 @@ public class TestWebHDFS {
     } catch (IOException ex) {
       GenericTestUtils.assertExceptionContains("Failed to find datanode", ex);
     }
+  }
+
+  @Test
+  public void testWebHdfsCreateWithInvalidPath() throws Exception {
+    final Configuration conf = WebHdfsTestUtil.createConf();
+    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).build();
+    // A path name include duplicated slashes.
+    String path = "//tmp//file";
+    assertResponse(path);
+  }
+
+  private String getUri(String path) {
+    final String user = System.getProperty("user.name");
+    final StringBuilder uri = new StringBuilder(cluster.getHttpUri(0));
+    uri.append("/webhdfs/v1").
+        append(path).
+        append("?op=CREATE").
+        append("&user.name=" + user);
+    return uri.toString();
+  }
+
+  private void assertResponse(String path) throws IOException {
+    URL url = new URL(getUri(path));
+    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+    conn.setRequestMethod("PUT");
+    // Assert response code.
+    assertEquals(HttpURLConnection.HTTP_BAD_REQUEST, conn.getResponseCode());
+    // Assert exception.
+    Map<?, ?> response = WebHdfsFileSystem.jsonParse(conn, true);
+    assertEquals("InvalidPathException",
+        ((LinkedHashMap) response.get("RemoteException")).get("exception"));
+    conn.disconnect();
   }
 
   /**
@@ -717,6 +759,7 @@ public class TestWebHDFS {
   @Test
   public void testWebHdfsSnapshotDiff() throws Exception {
     final Configuration conf = WebHdfsTestUtil.createConf();
+    conf.setInt(DFS_NAMENODE_SNAPSHOT_DIFF_LISTING_LIMIT, 2);
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(1).build();
     cluster.waitActive();
     final DistributedFileSystem dfs = cluster.getFileSystem();
@@ -838,6 +881,66 @@ public class TestWebHDFS {
           statuses[i].getDirStatus().isSnapshotEnabled());
     }
   }
+
+  @Test
+  public void testWebHdfsSnapshotList() throws Exception {
+    final Configuration conf = WebHdfsTestUtil.createConf();
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(1).build();
+      cluster.waitActive();
+      final DistributedFileSystem dfs = cluster.getFileSystem();
+      final WebHdfsFileSystem webHdfs = WebHdfsTestUtil
+          .getWebHdfsFileSystem(conf, WebHdfsConstants.WEBHDFS_SCHEME);
+      final Path foo = new Path("/foo");
+      dfs.mkdirs(foo);
+      dfs.allowSnapshot(foo);
+      webHdfs.createSnapshot(foo, "s1");
+      webHdfs.createSnapshot(foo, "s2");
+      webHdfs.deleteSnapshot(foo, "s2");
+      SnapshotStatus[] statuses = webHdfs.getSnapshotListing(foo);
+      SnapshotStatus[] dfsStatuses = dfs.getSnapshotListing(foo);
+
+      for (int i = 0; i < dfsStatuses.length; i++) {
+        Assert.assertEquals(statuses[i].getSnapshotID(),
+            dfsStatuses[i].getSnapshotID());
+        Assert.assertEquals(statuses[i].isDeleted(),
+            dfsStatuses[i].isDeleted());
+        Assert.assertTrue(Arrays.equals(statuses[i].getParentFullPath(),
+            dfsStatuses[i].getParentFullPath()));
+        Assert.assertEquals(dfsStatuses[i].getDirStatus().getChildrenNum(),
+            statuses[i].getDirStatus().getChildrenNum());
+        Assert.assertEquals(dfsStatuses[i].getDirStatus().getModificationTime(),
+            statuses[i].getDirStatus().getModificationTime());
+        Assert.assertEquals(dfsStatuses[i].getDirStatus().isDir(),
+            statuses[i].getDirStatus().isDir());
+        Assert.assertEquals(dfsStatuses[i].getDirStatus().getAccessTime(),
+            statuses[i].getDirStatus().getAccessTime());
+        Assert.assertEquals(dfsStatuses[i].getDirStatus().getPermission(),
+            statuses[i].getDirStatus().getPermission());
+        Assert.assertEquals(dfsStatuses[i].getDirStatus().getOwner(),
+            statuses[i].getDirStatus().getOwner());
+        Assert.assertEquals(dfsStatuses[i].getDirStatus().getGroup(),
+            statuses[i].getDirStatus().getGroup());
+        Assert.assertEquals(dfsStatuses[i].getDirStatus().getPath(),
+            statuses[i].getDirStatus().getPath());
+        Assert.assertEquals(dfsStatuses[i].getDirStatus().getFileId(),
+            statuses[i].getDirStatus().getFileId());
+        Assert.assertEquals(dfsStatuses[i].getDirStatus().hasAcl(),
+            statuses[i].getDirStatus().hasAcl());
+        Assert.assertEquals(dfsStatuses[i].getDirStatus().isEncrypted(),
+            statuses[i].getDirStatus().isEncrypted());
+        Assert.assertEquals(dfsStatuses[i].getDirStatus().isErasureCoded(),
+            statuses[i].getDirStatus().isErasureCoded());
+        Assert.assertEquals(dfsStatuses[i].getDirStatus().isSnapshotEnabled(),
+            statuses[i].getDirStatus().isSnapshotEnabled());
+      }
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
+
 
   @Test
   public void testWebHdfsCreateNonRecursive() throws IOException, URISyntaxException {
@@ -994,6 +1097,30 @@ public class TestWebHDFS {
         .assertTrue((contentSummary.getTypeQuota(StorageType.DISK) == 100000));
   }
 
+  /**
+   * Test Snapshot related information in ContentSummary.
+   */
+  @Test
+  public void testSnapshotInContentSummary() throws Exception {
+    final Configuration conf = WebHdfsTestUtil.createConf();
+    Path dirPath = new Path("/dir");
+    final Path filePath = new Path("/dir/file");
+    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(3).build();
+    final WebHdfsFileSystem webHdfs = WebHdfsTestUtil.getWebHdfsFileSystem(conf,
+        WebHdfsConstants.WEBHDFS_SCHEME);
+    final DistributedFileSystem dfs = cluster.getFileSystem();
+    DFSTestUtil.createFile(dfs, filePath, 10, (short) 3, 0L);
+    dfs.allowSnapshot(dirPath);
+    dfs.createSnapshot(dirPath);
+    dfs.delete(filePath, true);
+    ContentSummary contentSummary = webHdfs.getContentSummary(dirPath);
+    assertEquals(1, contentSummary.getSnapshotFileCount());
+    assertEquals(10, contentSummary.getSnapshotLength());
+    assertEquals(30, contentSummary.getSnapshotSpaceConsumed());
+    assertEquals(dfs.getContentSummary(dirPath),
+        webHdfs.getContentSummary(dirPath));
+  }
+
   @Test
   public void testQuotaUsage() throws Exception {
     final Configuration conf = WebHdfsTestUtil.createConf();
@@ -1056,10 +1183,12 @@ public class TestWebHDFS {
     webHdfs.setQuotaByStorageType(path, StorageType.DISK, spaceQuota);
     webHdfs.setQuotaByStorageType(path, StorageType.ARCHIVE, spaceQuota);
     webHdfs.setQuotaByStorageType(path, StorageType.SSD, spaceQuota);
+    webHdfs.setQuotaByStorageType(path, StorageType.NVDIMM, spaceQuota);
     quotaUsage = dfs.getQuotaUsage(path);
     assertEquals(spaceQuota, quotaUsage.getTypeQuota(StorageType.DISK));
     assertEquals(spaceQuota, quotaUsage.getTypeQuota(StorageType.ARCHIVE));
     assertEquals(spaceQuota, quotaUsage.getTypeQuota(StorageType.SSD));
+    assertEquals(spaceQuota, quotaUsage.getTypeQuota(StorageType.NVDIMM));
 
     // Test invalid parameters
 
@@ -1075,6 +1204,8 @@ public class TestWebHDFS {
         () -> webHdfs.setQuotaByStorageType(path, StorageType.SSD, -100));
     LambdaTestUtils.intercept(IllegalArgumentException.class,
         () -> webHdfs.setQuotaByStorageType(path, StorageType.RAM_DISK, 100));
+    LambdaTestUtils.intercept(IllegalArgumentException.class,
+        () -> webHdfs.setQuotaByStorageType(path, StorageType.NVDIMM, -100));
   }
 
 
@@ -1458,7 +1589,8 @@ public class TestWebHDFS {
     HttpURLConnection conn = (HttpURLConnection) url.openConnection();
     conn.setRequestMethod(TYPE);
     conn.setInstanceFollowRedirects(false);
-    String response = IOUtils.toString(conn.getInputStream());
+    String response =
+        IOUtils.toString(conn.getInputStream(), StandardCharsets.UTF_8);
     LOG.info("Response was : " + response);
     Assert.assertEquals(
       "Response wasn't " + HttpURLConnection.HTTP_OK,
@@ -1539,6 +1671,34 @@ public class TestWebHDFS {
     Path expectedPath = new Path(FileSystem.USER_HOME_PREFIX,
         new Path(currentUser, FileSystem.TRASH_PREFIX));
     assertEquals(expectedPath.toUri().getPath(), trashPath.toUri().getPath());
+  }
+
+  @Test
+  public void testGetSnapshotTrashRoot() throws Exception {
+    final Configuration conf = WebHdfsTestUtil.createConf();
+    conf.setBoolean("dfs.namenode.snapshot.trashroot.enabled", true);
+    final String currentUser =
+        UserGroupInformation.getCurrentUser().getShortUserName();
+    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).build();
+    final WebHdfsFileSystem webFS = WebHdfsTestUtil.getWebHdfsFileSystem(conf,
+        WebHdfsConstants.WEBHDFS_SCHEME);
+    Path ssDir1 = new Path("/ssDir1");
+    assertTrue(webFS.mkdirs(ssDir1));
+
+    Path trashPath = webFS.getTrashRoot(ssDir1);
+    Path expectedPath = new Path(FileSystem.USER_HOME_PREFIX,
+        new Path(currentUser, FileSystem.TRASH_PREFIX));
+    assertEquals(expectedPath.toUri().getPath(), trashPath.toUri().getPath());
+    // Enable snapshot
+    webFS.allowSnapshot(ssDir1);
+    Path trashPathAfter = webFS.getTrashRoot(ssDir1);
+    Path expectedPathAfter = new Path(ssDir1,
+        new Path(FileSystem.TRASH_PREFIX, currentUser));
+    assertEquals(expectedPathAfter.toUri().getPath(),
+        trashPathAfter.toUri().getPath());
+    // Cleanup
+    webFS.disallowSnapshot(ssDir1);
+    webFS.delete(ssDir1, true);
   }
 
   @Test
@@ -1986,6 +2146,229 @@ public class TestWebHDFS {
     ecpolicyForECfile = getECPolicyFromFileStatusJson(fileStatusObject);
     assertEquals("EC policy for ecFile should match the set EC policy",
         ecpolicyForECfile, ecPolicyName);
+  }
+
+  @Test
+  public void testStatistics() throws Exception {
+    final Configuration conf = new HdfsConfiguration();
+    conf.set(DFSConfigKeys.DFS_STORAGE_POLICY_SATISFIER_MODE_KEY,
+        StoragePolicySatisfierMode.EXTERNAL.toString());
+    StoragePolicySatisfier sps = new StoragePolicySatisfier(conf);
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).storageTypes(
+          new StorageType[][] {{StorageType.DISK, StorageType.ARCHIVE}})
+          .storagesPerDatanode(2).numDataNodes(1).build();
+      cluster.waitActive();
+      sps.init(new ExternalSPSContext(sps, DFSTestUtil
+          .getNameNodeConnector(conf, HdfsServerConstants.MOVER_ID_PATH, 1,
+              false)));
+      sps.start(StoragePolicySatisfierMode.EXTERNAL);
+      sps.start(StoragePolicySatisfierMode.EXTERNAL);
+      final WebHdfsFileSystem webHdfs = WebHdfsTestUtil
+          .getWebHdfsFileSystem(conf, WebHdfsConstants.WEBHDFS_SCHEME);
+      Path dir = new Path("/test");
+      webHdfs.mkdirs(dir);
+      int readOps = 0;
+      int writeOps = 0;
+      FileSystem.clearStatistics();
+
+      long opCount =
+          getOpStatistics(DFSOpsCountStatistics.OpType.GET_STORAGE_POLICY);
+      webHdfs.getStoragePolicy(dir);
+      checkStatistics(webHdfs, ++readOps, writeOps, 0);
+      checkOpStatistics(DFSOpsCountStatistics.OpType.GET_STORAGE_POLICY,
+          opCount + 1);
+
+      opCount =
+          getOpStatistics(DFSOpsCountStatistics.OpType.GET_STORAGE_POLICIES);
+      webHdfs.getAllStoragePolicies();
+      checkStatistics(webHdfs, ++readOps, writeOps, 0);
+      checkOpStatistics(DFSOpsCountStatistics.OpType.GET_STORAGE_POLICIES,
+          opCount + 1);
+
+      opCount =
+          getOpStatistics(DFSOpsCountStatistics.OpType.SATISFY_STORAGE_POLICY);
+      webHdfs.satisfyStoragePolicy(dir);
+      checkStatistics(webHdfs, readOps, ++writeOps, 0);
+      checkOpStatistics(DFSOpsCountStatistics.OpType.SATISFY_STORAGE_POLICY,
+          opCount + 1);
+
+      opCount = getOpStatistics(
+          DFSOpsCountStatistics.OpType.GET_SNAPSHOTTABLE_DIRECTORY_LIST);
+      webHdfs.getSnapshottableDirectoryList();
+      checkStatistics(webHdfs, ++readOps, writeOps, 0);
+      checkOpStatistics(
+          DFSOpsCountStatistics.OpType.GET_SNAPSHOTTABLE_DIRECTORY_LIST,
+          opCount + 1);
+    } finally {
+      cluster.shutdown();
+    }
+  }
+
+  @Test
+  public void testLinkTarget() throws Exception {
+    final Configuration conf = WebHdfsTestUtil.createConf();
+    try {
+      cluster = new MiniDFSCluster.Builder(conf)
+          .numDataNodes(3)
+          .build();
+      cluster.waitActive();
+
+      final WebHdfsFileSystem webHdfs =
+          WebHdfsTestUtil.getWebHdfsFileSystem(conf,
+              WebHdfsConstants.WEBHDFS_SCHEME);
+
+      // Symbolic link
+      Path root = new Path("/webHdfsTest/");
+      Path targetFile = new Path(root, "debug.log");
+      FileSystemTestHelper.createFile(webHdfs, targetFile);
+
+      Path symLink = new Path(root, "debug.link");
+
+      webHdfs.createSymlink(targetFile, symLink, false);
+      assertEquals(webHdfs.getLinkTarget(symLink), targetFile);
+    } finally {
+      cluster.shutdown();
+    }
+  }
+
+  @Test
+  public void testFileLinkStatus() throws Exception {
+    final Configuration conf = WebHdfsTestUtil.createConf();
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).build();
+      cluster.waitActive();
+
+      final WebHdfsFileSystem webHdfs =
+          WebHdfsTestUtil.getWebHdfsFileSystem(conf,
+              WebHdfsConstants.WEBHDFS_SCHEME);
+      // Symbolic link
+      Path root = new Path("/webHdfsTest/");
+      Path file = new Path(root, "file");
+      FileSystemTestHelper.createFile(webHdfs, file);
+
+      Path linkToFile = new Path(root, "linkToFile");
+
+      webHdfs.createSymlink(file, linkToFile, false);
+      assertFalse(webHdfs.getFileLinkStatus(file).isSymlink());
+      assertTrue(webHdfs.getFileLinkStatus(linkToFile).isSymlink());
+    } finally {
+      cluster.shutdown();
+    }
+  }
+
+  @Test
+  public void testFsStatus() throws Exception {
+    final Configuration conf = WebHdfsTestUtil.createConf();
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).build();
+      cluster.waitActive();
+
+      final WebHdfsFileSystem webHdfs =
+          WebHdfsTestUtil.getWebHdfsFileSystem(conf,
+              WebHdfsConstants.WEBHDFS_SCHEME);
+
+      final DistributedFileSystem dfs = cluster.getFileSystem();
+
+      final String path = "/foo";
+      try (OutputStream os = webHdfs.create(new Path(path))) {
+        os.write(new byte[1024]);
+      }
+
+      FsStatus webHdfsFsStatus = webHdfs.getStatus(new Path("/"));
+      Assert.assertNotNull(webHdfsFsStatus);
+
+      FsStatus dfsFsStatus = dfs.getStatus(new Path("/"));
+      Assert.assertNotNull(dfsFsStatus);
+
+      //Validate used free and capacity are the same as DistributedFileSystem
+      Assert.assertEquals(webHdfsFsStatus.getUsed(), dfsFsStatus.getUsed());
+      Assert.assertEquals(webHdfsFsStatus.getRemaining(),
+          dfsFsStatus.getRemaining());
+      Assert.assertEquals(webHdfsFsStatus.getCapacity(),
+          dfsFsStatus.getCapacity());
+    } finally {
+      cluster.shutdown();
+    }
+  }
+
+  @Test
+  public void testGetErasureCodingPolicies() throws Exception {
+    final Configuration conf = WebHdfsTestUtil.createConf();
+    cluster = new MiniDFSCluster.Builder(conf).build();
+    try {
+      cluster.waitActive();
+
+      final WebHdfsFileSystem webHdfs =
+          WebHdfsTestUtil.getWebHdfsFileSystem(conf,
+              WebHdfsConstants.WEBHDFS_SCHEME);
+
+      final DistributedFileSystem dfs = cluster.getFileSystem();
+
+      Collection<ErasureCodingPolicyInfo> webHdfsEcPolicyInfos =
+          webHdfs.getAllErasureCodingPolicies();
+
+      Collection<ErasureCodingPolicyInfo> dfsEcPolicyInfos =
+          dfs.getAllErasureCodingPolicies();
+
+      //Validate erasureCodingPolicyInfos are the same as DistributedFileSystem
+      assertEquals(dfsEcPolicyInfos.size(), webHdfsEcPolicyInfos.size());
+      assertTrue(dfsEcPolicyInfos.containsAll(webHdfsEcPolicyInfos));
+    } finally {
+      cluster.shutdown();
+    }
+  }
+
+  @Test
+  public void getAllErasureCodingCodecs() throws Exception {
+    final Configuration conf = WebHdfsTestUtil.createConf();
+    cluster = new MiniDFSCluster.Builder(conf).build();
+    try {
+      cluster.waitActive();
+
+      final WebHdfsFileSystem webHdfs =
+          WebHdfsTestUtil.getWebHdfsFileSystem(conf,
+              WebHdfsConstants.WEBHDFS_SCHEME);
+
+      final DistributedFileSystem dfs = cluster.getFileSystem();
+
+      Map<String, String> webHdfsEcCodecs = webHdfs.getAllErasureCodingCodecs();
+
+      Map<String, String> dfsEcCodecs = dfs.getAllErasureCodingCodecs();
+
+      //Validate erasureCodingCodecs are the same as DistributedFileSystem
+      assertEquals(webHdfsEcCodecs, dfsEcCodecs);
+    } finally {
+      cluster.shutdown();
+    }
+  }
+
+  @Test
+  public void testGetTrashRoots() throws Exception {
+    final Configuration conf = WebHdfsTestUtil.createConf();
+    cluster = new MiniDFSCluster.Builder(conf).build();
+    final WebHdfsFileSystem webFS = WebHdfsTestUtil.getWebHdfsFileSystem(conf,
+        WebHdfsConstants.WEBHDFS_SCHEME);
+
+    // Create user trash
+    Path currUserHome = webFS.getHomeDirectory();
+    Path currUserTrash = new Path(currUserHome, FileSystem.TRASH_PREFIX);
+    webFS.mkdirs(currUserTrash);
+
+    Collection<FileStatus> webTrashRoots = webFS.getTrashRoots(true);
+    assertEquals(1, webTrashRoots.size());
+
+    // Create trash root for user0
+    UserGroupInformation ugi = UserGroupInformation.createRemoteUser("user0");
+    String user0HomeStr = DFSUtilClient.getHomeDirectory(conf, ugi);
+    Path user0Trash = new Path(user0HomeStr, FileSystem.TRASH_PREFIX);
+    webFS.mkdirs(user0Trash);
+
+    webTrashRoots = webFS.getTrashRoots(true);
+    assertEquals(2, webTrashRoots.size());
+
+    webTrashRoots = webFS.getTrashRoots(false);
+    assertEquals(1,  webTrashRoots.size());
   }
 
   /**

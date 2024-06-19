@@ -39,7 +39,9 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.function.LongFunction;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
@@ -52,6 +54,7 @@ import org.apache.hadoop.hdfs.server.namenode.FSDirectory.DirOp;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.invocation.InvocationOnMock;
@@ -431,7 +434,7 @@ public class TestFSPermissionChecker {
     PermissionStatus permStatus = PermissionStatus.createImmutable(owner, group,
       FsPermission.createImmutable(perm));
     INodeDirectory inodeDirectory = new INodeDirectory(
-      HdfsConstants.GRANDFATHER_INODE_ID, name.getBytes("UTF-8"), permStatus, 0L);
+        HdfsConstants.GRANDFATHER_INODE_ID, name.getBytes(StandardCharsets.UTF_8), permStatus, 0L);
     parent.addChild(inodeDirectory);
     return inodeDirectory;
   }
@@ -441,9 +444,34 @@ public class TestFSPermissionChecker {
     PermissionStatus permStatus = PermissionStatus.createImmutable(owner, group,
       FsPermission.createImmutable(perm));
     INodeFile inodeFile = new INodeFile(HdfsConstants.GRANDFATHER_INODE_ID,
-      name.getBytes("UTF-8"), permStatus, 0L, 0L, null, REPLICATION,
-      PREFERRED_BLOCK_SIZE);
+        name.getBytes(StandardCharsets.UTF_8), permStatus, 0L, 0L, null,
+        REPLICATION, PREFERRED_BLOCK_SIZE);
     parent.addChild(inodeFile);
     return inodeFile;
+  }
+
+  @Test
+  public void testCheckAccessControlEnforcerSlowness() throws Exception {
+    final long thresholdMs = 10;
+    final LongFunction<String> checkAccessControlEnforcerSlowness =
+        elapsedMs -> FSPermissionChecker.checkAccessControlEnforcerSlowness(
+            elapsedMs, thresholdMs, INodeAttributeProvider.AccessControlEnforcer.class,
+            false, "/foo", "mkdir", "client");
+
+    final String m1 = FSPermissionChecker.runCheckPermission(
+        () -> FSPermissionChecker.LOG.info("Fast runner"),
+        checkAccessControlEnforcerSlowness);
+    Assert.assertNull(m1);
+
+    final String m2 = FSPermissionChecker.runCheckPermission(() -> {
+      FSPermissionChecker.LOG.info("Slow runner");
+      try {
+        Thread.sleep(20);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException(e);
+      }
+    }, checkAccessControlEnforcerSlowness);
+    Assert.assertNotNull(m2);
   }
 }

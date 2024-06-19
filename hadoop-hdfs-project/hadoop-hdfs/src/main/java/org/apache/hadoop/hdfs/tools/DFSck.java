@@ -26,7 +26,9 @@ import java.net.URI;
 import java.net.URL;
 import java.net.URLConnection;
 import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.security.PrivilegedExceptionAction;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
@@ -37,6 +39,7 @@ import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HAUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
+import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.hdfs.server.namenode.NamenodeFsck;
 import org.apache.hadoop.hdfs.web.URLConnectionFactory;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -104,7 +107,7 @@ public class DFSck extends Configured implements Tool {
           "every block\n"
       + "\t-storagepolicies\tprint out storage policy summary for the blocks\n"
       + "\t-maintenance\tprint out maintenance state node details\n"
-      + "\t-showprogress\tshow progress in output. Default is OFF (no progress)\n"
+      + "\t-showprogress\tDeprecated. Progress is now shown by default\n"
       + "\t-blockId\tprint out which file this blockId belongs to, locations"
       + " (nodes, racks) of this block, and other diagnostics info"
       + " (under replicated, corrupted or not, etc)\n"
@@ -137,8 +140,17 @@ public class DFSck extends Configured implements Tool {
     super(conf);
     this.ugi = UserGroupInformation.getCurrentUser();
     this.out = out;
+    int connectTimeout = (int) conf.getTimeDuration(
+        HdfsClientConfigKeys.DFS_CLIENT_FSCK_CONNECT_TIMEOUT,
+        HdfsClientConfigKeys.DFS_CLIENT_FSCK_CONNECT_TIMEOUT_DEFAULT,
+        TimeUnit.MILLISECONDS);
+    int readTimeout = (int) conf.getTimeDuration(
+        HdfsClientConfigKeys.DFS_CLIENT_FSCK_READ_TIMEOUT,
+        HdfsClientConfigKeys.DFS_CLIENT_FSCK_READ_TIMEOUT_DEFAULT,
+        TimeUnit.MILLISECONDS);
+
     this.connectionFactory = URLConnectionFactory
-        .newDefaultURLConnectionFactory(conf);
+        .newDefaultURLConnectionFactory(connectTimeout, readTimeout, conf);
     this.isSpnegoEnabled = UserGroupInformation.isSecurityEnabled();
   }
 
@@ -196,7 +208,7 @@ public class DFSck extends Configured implements Tool {
       }
       InputStream stream = connection.getInputStream();
       BufferedReader input = new BufferedReader(new InputStreamReader(
-          stream, "UTF-8"));
+          stream, StandardCharsets.UTF_8));
       try {
         String line = null;
         while ((line = input.readLine()) != null) {
@@ -227,7 +239,7 @@ public class DFSck extends Configured implements Tool {
             continue;
           numCorrupt++;
           if (numCorrupt == 1) {
-            out.println("The list of corrupt files under path '"
+            out.println("The list of corrupt blocks under path '"
                 + dir + "' are:");
           }
           out.println(line);
@@ -237,7 +249,7 @@ public class DFSck extends Configured implements Tool {
       }
     }
     out.println("The filesystem under path '" + dir + "' has " 
-        + numCorrupt + " CORRUPT files");
+        + numCorrupt + " CORRUPT blocks");
     if (numCorrupt == 0)
       errCode = 0;
     return errCode;
@@ -365,7 +377,7 @@ public class DFSck extends Configured implements Tool {
     }
     InputStream stream = connection.getInputStream();
     BufferedReader input = new BufferedReader(new InputStreamReader(
-                                              stream, "UTF-8"));
+                                              stream, StandardCharsets.UTF_8));
     String line = null;
     String lastLine = NamenodeFsck.CORRUPT_STATUS;
     int errCode = -1;
@@ -385,6 +397,8 @@ public class DFSck extends Configured implements Tool {
       errCode = 0;
     } else if (lastLine.contains("Incorrect blockId format:")) {
       errCode = 0;
+    } else if (lastLine.endsWith(NamenodeFsck.EXCESS_STATUS)) {
+      errCode = 0;
     } else if (lastLine.endsWith(NamenodeFsck.DECOMMISSIONED_STATUS)) {
       errCode = 2;
     } else if (lastLine.endsWith(NamenodeFsck.DECOMMISSIONING_STATUS)) {
@@ -393,6 +407,8 @@ public class DFSck extends Configured implements Tool {
       errCode = 4;
     } else if (lastLine.endsWith(NamenodeFsck.ENTERING_MAINTENANCE_STATUS)) {
       errCode = 5;
+    } else if (lastLine.endsWith(NamenodeFsck.STALE_STATUS)) {
+      errCode = 6;
     }
     return errCode;
   }

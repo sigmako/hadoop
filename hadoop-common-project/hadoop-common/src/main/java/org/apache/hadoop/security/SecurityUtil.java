@@ -35,6 +35,7 @@ import java.util.ServiceLoader;
 import java.util.concurrent.TimeUnit;
 
 import javax.annotation.Nullable;
+import javax.naming.ConfigurationException;
 import javax.security.auth.kerberos.KerberosPrincipal;
 import javax.security.auth.kerberos.KerberosTicket;
 
@@ -44,6 +45,8 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.net.DNS;
+import org.apache.hadoop.net.DomainNameResolver;
+import org.apache.hadoop.net.DomainNameResolverFactory;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
 import org.apache.hadoop.security.token.Token;
@@ -51,14 +54,16 @@ import org.apache.hadoop.security.token.TokenInfo;
 import org.apache.hadoop.util.StopWatch;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.ZKUtil;
+import org.apache.zookeeper.client.ZKClientConfig;
+import org.apache.zookeeper.common.ClientX509Util;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xbill.DNS.Name;
 import org.xbill.DNS.ResolverConfig;
 
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.net.InetAddresses;
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.apache.hadoop.thirdparty.com.google.common.net.InetAddresses;
 
 /**
  * Security Utils.
@@ -80,6 +85,8 @@ public final class SecurityUtil {
   static boolean useIpForTokenService;
   @VisibleForTesting
   static HostResolver hostResolver;
+
+  private static DomainNameResolver domainNameResolver;
 
   private static boolean logSlowLookups;
   private static int slowLookupThresholdMs;
@@ -112,10 +119,15 @@ public final class SecurityUtil {
             .HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_THRESHOLD_MS_KEY,
         CommonConfigurationKeys
             .HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_THRESHOLD_MS_DEFAULT);
+
+    domainNameResolver = DomainNameResolverFactory.newInstance(conf,
+        CommonConfigurationKeys.HADOOP_SECURITY_RESOLVER_IMPL);
   }
 
   /**
-   * For use only by tests and initialization
+   * For use only by tests and initialization.
+   *
+   * @param flag flag.
    */
   @InterfaceAudience.Private
   @VisibleForTesting
@@ -210,7 +222,7 @@ public final class SecurityUtil {
         throw new IOException("Can't replace " + HOSTNAME_PATTERN
             + " pattern since client address is null");
       }
-      return replacePattern(components, addr.getCanonicalHostName());
+      return replacePattern(components, domainNameResolver.getHostnameByIP(addr));
     }
   }
   
@@ -305,7 +317,8 @@ public final class SecurityUtil {
     
     String keytabFilename = conf.get(keytabFileKey);
     if (keytabFilename == null || keytabFilename.length() == 0) {
-      throw new IOException("Running in secure mode, but config doesn't have a keytab");
+      throw new IOException(
+          "Running in secure mode, but config doesn't have a keytab for key: " + keytabFileKey);
     }
 
     String principalConfig = conf.get(userNameKey, System
@@ -380,7 +393,25 @@ public final class SecurityUtil {
     }
     return null;
   }
- 
+
+  /**
+   * Look up the client principal for a given protocol. It searches all known
+   * SecurityInfo providers.
+   * @param protocol the protocol class to get the information for
+   * @param conf configuration object
+   * @return client principal or null if it has no client principal defined.
+   */
+  public static String getClientPrincipal(Class<?> protocol,
+      Configuration conf) {
+    String user = null;
+    KerberosInfo krbInfo = SecurityUtil.getKerberosInfo(protocol, conf);
+    if (krbInfo != null) {
+      String key = krbInfo.clientPrincipal();
+      user = (key != null && !key.isEmpty()) ? conf.get(key) : null;
+    }
+    return user;
+  }
+
   /**
    * Look up the TokenInfo for a given protocol. It searches all known
    * SecurityInfo providers.
@@ -469,6 +500,10 @@ public final class SecurityUtil {
    * Perform the given action as the daemon's login user. If the login
    * user cannot be determined, this will log a FATAL error and exit
    * the whole JVM.
+   *
+   * @param action action.
+   * @param <T> generic type T.
+   * @return generic type T.
    */
   public static <T> T doAsLoginUserOrFatal(PrivilegedAction<T> action) { 
     if (UserGroupInformation.isSecurityEnabled()) {
@@ -491,6 +526,7 @@ public final class SecurityUtil {
    * InterruptedException is thrown, it is converted to an IOException.
    *
    * @param action the action to perform
+   * @param <T> Generics Type T.
    * @return the result of the action
    * @throws IOException in the event of error
    */
@@ -504,6 +540,7 @@ public final class SecurityUtil {
    * InterruptedException is thrown, it is converted to an IOException.
    *
    * @param action the action to perform
+   * @param <T> generic type T.
    * @return the result of the action
    * @throws IOException in the event of error
    */
@@ -590,11 +627,8 @@ public final class SecurityUtil {
     private List<String> searchDomains = new ArrayList<>();
     {
       ResolverConfig resolverConfig = ResolverConfig.getCurrentConfig();
-      Name[] names = resolverConfig.searchPath();
-      if (names != null) {
-        for (Name name : names) {
-          searchDomains.add(name.toString());
-        }
+      for (Name name : resolverConfig.searchPath()) {
+        searchDomains.add(name.toString());
       }
     }
 
@@ -730,9 +764,13 @@ public final class SecurityUtil {
 
   /**
    * Utility method to fetch ZK auth info from the configuration.
+   *
+   * @param conf configuration.
+   * @param configKey config key.
    * @throws java.io.IOException if the Zookeeper ACLs configuration file
    * cannot be read
    * @throws ZKUtil.BadAuthFormatException if the auth format is invalid
+   * @return ZKAuthInfo List.
    */
   public static List<ZKUtil.ZKAuthInfo> getZKAuthInfos(Configuration conf,
       String configKey) throws IOException {
@@ -749,6 +787,105 @@ public final class SecurityUtil {
     } catch (IOException | ZKUtil.BadAuthFormatException e) {
       LOG.error("Couldn't read Auth based on {}", configKey);
       throw e;
+    }
+  }
+
+  public static void validateSslConfiguration(TruststoreKeystore truststoreKeystore)
+          throws ConfigurationException {
+    if (org.apache.commons.lang3.StringUtils.isEmpty(truststoreKeystore.keystoreLocation)) {
+      throw new ConfigurationException(
+          "The keystore location parameter is empty for the ZooKeeper client connection.");
+    }
+    if (org.apache.commons.lang3.StringUtils.isEmpty(truststoreKeystore.keystorePassword)) {
+      throw new ConfigurationException(
+          "The keystore password parameter is empty for the ZooKeeper client connection.");
+    }
+    if (org.apache.commons.lang3.StringUtils.isEmpty(truststoreKeystore.truststoreLocation)) {
+      throw new ConfigurationException(
+          "The truststore location parameter is empty for the ZooKeeper client connection.");
+    }
+    if (org.apache.commons.lang3.StringUtils.isEmpty(truststoreKeystore.truststorePassword)) {
+      throw new ConfigurationException(
+          "The truststore password parameter is empty for the ZooKeeper client connection.");
+    }
+  }
+
+  /**
+   * Configure ZooKeeper Client with SSL/TLS connection.
+   * @param zkClientConfig ZooKeeper Client configuration
+   * @param truststoreKeystore truststore keystore, that we use to set the SSL configurations
+   * @throws ConfigurationException if the SSL configs are empty
+   */
+  public static void setSslConfiguration(ZKClientConfig zkClientConfig,
+                                         TruststoreKeystore truststoreKeystore)
+          throws ConfigurationException {
+    setSslConfiguration(zkClientConfig, truststoreKeystore, new ClientX509Util());
+  }
+
+  public static void setSslConfiguration(ZKClientConfig zkClientConfig,
+                                         TruststoreKeystore truststoreKeystore,
+                                         ClientX509Util x509Util)
+          throws ConfigurationException {
+    validateSslConfiguration(truststoreKeystore);
+    LOG.info("Configuring the ZooKeeper client to use SSL/TLS encryption for connecting to the "
+        + "ZooKeeper server.");
+    LOG.debug("Configuring the ZooKeeper client with {} location: {}.",
+        truststoreKeystore.keystoreLocation,
+        CommonConfigurationKeys.ZK_SSL_KEYSTORE_LOCATION);
+    LOG.debug("Configuring the ZooKeeper client with {} location: {}.",
+        truststoreKeystore.truststoreLocation,
+        CommonConfigurationKeys.ZK_SSL_TRUSTSTORE_LOCATION);
+
+    zkClientConfig.setProperty(ZKClientConfig.SECURE_CLIENT, "true");
+    zkClientConfig.setProperty(ZKClientConfig.ZOOKEEPER_CLIENT_CNXN_SOCKET,
+        "org.apache.zookeeper.ClientCnxnSocketNetty");
+    zkClientConfig.setProperty(x509Util.getSslKeystoreLocationProperty(),
+        truststoreKeystore.keystoreLocation);
+    zkClientConfig.setProperty(x509Util.getSslKeystorePasswdProperty(),
+        truststoreKeystore.keystorePassword);
+    zkClientConfig.setProperty(x509Util.getSslTruststoreLocationProperty(),
+        truststoreKeystore.truststoreLocation);
+    zkClientConfig.setProperty(x509Util.getSslTruststorePasswdProperty(),
+        truststoreKeystore.truststorePassword);
+  }
+
+  /**
+   * Helper class to contain the Truststore/Keystore paths for the ZK client connection over
+   * SSL/TLS.
+   */
+  public static class TruststoreKeystore {
+    private final String keystoreLocation;
+    private final String keystorePassword;
+    private final String truststoreLocation;
+    private final String truststorePassword;
+
+    /**
+     * Configuration for the ZooKeeper connection when SSL/TLS is enabled.
+     * When a value is not configured, ensure that empty string is set instead of null.
+     *
+     * @param conf ZooKeeper Client configuration
+     */
+    public TruststoreKeystore(Configuration conf) {
+      keystoreLocation = conf.get(CommonConfigurationKeys.ZK_SSL_KEYSTORE_LOCATION, "");
+      keystorePassword = conf.get(CommonConfigurationKeys.ZK_SSL_KEYSTORE_PASSWORD, "");
+      truststoreLocation = conf.get(CommonConfigurationKeys.ZK_SSL_TRUSTSTORE_LOCATION, "");
+      truststorePassword = conf.get(CommonConfigurationKeys.ZK_SSL_TRUSTSTORE_PASSWORD, "");
+    }
+
+    public String getKeystoreLocation() {
+      return keystoreLocation;
+    }
+
+    public String getKeystorePassword() {
+      return keystorePassword;
+    }
+
+    public String getTruststoreLocation() {
+      return truststoreLocation;
+    }
+
+    public String getTruststorePassword() {
+      return truststorePassword;
     }
   }
 }

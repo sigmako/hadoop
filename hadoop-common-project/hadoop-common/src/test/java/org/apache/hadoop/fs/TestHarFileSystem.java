@@ -41,7 +41,6 @@ import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 import static org.apache.hadoop.fs.Options.ChecksumOpt;
@@ -125,10 +124,6 @@ public class TestHarFileSystem {
     public FileStatus[] listStatusBatch(Path f, byte[] token);
     public FileStatus[] listStatus(Path[] files);
     public FileStatus[] listStatus(Path[] files, PathFilter filter);
-    public RemoteIterator<PartialListing<LocatedFileStatus>> batchedListLocatedStatusIterator(
-        final List<Path> paths) throws IOException;
-    public RemoteIterator<PartialListing<FileStatus>> batchedListStatusIterator(
-        final List<Path> paths) throws IOException;
     public FileStatus[] globStatus(Path pathPattern);
     public FileStatus[] globStatus(Path pathPattern, PathFilter filter);
 
@@ -252,6 +247,18 @@ public class TestHarFileSystem {
     CompletableFuture<FSDataInputStream> openFileWithOptions(
         Path path,
         OpenFileParameters parameters) throws IOException;
+
+    MultipartUploaderBuilder createMultipartUploader(Path basePath)
+        throws IOException;
+
+    FSDataOutputStream append(Path f, boolean appendToNewBlock) throws IOException;
+
+    FSDataOutputStream append(Path f, int bufferSize,
+        Progressable progress, boolean appendToNewBlock) throws IOException;
+
+    Path getEnclosingRoot(Path path) throws IOException;
+
+    BulkDelete createBulkDelete(Path path) throws IllegalArgumentException, IOException;
   }
 
   @Test

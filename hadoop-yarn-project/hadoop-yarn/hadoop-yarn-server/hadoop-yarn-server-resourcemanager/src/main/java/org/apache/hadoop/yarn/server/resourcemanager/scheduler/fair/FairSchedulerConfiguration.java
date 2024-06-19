@@ -25,21 +25,21 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import com.google.common.collect.Lists;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.util.Lists;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceInformation;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.ResourceNotFoundException;
-import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.UnitsConversionUtil;
 import org.apache.hadoop.yarn.util.resource.ResourceUtils;
 import org.apache.hadoop.yarn.util.resource.Resources;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Private
 @Evolving
@@ -176,6 +176,8 @@ public class FairSchedulerConfiguration extends Configuration {
   public static final String  PREEMPTION = CONF_PREFIX + "preemption";
   public static final boolean DEFAULT_PREEMPTION = false;
 
+  protected static final String AM_PREEMPTION =
+      CONF_PREFIX + "am.preemption";
   protected static final String AM_PREEMPTION_PREFIX =
           CONF_PREFIX + "am.preemption.";
   protected static final boolean DEFAULT_AM_PREEMPTION = true;
@@ -407,7 +409,17 @@ public class FairSchedulerConfiguration extends Configuration {
   }
 
   public boolean getAMPreemptionEnabled(String queueName) {
-    return getBoolean(AM_PREEMPTION_PREFIX + queueName, DEFAULT_AM_PREEMPTION);
+    String propertyName = AM_PREEMPTION_PREFIX + queueName;
+
+    if (get(propertyName) != null) {
+      boolean amPreemptionEnabled =
+          getBoolean(propertyName, DEFAULT_AM_PREEMPTION);
+      LOG.debug("AM preemption enabled for queue {}: {}",
+          queueName, amPreemptionEnabled);
+      return amPreemptionEnabled;
+    }
+
+    return getBoolean(AM_PREEMPTION, DEFAULT_AM_PREEMPTION);
   }
 
   public float getPreemptionUtilizationThreshold() {
@@ -616,7 +628,7 @@ public class FairSchedulerConfiguration extends Configuration {
     final int memory = parseOldStyleResourceMemory(resources);
     final int vcores = parseOldStyleResourceVcores(resources);
     return new ConfigurableResource(
-            BuilderUtils.newResource(memory, vcores));
+            Resources.createResource(memory, vcores));
   }
 
   private static String[] findOldStyleResourcesInSpaceSeparatedInput(

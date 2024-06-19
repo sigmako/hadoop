@@ -17,6 +17,12 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_CRM_CHECKLOCKTIME_DEFAULT;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_CRM_CHECKLOCKTIME_ENABLE;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_CRM_MAXLOCKTIME_MS;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_CRM_MAXLOCKTIME_MS_DEFAULT;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_CRM_SLEEP_TIME_MS;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_CRM_SLEEP_TIME_MS_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_PATH_BASED_CACHE_BLOCK_MAP_ALLOCATION_PERCENT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_PATH_BASED_CACHE_BLOCK_MAP_ALLOCATION_PERCENT_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_LIST_CACHE_DIRECTIVES_NUM_RESPONSES;
@@ -43,7 +49,7 @@ import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.concurrent.locks.ReentrantLock;
 
-import org.apache.commons.io.IOUtils;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedListEntries;
@@ -82,17 +88,19 @@ import org.apache.hadoop.hdfs.server.namenode.startupprogress.StartupProgress.Co
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.Step;
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.StepType;
 import org.apache.hadoop.hdfs.util.ReadOnlyList;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.util.GSet;
 import org.apache.hadoop.util.LightWeightGSet;
+import org.apache.hadoop.util.Lists;
 import org.apache.hadoop.util.Time;
+
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.apache.hadoop.thirdparty.com.google.common.collect.HashMultimap;
+import org.apache.hadoop.thirdparty.com.google.common.collect.Multimap;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.HashMultimap;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Multimap;
 
 /**
  * The Cache Manager handles caching on DataNodes.
@@ -192,6 +200,9 @@ public class CacheManager {
    * The CacheReplicationMonitor.
    */
   private CacheReplicationMonitor monitor;
+  private boolean isCheckLockTimeEnable;
+  private long maxLockTimeMs;
+  private long sleepTimeMs;
 
   public static final class PersistState {
     public final CacheManagerSection section;
@@ -233,10 +244,29 @@ public class CacheManager {
     this.cachedBlocks = enabled ? new LightWeightGSet<CachedBlock, CachedBlock>(
           LightWeightGSet.computeCapacity(cachedBlocksPercent,
               "cachedBlocks")) : new LightWeightGSet<>(0);
+    this.isCheckLockTimeEnable = conf.getBoolean(
+        DFS_NAMENODE_CRM_CHECKLOCKTIME_ENABLE,
+        DFS_NAMENODE_CRM_CHECKLOCKTIME_DEFAULT);
+    this.maxLockTimeMs = conf.getLong(DFS_NAMENODE_CRM_MAXLOCKTIME_MS,
+        DFS_NAMENODE_CRM_MAXLOCKTIME_MS_DEFAULT);
+    this.sleepTimeMs = conf.getLong(DFS_NAMENODE_CRM_SLEEP_TIME_MS,
+        DFS_NAMENODE_CRM_SLEEP_TIME_MS_DEFAULT);
   }
 
   public boolean isEnabled() {
     return enabled;
+  }
+
+  public boolean isCheckLockTimeEnable() {
+    return isCheckLockTimeEnable;
+  }
+
+  public long getMaxLockTimeMs() {
+    return this.maxLockTimeMs;
+  }
+
+  public long getSleepTimeMs() {
+    return this.sleepTimeMs;
   }
 
   /**
@@ -279,7 +309,7 @@ public class CacheManager {
       if (this.monitor != null) {
         CacheReplicationMonitor prevMonitor = this.monitor;
         this.monitor = null;
-        IOUtils.closeQuietly(prevMonitor);
+        IOUtils.closeStream(prevMonitor);
       }
     } finally {
       crmLock.unlock();
@@ -935,6 +965,11 @@ public class CacheManager {
     }
   }
 
+  @SuppressFBWarnings(
+      value="EC_UNRELATED_TYPES",
+      justification="HDFS-15255 Asked Wei-Chiu and Pifta to review this" +
+          " warning and we all agree the code is OK and the warning is not " +
+          "needed")
   private void setCachedLocations(LocatedBlock block) {
     CachedBlock cachedBlock =
         new CachedBlock(block.getBlock().getBlockId(),
@@ -969,9 +1004,8 @@ public class CacheManager {
   public final void processCacheReport(final DatanodeID datanodeID,
       final List<Long> blockIds) throws IOException {
     if (!enabled) {
-      LOG.debug("Ignoring cache report from {} because {} = false. " +
-              "number of blocks: {}", datanodeID,
-              DFS_NAMENODE_CACHING_ENABLED_KEY, blockIds.size());
+      LOG.debug("Ignoring cache report from {} because {} = false. number of blocks: {}",
+          datanodeID, DFS_NAMENODE_CACHING_ENABLED_KEY, blockIds.size());
       return;
     }
     namesystem.writeLock();
@@ -996,9 +1030,8 @@ public class CacheManager {
     if (metrics != null) {
       metrics.addCacheBlockReport((int) (endTime - startTime));
     }
-    LOG.debug("Processed cache report from {}, blocks: {}, " +
-        "processing time: {} msecs", datanodeID, blockIds.size(), 
-        (endTime - startTime));
+    LOG.debug("Processed cache report from {}, blocks: {}, processing time: {} msecs",
+        datanodeID, blockIds.size(), (endTime - startTime));
   }
 
   private void processCacheReportImpl(final DatanodeDescriptor datanode,
@@ -1071,6 +1104,10 @@ public class CacheManager {
       if (p.getLimit() != null)
         b.setLimit(p.getLimit());
 
+      if (p.getMaxRelativeExpiryMs() != null) {
+        b.setMaxRelativeExpiry(p.getMaxRelativeExpiryMs());
+      }
+
       pools.add(b.build());
     }
 
@@ -1135,6 +1172,10 @@ public class CacheManager {
 
       if (p.hasLimit())
         info.setLimit(p.getLimit());
+
+      if (p.hasMaxRelativeExpiry()) {
+        info.setMaxRelativeExpiryMs(p.getMaxRelativeExpiry());
+      }
 
       addCachePool(info);
     }

@@ -18,8 +18,8 @@
 
 package org.apache.hadoop.yarn.server.webapp;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Joiner;
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.apache.hadoop.thirdparty.com.google.common.base.Joiner;
 import com.google.inject.Singleton;
 import com.sun.jersey.api.client.Client;
 import com.sun.jersey.api.client.ClientResponse;
@@ -138,6 +138,9 @@ public class LogWebService implements AppInfoProvider {
    * @param containerIdStr     The container ID
    * @param nmId               The Node Manager NodeId
    * @param redirectedFromNode Whether this is a redirected request from NM
+   * @param clusterId          clusterId the id of the cluster
+   * @param manualRedirection  whether to return a response with a Location
+   *                           instead of an automatic redirection
    * @return The log file's name and current file size
    */
   @GET
@@ -149,14 +152,16 @@ public class LogWebService implements AppInfoProvider {
       @QueryParam(YarnWebServiceParams.NM_ID) String nmId,
       @QueryParam(YarnWebServiceParams.REDIRECTED_FROM_NODE)
       @DefaultValue("false") boolean redirectedFromNode,
-      @QueryParam(YarnWebServiceParams.CLUSTER_ID) String clusterId) {
+      @QueryParam(YarnWebServiceParams.CLUSTER_ID) String clusterId,
+      @QueryParam(YarnWebServiceParams.MANUAL_REDIRECTION)
+      @DefaultValue("false") boolean manualRedirection) {
     initForReadableEndpoints(res);
 
     WrappedLogMetaRequest.Builder logMetaRequestBuilder =
         LogServlet.createRequestFromContainerId(containerIdStr);
 
     return logServlet.getContainerLogsInfo(req, logMetaRequestBuilder, nmId,
-        redirectedFromNode, clusterId);
+        redirectedFromNode, clusterId, manualRedirection);
   }
 
   @Override
@@ -240,6 +245,9 @@ public class LogWebService implements AppInfoProvider {
    * @param size               the size of the log file
    * @param nmId               The Node Manager NodeId
    * @param redirectedFromNode Whether this is the redirect request from NM
+   * @param clusterId          the id of the cluster
+   * @param manualRedirection  whether to return a response with a Location
+   *                           instead of an automatic redirection
    * @return The contents of the container's log file
    */
   @GET
@@ -256,9 +264,11 @@ public class LogWebService implements AppInfoProvider {
       @QueryParam(YarnWebServiceParams.NM_ID) String nmId,
       @QueryParam(YarnWebServiceParams.REDIRECTED_FROM_NODE)
           boolean redirectedFromNode,
-      @QueryParam(YarnWebServiceParams.CLUSTER_ID) String clusterId) {
+      @QueryParam(YarnWebServiceParams.CLUSTER_ID) String clusterId,
+      @QueryParam(YarnWebServiceParams.MANUAL_REDIRECTION)
+      @DefaultValue("false") boolean manualRedirection) {
     return getLogs(req, res, containerIdStr, filename, format, size, nmId,
-        redirectedFromNode, clusterId);
+        redirectedFromNode, clusterId, manualRedirection);
   }
 
   //TODO: YARN-4993: Refactory ContainersLogsBlock, AggregatedLogsBlock and
@@ -278,10 +288,12 @@ public class LogWebService implements AppInfoProvider {
       @QueryParam(YarnWebServiceParams.NM_ID) String nmId,
       @QueryParam(YarnWebServiceParams.REDIRECTED_FROM_NODE)
       @DefaultValue("false") boolean redirectedFromNode,
-      @QueryParam(YarnWebServiceParams.CLUSTER_ID) String clusterId) {
+      @QueryParam(YarnWebServiceParams.CLUSTER_ID) String clusterId,
+      @QueryParam(YarnWebServiceParams.MANUAL_REDIRECTION)
+      @DefaultValue("false") boolean manualRedirection) {
     initForReadableEndpoints(res);
     return logServlet.getLogFile(req, containerIdStr, filename, format, size,
-        nmId, redirectedFromNode, clusterId);
+        nmId, redirectedFromNode, clusterId, manualRedirection);
   }
 
   @VisibleForTesting protected TimelineEntity getEntity(String path,

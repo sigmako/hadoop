@@ -30,6 +30,8 @@ import java.util.EnumSet;
 import java.util.LinkedList;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CreateFlag;
@@ -47,6 +49,7 @@ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.datatransfer.BlockConstructionStage;
+import org.apache.hadoop.hdfs.protocol.datatransfer.PacketHeader;
 import org.apache.hadoop.hdfs.protocol.datatransfer.PacketReceiver;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
@@ -56,16 +59,20 @@ import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.PathUtils;
 import org.apache.hadoop.test.Whitebox;
-import org.apache.htrace.core.SpanId;
+import org.apache.hadoop.util.DataChecksum;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.Write.RECOVER_LEASE_ON_CLOSE_EXCEPTION_KEY;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyLong;
 import org.mockito.Mockito;
+
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -270,6 +277,8 @@ public class TestDFSOutputStream {
   public void testCongestionBackoff() throws IOException {
     DfsClientConf dfsClientConf = mock(DfsClientConf.class);
     DFSClient client = mock(DFSClient.class);
+    Configuration conf = mock(Configuration.class);
+    when(client.getConfiguration()).thenReturn(conf);
     when(client.getConf()).thenReturn(dfsClientConf);
     when(client.getTracer()).thenReturn(FsTracer.get(new Configuration()));
     client.clientRunning = true;
@@ -292,10 +301,91 @@ public class TestDFSOutputStream {
         Whitebox.getInternalState(stream, "congestedNodes");
     congestedNodes.add(mock(DatanodeInfo.class));
     DFSPacket packet = mock(DFSPacket.class);
-    when(packet.getTraceParents()).thenReturn(new SpanId[] {});
     dataQueue.add(packet);
     stream.run();
     Assert.assertTrue(congestedNodes.isEmpty());
+  }
+
+  @Test(timeout=60000)
+  public void testCongestionAckDelay() {
+    DfsClientConf dfsClientConf = mock(DfsClientConf.class);
+    DFSClient client = mock(DFSClient.class);
+    Configuration conf = mock(Configuration.class);
+    when(client.getConfiguration()).thenReturn(conf);
+    when(client.getConf()).thenReturn(dfsClientConf);
+    when(client.getTracer()).thenReturn(FsTracer.get(new Configuration()));
+    client.clientRunning = true;
+    DataStreamer stream = new DataStreamer(
+            mock(HdfsFileStatus.class),
+            mock(ExtendedBlock.class),
+            client,
+            "foo", null, null, null, null, null, null);
+    DataOutputStream blockStream = mock(DataOutputStream.class);
+    Whitebox.setInternalState(stream, "blockStream", blockStream);
+    Whitebox.setInternalState(stream, "stage",
+            BlockConstructionStage.PIPELINE_CLOSE);
+    @SuppressWarnings("unchecked")
+    LinkedList<DFSPacket> dataQueue = (LinkedList<DFSPacket>)
+            Whitebox.getInternalState(stream, "dataQueue");
+    @SuppressWarnings("unchecked")
+    ArrayList<DatanodeInfo> congestedNodes = (ArrayList<DatanodeInfo>)
+            Whitebox.getInternalState(stream, "congestedNodes");
+    int backOffMaxTime = (int)
+            Whitebox.getInternalState(stream, "congestionBackOffMaxTimeInMs");
+    DFSPacket[] packet = new DFSPacket[100];
+    AtomicBoolean isDelay = new AtomicBoolean(true);
+
+    // ResponseProcessor needs the dataQueue for the next step.
+    new Thread(() -> {
+      for (int i = 0; i < 10; i++) {
+        // In order to ensure that other threads run for a period of time to prevent affecting
+        // the results.
+        try {
+          Thread.sleep(backOffMaxTime / 50);
+        } catch (InterruptedException e) {
+          e.printStackTrace();
+        }
+        synchronized (dataQueue) {
+          congestedNodes.add(mock(DatanodeInfo.class));
+          // The DataStreamer releases the dataQueue before sleeping, and the ResponseProcessor
+          // has time to hold the dataQueue to continuously accept ACKs and add congestedNodes
+          // to the list. Therefore, congestedNodes.size() is greater than 1.
+          if (congestedNodes.size() > 1){
+            isDelay.set(false);
+            try {
+              doThrow(new IOException()).when(blockStream).flush();
+            } catch (Exception e) {
+              e.printStackTrace();
+            }
+          }
+        }
+      }
+      try {
+        doThrow(new IOException()).when(blockStream).flush();
+      } catch (Exception e) {
+        e.printStackTrace();
+      }
+      // Prevent the DataStreamer from always waiting because the
+      // dataQueue may be empty, so that the unit test cannot exit.
+      DFSPacket endPacket = mock(DFSPacket.class);
+      dataQueue.add(endPacket);
+    }).start();
+
+    // The purpose of adding packets to the dataQueue is to make the DataStreamer run
+    // normally and judge whether to enter the sleep state according to the congestion.
+    new Thread(() -> {
+      for (int i = 0; i < 100; i++) {
+        packet[i] = mock(DFSPacket.class);
+        dataQueue.add(packet[i]);
+        try {
+          Thread.sleep(backOffMaxTime / 100);
+        } catch (InterruptedException e) {
+          e.printStackTrace();
+        }
+      }
+    }).start();
+    stream.run();
+    Assert.assertFalse(isDelay.get());
   }
 
   @Test
@@ -350,7 +440,7 @@ public class TestDFSOutputStream {
         EnumSet.of(CreateFlag.CREATE), (short) 3, 1024, null , 1024, null);
     DFSOutputStream spyDFSOutputStream = Mockito.spy(dfsOutputStream);
     spyDFSOutputStream.closeThreads(anyBoolean());
-    verify(spyClient, times(1)).endFileLease(anyLong());
+    verify(spyClient, times(1)).endFileLease(anyString());
   }
 
   @Test
@@ -371,10 +461,114 @@ public class TestDFSOutputStream {
     os.close();
   }
 
+  @Test
+  public void testExceptionInCloseWithRecoverLease() throws Exception {
+    Configuration conf = new Configuration();
+    conf.setBoolean(RECOVER_LEASE_ON_CLOSE_EXCEPTION_KEY, true);
+    DFSClient client =
+        new DFSClient(cluster.getNameNode(0).getNameNodeAddress(), conf);
+    DFSClient spyClient = Mockito.spy(client);
+    DFSOutputStream dfsOutputStream = spyClient.create(
+        "/testExceptionInCloseWithRecoverLease", FsPermission.getFileDefault(),
+        EnumSet.of(CreateFlag.CREATE), (short) 3, 1024, null, 1024, null);
+    DFSOutputStream spyDFSOutputStream = Mockito.spy(dfsOutputStream);
+    doThrow(new IOException("Emulated IOException in close"))
+        .when(spyDFSOutputStream).completeFile();
+    try {
+      spyDFSOutputStream.close();
+      fail();
+    } catch (IOException ioe) {
+      assertTrue(spyDFSOutputStream.isLeaseRecovered());
+      waitForFileClosed("/testExceptionInCloseWithRecoverLease");
+      assertTrue(isFileClosed("/testExceptionInCloseWithRecoverLease"));
+    }
+  }
+
+  @Test
+  public void testExceptionInCloseWithoutRecoverLease() throws Exception {
+    Configuration conf = new Configuration();
+    DFSClient client =
+        new DFSClient(cluster.getNameNode(0).getNameNodeAddress(), conf);
+    DFSClient spyClient = Mockito.spy(client);
+    DFSOutputStream dfsOutputStream =
+        spyClient.create("/testExceptionInCloseWithoutRecoverLease",
+            FsPermission.getFileDefault(), EnumSet.of(CreateFlag.CREATE),
+            (short) 3, 1024, null, 1024, null);
+    DFSOutputStream spyDFSOutputStream = Mockito.spy(dfsOutputStream);
+    doThrow(new IOException("Emulated IOException in close"))
+        .when(spyDFSOutputStream).completeFile();
+    try {
+      spyDFSOutputStream.close();
+      fail();
+    } catch (IOException ioe) {
+      assertFalse(spyDFSOutputStream.isLeaseRecovered());
+      try {
+        waitForFileClosed("/testExceptionInCloseWithoutRecoverLease");
+      } catch (TimeoutException e) {
+        assertFalse(isFileClosed("/testExceptionInCloseWithoutRecoverLease"));
+      }
+    }
+  }
+
+  @Test(timeout=60000)
+  public void testFirstPacketSizeInNewBlocks() throws IOException {
+    final long blockSize = (long) 1024 * 1024;
+    MiniDFSCluster dfsCluster = cluster;
+    DistributedFileSystem fs = dfsCluster.getFileSystem();
+    Configuration dfsConf = fs.getConf();
+
+    EnumSet<CreateFlag> flags = EnumSet.of(CreateFlag.CREATE);
+    try(FSDataOutputStream fos = fs.create(new Path("/testfile.dat"),
+        FsPermission.getDefault(),
+        flags, 512, (short)3, blockSize, null)) {
+
+      DataChecksum crc32c = DataChecksum.newDataChecksum(
+          DataChecksum.Type.CRC32C, 512);
+
+      long loop = 0;
+      Random r = new Random();
+      byte[] buf = new byte[(int) blockSize];
+      r.nextBytes(buf);
+      fos.write(buf);
+      fos.hflush();
+
+      int chunkSize = crc32c.getBytesPerChecksum() + crc32c.getChecksumSize();
+      int packetContentSize = (dfsConf.getInt(DFS_CLIENT_WRITE_PACKET_SIZE_KEY,
+          DFS_CLIENT_WRITE_PACKET_SIZE_DEFAULT) -
+          PacketHeader.PKT_MAX_HEADER_LEN) / chunkSize * chunkSize;
+
+      while (loop < 20) {
+        r.nextBytes(buf);
+        fos.write(buf);
+        fos.hflush();
+        loop++;
+        Assert.assertEquals(((DFSOutputStream) fos.getWrappedStream()).packetSize,
+            packetContentSize);
+      }
+    }
+    fs.delete(new Path("/testfile.dat"), true);
+  }
+
   @AfterClass
   public static void tearDown() {
     if (cluster != null) {
       cluster.shutdown();
     }
+  }
+
+  private boolean isFileClosed(String path) throws IOException {
+    return cluster.getFileSystem().isFileClosed(new Path(path));
+  }
+
+  private void waitForFileClosed(String path) throws Exception {
+    GenericTestUtils.waitFor(() -> {
+      boolean closed;
+      try {
+        closed = isFileClosed(path);
+      } catch (IOException e) {
+        return false;
+      }
+      return closed;
+    }, 1000, 5000);
   }
 }

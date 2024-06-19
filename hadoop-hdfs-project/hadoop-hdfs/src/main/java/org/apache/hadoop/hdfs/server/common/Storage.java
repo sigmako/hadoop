@@ -25,6 +25,7 @@ import java.io.RandomAccessFile;
 import java.lang.management.ManagementFactory;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.attribute.PosixFilePermission;
@@ -53,8 +54,7 @@ import org.apache.hadoop.io.nativeio.NativeIOException;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.hadoop.util.VersionInfo;
 
-import com.google.common.base.Charsets;
-import com.google.common.base.Preconditions;
+import org.apache.hadoop.util.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -801,8 +801,7 @@ public abstract class Storage extends StorageInfo {
       case RECOVER_UPGRADE:   // mv previous.tmp -> current
         LOG.info("Recovering storage directory {} from previous upgrade",
             rootPath);
-        if (curDir.exists())
-          deleteDir(curDir);
+        deleteAsync(curDir);
         rename(getPreviousTmp(), curDir);
         return;
       case COMPLETE_ROLLBACK: // rm removed.tmp
@@ -818,21 +817,19 @@ public abstract class Storage extends StorageInfo {
       case COMPLETE_FINALIZE: // rm finalized.tmp
         LOG.info("Completing previous finalize for storage directory {}",
             rootPath);
-        deleteDir(getFinalizedTmp());
+        deleteAsync(getFinalizedTmp());
         return;
       case COMPLETE_CHECKPOINT: // mv lastcheckpoint.tmp -> previous.checkpoint
         LOG.info("Completing previous checkpoint for storage directory {}",
             rootPath);
         File prevCkptDir = getPreviousCheckpoint();
-        if (prevCkptDir.exists())
-          deleteDir(prevCkptDir);
+        deleteAsync(prevCkptDir);
         rename(getLastCheckpointTmp(), prevCkptDir);
         return;
       case RECOVER_CHECKPOINT:  // mv lastcheckpoint.tmp -> current
         LOG.info("Recovering storage directory {} from failed checkpoint",
             rootPath);
-        if (curDir.exists())
-          deleteDir(curDir);
+        deleteAsync(curDir);
         rename(getLastCheckpointTmp(), curDir);
         return;
       default:
@@ -840,7 +837,30 @@ public abstract class Storage extends StorageInfo {
             + " for storage directory: " + rootPath);
       }
     }
-    
+
+    /**
+     * Rename the curDir to curDir.tmp and delete the curDir.tmp parallely.
+     * @throws IOException
+     */
+    private void deleteAsync(File curDir) throws IOException {
+      if (curDir.exists()) {
+        File curTmp = new File(curDir.getParent(), curDir.getName() + ".tmp");
+        if (curTmp.exists()) {
+          deleteDir(curTmp);
+        }
+        rename(curDir, curTmp);
+        new Thread("Async Delete Current.tmp") {
+          public void run() {
+            try {
+              deleteDir(curTmp);
+            } catch (IOException e) {
+              LOG.warn("Deleting storage directory {} failed", curTmp);
+            }
+          }
+        }.start();
+      }
+    }
+
     /**
      * @return true if the storage directory should prompt the user prior
      * to formatting (i.e if the directory appears to contain some data)
@@ -924,7 +944,7 @@ public abstract class Storage extends StorageInfo {
           LOG.error("Unable to acquire file lock on path {}", lockF);
           throw new OverlappingFileLockException();
         }
-        file.write(jvmName.getBytes(Charsets.UTF_8));
+        file.write(jvmName.getBytes(StandardCharsets.UTF_8));
         LOG.info("Lock on {} acquired by nodename {}", lockF, jvmName);
       } catch(OverlappingFileLockException oe) {
         // Cannot read from the locked file on Windows.
@@ -1094,11 +1114,7 @@ public abstract class Storage extends StorageInfo {
   }
 
   public NamespaceInfo getNamespaceInfo() {
-    return new NamespaceInfo(
-        getNamespaceID(),
-        getClusterID(),
-        null,
-        getCTime());
+    return new NamespaceInfo(this);
   }
 
   /**

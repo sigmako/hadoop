@@ -29,7 +29,7 @@ import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 
 /**
  * Parses arguments passed to the FS-&gt;CS converter.
@@ -50,6 +50,7 @@ public class FSConfigToCSConfigArgumentHandler {
   private FSConfigToCSConfigRuleHandler ruleHandler;
   private FSConfigToCSConfigConverterParams converterParams;
   private ConversionOptions conversionOptions;
+  private ConvertedConfigValidator validator;
 
   private Supplier<FSConfigToCSConfigConverter>
       converterFunc = this::getConverter;
@@ -57,11 +58,14 @@ public class FSConfigToCSConfigArgumentHandler {
   public FSConfigToCSConfigArgumentHandler() {
     this.conversionOptions = new ConversionOptions(new DryRunResultHolder(),
         false);
+    this.validator = new ConvertedConfigValidator();
   }
 
   @VisibleForTesting
-  FSConfigToCSConfigArgumentHandler(ConversionOptions conversionOptions) {
+  FSConfigToCSConfigArgumentHandler(ConversionOptions conversionOptions,
+      ConvertedConfigValidator validator) {
     this.conversionOptions = conversionOptions;
+    this.validator = validator;
   }
 
   /**
@@ -98,6 +102,30 @@ public class FSConfigToCSConfigArgumentHandler {
         "Disables checking whether a placement rule is terminal to maintain" +
         " backward compatibility with configs that were made before YARN-8967.",
         false),
+    SKIP_VERIFICATION("skip verification", "s",
+        "skip-verification",
+        "Skips the verification of the converted configuration", false),
+    SKIP_PLACEMENT_RULES_CONVERSION("skip placement rules conversion",
+        "sp", "skip-convert-placement-rules",
+        "Do not convert placement rules", false),
+    ENABLE_ASYNC_SCHEDULER("enable asynchronous scheduler", "a", "enable-async-scheduler",
+      "Enables the Asynchronous scheduler which decouples the CapacityScheduler" +
+        " scheduling from Node Heartbeats.", false),
+    RULES_TO_FILE("rules to external file", "e", "rules-to-file",
+        "Generates the converted placement rules to an external JSON file " +
+        "called mapping-rules.json", false),
+    CONVERT_PERCENTAGES("convert weights to percentages",
+        "pc", "percentage",
+        "Converts FS queue weights to percentages",
+        false),
+    DISABLE_PREEMPTION("disable preemption", "dp", "disable-preemption",
+        "Disable the preemption with nopolicy or observeonly mode. " +
+            "Preemption is enabled by default. " +
+            "nopolicy removes ProportionalCapacityPreemptionPolicy from " +
+            "the list of monitor policies, " +
+            "observeonly sets " +
+            "yarn.resourcemanager.monitor.capacity.preemption.observe_only " +
+            "to true.", true),
     HELP("help", "h", "help", "Displays the list of options", false);
 
     private final String name;
@@ -143,6 +171,14 @@ public class FSConfigToCSConfigArgumentHandler {
           prepareAndGetConverter(cliParser);
 
       converter.convert(converterParams);
+
+      String outputDir = converterParams.getOutputDirectory();
+      boolean skipVerification =
+          cliParser.hasOption(CliOption.SKIP_VERIFICATION.shortSwitch);
+      if (outputDir != null && !skipVerification) {
+        validator.validateConvertedConfig(
+            converterParams.getOutputDirectory());
+      }
     } catch (ParseException e) {
       String msg = "Options parsing failed: " + e.getMessage();
       logAndStdErr(e, msg);
@@ -162,6 +198,11 @@ public class FSConfigToCSConfigArgumentHandler {
       String msg = "Fatal error during FS config conversion: " + e.getMessage();
       handleException(e, msg);
       retVal = -1;
+    } catch (VerificationException e) {
+      Throwable cause = e.getCause();
+      String msg = "Verification failed: " + e.getCause().getMessage();
+      conversionOptions.handleVerificationFailure(cause, msg);
+      retVal = -1;
     }
 
     conversionOptions.handleParsingFinished();
@@ -173,8 +214,8 @@ public class FSConfigToCSConfigArgumentHandler {
     conversionOptions.handleGenericException(e, msg);
   }
 
-  static void logAndStdErr(Exception e, String msg) {
-    LOG.debug("Stack trace", e);
+  static void logAndStdErr(Throwable t, String msg) {
+    LOG.debug("Stack trace", t);
     LOG.error(msg);
     System.err.println(msg);
   }
@@ -196,6 +237,8 @@ public class FSConfigToCSConfigArgumentHandler {
     conversionOptions.setDryRun(dryRun);
     conversionOptions.setNoTerminalRuleCheck(
         cliParser.hasOption(CliOption.NO_TERMINAL_RULE_CHECK.shortSwitch));
+    conversionOptions.setEnableAsyncScheduler(
+      cliParser.hasOption(CliOption.ENABLE_ASYNC_SCHEDULER.shortSwitch));
 
     checkOptionPresent(cliParser, CliOption.YARN_SITE);
     checkOutputDefined(cliParser, dryRun);
@@ -216,12 +259,32 @@ public class FSConfigToCSConfigArgumentHandler {
         cliParser.getOptionValue(CliOption.CONVERSION_RULES.shortSwitch);
     String outputDir =
         cliParser.getOptionValue(CliOption.OUTPUT_DIR.shortSwitch);
+    FSConfigToCSConfigConverterParams.
+        PreemptionMode preemptionMode =
+        FSConfigToCSConfigConverterParams.
+            PreemptionMode.fromString(cliParser.
+                getOptionValue(CliOption.DISABLE_PREEMPTION.shortSwitch));
+
+    boolean convertPlacementRules =
+        !cliParser.hasOption(
+            CliOption.SKIP_PLACEMENT_RULES_CONVERSION.shortSwitch);
 
     checkFile(CliOption.YARN_SITE, yarnSiteXmlFile);
     checkFile(CliOption.FAIR_SCHEDULER, fairSchedulerXmlFile);
     checkFile(CliOption.CONVERSION_RULES, conversionRulesFile);
     checkDirectory(CliOption.OUTPUT_DIR, outputDir);
     checkOutputDirDoesNotContainXmls(yarnSiteXmlFile, outputDir);
+    if (cliParser.hasOption(CliOption.
+        DISABLE_PREEMPTION.shortSwitch)) {
+      checkDisablePreemption(preemptionMode);
+    }
+
+    // check mapping-rules.json if we intend to generate it
+    if (!cliParser.hasOption(CliOption.CONSOLE_MODE.shortSwitch) &&
+        cliParser.hasOption(CliOption.RULES_TO_FILE.shortSwitch)) {
+      checkFileNotInOutputDir(new File(outputDir),
+          FSConfigToCSConfigConverter.MAPPING_RULES_JSON);
+    }
 
     return FSConfigToCSConfigConverterParams.Builder.create()
         .withYarnSiteXmlConfig(yarnSiteXmlFile)
@@ -231,6 +294,12 @@ public class FSConfigToCSConfigArgumentHandler {
             cliParser.getOptionValue(CliOption.CLUSTER_RESOURCE.shortSwitch))
         .withConsole(cliParser.hasOption(CliOption.CONSOLE_MODE.shortSwitch))
         .withOutputDirectory(outputDir)
+        .withConvertPlacementRules(convertPlacementRules)
+        .withPlacementRulesToFile(
+            cliParser.hasOption(CliOption.RULES_TO_FILE.shortSwitch))
+        .withUsePercentages(
+            cliParser.hasOption(CliOption.CONVERT_PERCENTAGES.shortSwitch))
+        .withDisablePreemption(preemptionMode)
         .build();
   }
 
@@ -330,6 +399,16 @@ public class FSConfigToCSConfigArgumentHandler {
       throw new PreconditionException(
           String.format("Specified path %s does not exist " +
           "(As value of parameter %s)", filePath, cliOption.name));
+    }
+  }
+
+  private static void checkDisablePreemption(FSConfigToCSConfigConverterParams.
+      PreemptionMode preemptionMode) {
+    if (preemptionMode == FSConfigToCSConfigConverterParams.
+        PreemptionMode.ENABLED) {
+      throw new PreconditionException(
+          "Specified disable-preemption mode is illegal, " +
+              " use nopolicy or observeonly.");
     }
   }
 

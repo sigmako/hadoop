@@ -23,10 +23,11 @@ import static org.junit.Assert.assertTrue;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.concurrent.TimeoutException;
 
-import com.google.common.base.Supplier;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -46,7 +47,7 @@ public class TestBalancerBandwidth {
   final static private int DEFAULT_BANDWIDTH = 1024*1024;
   public static final Logger LOG =
       LoggerFactory.getLogger(TestBalancerBandwidth.class);
-  private static final Charset UTF8 = Charset.forName("UTF-8");
+  private static final Charset UTF8 = StandardCharsets.UTF_8;
   private final ByteArrayOutputStream outContent = new ByteArrayOutputStream();
   private final PrintStream outStream = new PrintStream(outContent);
 

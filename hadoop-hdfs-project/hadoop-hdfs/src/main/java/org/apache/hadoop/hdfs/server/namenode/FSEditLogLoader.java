@@ -116,9 +116,9 @@ import org.apache.hadoop.log.LogThrottlingHelper;
 import org.apache.hadoop.util.ChunkedArrayList;
 import org.apache.hadoop.util.Timer;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Joiner;
-import com.google.common.base.Preconditions;
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.apache.hadoop.thirdparty.com.google.common.base.Joiner;
+import org.apache.hadoop.util.Preconditions;
 
 import static org.apache.hadoop.log.LogThrottlingHelper.LogAction;
 
@@ -132,7 +132,8 @@ public class FSEditLogLoader {
   /** Limit logging about edit loading to every 5 seconds max. */
   @VisibleForTesting
   static final long LOAD_EDIT_LOG_INTERVAL_MS = 5000;
-  private final LogThrottlingHelper loadEditsLogHelper =
+  @VisibleForTesting
+  static final LogThrottlingHelper LOAD_EDITS_LOG_HELPER =
       new LogThrottlingHelper(LOAD_EDIT_LOG_INTERVAL_MS);
 
   private final FSNamesystem fsNamesys;
@@ -173,7 +174,7 @@ public class FSEditLogLoader {
     fsNamesys.writeLock();
     try {
       long startTime = timer.monotonicNow();
-      LogAction preLogAction = loadEditsLogHelper.record("pre", startTime);
+      LogAction preLogAction = LOAD_EDITS_LOG_HELPER.record("pre", startTime);
       if (preLogAction.shouldLog()) {
         FSImage.LOG.info("Start loading edits file " + edits.getName()
             + " maxTxnsToRead = " + maxTxnsToRead +
@@ -182,7 +183,7 @@ public class FSEditLogLoader {
       long numEdits = loadEditRecords(edits, false, expectedStartingTxId,
           maxTxnsToRead, startOpt, recovery);
       long endTime = timer.monotonicNow();
-      LogAction postLogAction = loadEditsLogHelper.record("post", endTime,
+      LogAction postLogAction = LOAD_EDITS_LOG_HELPER.record("post", endTime,
           numEdits, edits.length(), endTime - startTime);
       if (postLogAction.shouldLog()) {
         FSImage.LOG.info("Loaded {} edits file(s) (the last named {}) of " +
@@ -798,7 +799,7 @@ public class FSEditLogLoader {
       final String snapshotRoot =
           renameReservedPathsOnUpgrade(createSnapshotOp.snapshotRoot,
               logVersion);
-      INodesInPath iip = fsDir.getINodesInPath(snapshotRoot, DirOp.WRITE);
+      INodesInPath iip = fsDir.unprotectedResolvePath(snapshotRoot);
       String path = fsNamesys.getSnapshotManager().createSnapshot(
           fsDir.getFSNamesystem().getLeaseManager(),
           iip, snapshotRoot, createSnapshotOp.snapshotName,
@@ -816,7 +817,7 @@ public class FSEditLogLoader {
       final String snapshotRoot =
           renameReservedPathsOnUpgrade(deleteSnapshotOp.snapshotRoot,
               logVersion);
-      INodesInPath iip = fsDir.getINodesInPath(snapshotRoot, DirOp.WRITE);
+      INodesInPath iip = fsDir.unprotectedResolvePath(snapshotRoot);
       fsNamesys.getSnapshotManager().deleteSnapshot(iip,
           deleteSnapshotOp.snapshotName,
           new INode.ReclaimContext(fsNamesys.dir.getBlockStoragePolicySuite(),
@@ -838,7 +839,7 @@ public class FSEditLogLoader {
       final String snapshotRoot =
           renameReservedPathsOnUpgrade(renameSnapshotOp.snapshotRoot,
               logVersion);
-      INodesInPath iip = fsDir.getINodesInPath(snapshotRoot, DirOp.WRITE);
+      INodesInPath iip = fsDir.unprotectedResolvePath(snapshotRoot);
       fsNamesys.getSnapshotManager().renameSnapshot(iip,
           snapshotRoot, renameSnapshotOp.snapshotOldName,
           renameSnapshotOp.snapshotNewName, renameSnapshotOp.mtime);
@@ -912,6 +913,7 @@ public class FSEditLogLoader {
       fsNamesys.getFSImage().updateStorageVersion();
       fsNamesys.getFSImage().renameCheckpoint(NameNodeFile.IMAGE_ROLLBACK,
           NameNodeFile.IMAGE);
+      fsNamesys.setNeedRollbackFsImage(false);
       break;
     }
     case OP_ADD_CACHE_DIRECTIVE: {
@@ -1150,8 +1152,12 @@ public class FSEditLogLoader {
       oldBlock.setNumBytes(newBlock.getNumBytes());
       boolean changeMade =
         oldBlock.getGenerationStamp() != newBlock.getGenerationStamp();
-      oldBlock.setGenerationStamp(newBlock.getGenerationStamp());
-      
+      final long newGenerationStamp = newBlock.getGenerationStamp();
+      oldBlock.setGenerationStamp(newGenerationStamp);
+      // Update global generation stamp in Standby NameNode
+      fsNamesys.getBlockManager().getBlockIdManager().
+          setGenerationStampIfGreater(newGenerationStamp);
+
       if (!oldBlock.isComplete() &&
           (!isLastBlock || op.shouldCompleteLastBlock())) {
         changeMade = true;
@@ -1234,7 +1240,7 @@ public class FSEditLogLoader {
       holder = new Holder<Integer>(1);
       opCounts.put(opCode, holder);
     } else {
-      holder.held++;
+      holder.held = holder.held + 1;
     }
     counter.increment();
   }

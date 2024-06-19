@@ -55,14 +55,16 @@ import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.ReservationSubmi
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.ReservationUpdateRequestInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.ResourceInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.ResourceOptionInfo;
+import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.BulkActivitiesInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.SchedulerTypeInfo;
 import org.apache.hadoop.yarn.server.webapp.dao.AppAttemptInfo;
 import org.apache.hadoop.yarn.server.webapp.dao.ContainerInfo;
 import org.apache.hadoop.yarn.server.webapp.dao.ContainersInfo;
+import org.apache.hadoop.yarn.webapp.dao.SchedConfUpdateInfo;
 
 /**
- * Mock intercepter that does not do anything other than forwarding it to the
- * next intercepter in the chain.
+ * Mock interceptor that does not do anything other than forwarding it to the
+ * next interceptor in the chain.
  */
 public class PassThroughRESTRequestInterceptor
     extends AbstractRESTRequestInterceptor {
@@ -167,6 +169,13 @@ public class PassThroughRESTRequestInterceptor
   }
 
   @Override
+  public BulkActivitiesInfo getBulkActivities(HttpServletRequest hsr,
+      String groupBy, int activitiesCount) throws InterruptedException {
+    return getNextInterceptor().getBulkActivities(hsr, groupBy,
+        activitiesCount);
+  }
+
+  @Override
   public AppActivitiesInfo getAppActivities(HttpServletRequest hsr,
       String appId, String time, Set<String> requestPriorities,
       Set<String> allocationRequestIds, String groupBy, String limit,
@@ -209,6 +218,11 @@ public class PassThroughRESTRequestInterceptor
   }
 
   @Override
+  public NodeLabelsInfo getRMNodeLabels(HttpServletRequest hsr) throws IOException {
+    return getNextInterceptor().getRMNodeLabels(hsr);
+  }
+
+  @Override
   public LabelsToNodesInfo getLabelsToNodes(Set<String> labels)
       throws IOException {
     return getNextInterceptor().getLabelsToNodes(labels);
@@ -240,9 +254,9 @@ public class PassThroughRESTRequestInterceptor
   }
 
   @Override
-  public Response removeFromCluserNodeLabels(Set<String> oldNodeLabels,
+  public Response removeFromClusterNodeLabels(Set<String> oldNodeLabels,
       HttpServletRequest hsr) throws Exception {
-    return getNextInterceptor().removeFromCluserNodeLabels(oldNodeLabels, hsr);
+    return getNextInterceptor().removeFromClusterNodeLabels(oldNodeLabels, hsr);
   }
 
   @Override
@@ -370,5 +384,18 @@ public class PassThroughRESTRequestInterceptor
   public Response signalToContainer(String containerId,
       String command, HttpServletRequest req) throws AuthorizationException {
     return getNextInterceptor().signalToContainer(containerId, command, req);
+  }
+
+  @Override
+  public Response updateSchedulerConfiguration(SchedConfUpdateInfo mutationInfo,
+      HttpServletRequest hsr)
+      throws AuthorizationException, InterruptedException {
+    return getNextInterceptor().updateSchedulerConfiguration(mutationInfo, hsr);
+  }
+
+  @Override
+  public Response getSchedulerConfiguration(HttpServletRequest hsr)
+      throws AuthorizationException {
+    return getNextInterceptor().getSchedulerConfiguration(hsr);
   }
 }

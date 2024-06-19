@@ -176,7 +176,7 @@ Response Body:
                 "finishTime" : 1326381356010
              },
              {
-                "submitTime" : 1326381446500
+                "submitTime" : 1326381446500,
                 "state" : "SUCCEEDED",
                 "user" : "user1",
                 "reducesTotal" : 1,
@@ -1415,7 +1415,7 @@ With the task counters API, you can object a collection of resources that repres
 | Item | Data Type | Description |
 |:---- |:---- |:---- |
 | id | string | The task id |
-| taskcounterGroup | array of counterGroup objects(JSON)/zero or more counterGroup objects(XML) | A collection of counter group objects |
+| taskCounterGroup | array of counterGroup objects(JSON)/zero or more counterGroup objects(XML) | A collection of counter group objects |
 
 #### Elements of the *counterGroup* object
 

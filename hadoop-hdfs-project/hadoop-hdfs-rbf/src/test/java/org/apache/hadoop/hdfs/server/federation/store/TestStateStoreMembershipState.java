@@ -29,31 +29,48 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.spy;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import org.apache.hadoop.hdfs.server.federation.resolver.FederationNamenodeServiceState;
+import org.apache.hadoop.hdfs.server.federation.resolver.FederationNamespaceInfo;
 import org.apache.hadoop.hdfs.server.federation.router.RBFConfigKeys;
 import org.apache.hadoop.hdfs.server.federation.store.protocol.GetNamenodeRegistrationsRequest;
 import org.apache.hadoop.hdfs.server.federation.store.protocol.GetNamenodeRegistrationsResponse;
+import org.apache.hadoop.hdfs.server.federation.store.protocol.GetNamespaceInfoRequest;
+import org.apache.hadoop.hdfs.server.federation.store.protocol.GetNamespaceInfoResponse;
 import org.apache.hadoop.hdfs.server.federation.store.protocol.NamenodeHeartbeatRequest;
 import org.apache.hadoop.hdfs.server.federation.store.protocol.NamenodeHeartbeatResponse;
 import org.apache.hadoop.hdfs.server.federation.store.protocol.UpdateNamenodeRegistrationRequest;
 import org.apache.hadoop.hdfs.server.federation.store.records.MembershipState;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.test.GenericTestUtils.DelayAnswer;
 import org.apache.hadoop.util.Time;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test the basic {@link MembershipStore} membership functionality.
  */
 public class TestStateStoreMembershipState extends TestStateStoreBase {
+
+  private static Logger LOG = LoggerFactory.getLogger(
+      TestStateStoreMembershipState.class);
 
   private static MembershipStore membershipStore;
 
@@ -182,7 +199,7 @@ public class TestStateStoreMembershipState extends TestStateStoreBase {
     // 1) ns0:nn0 - Standby (newest)
     // 2) ns0:nn0 - Active (oldest)
     // 3) ns0:nn0 - Active (2nd oldest)
-    // 4) ns0:nn0 - Active (3nd oldest element, newest active element)
+    // 4) ns0:nn0 - Active (3rd oldest element, newest active element)
     // Verify the selected entry is the newest majority opinion (4)
     String ns = "ns0";
     String nn = "nn0";
@@ -217,6 +234,58 @@ public class TestStateStoreMembershipState extends TestStateStoreBase {
         report.getNameserviceId(), report.getNamenodeId());
     assertNotNull(quorumEntry);
     assertEquals(quorumEntry.getRouterId(), ROUTERS[3]);
+  }
+
+  /**
+   * Fix getRepresentativeQuorum when records have same date modified time.
+   */
+  @Test
+  public void testRegistrationMajorityQuorumEqDateModified()
+      throws IOException {
+
+    // Populate the state store with a set of non-matching elements
+    // 1) ns0:nn0 - Standby (newest)
+    // 2) ns0:nn0 - Active
+    // 3) ns0:nn0 - Active
+    // 4) ns0:nn0 - Active
+    // (2), (3), (4) have the same date modified time
+    // Verify the selected entry is the newest majority opinion (4)
+    String ns = "ns0";
+    String nn = "nn0";
+
+    long dateModified = Time.now();
+    // Active - oldest
+    MembershipState report = createRegistration(
+        ns, nn, ROUTERS[1], FederationNamenodeServiceState.ACTIVE);
+    report.setDateModified(dateModified);
+    assertTrue(namenodeHeartbeat(report));
+
+    // Active - 2nd oldest
+    report = createRegistration(
+        ns, nn, ROUTERS[2], FederationNamenodeServiceState.ACTIVE);
+    report.setDateModified(dateModified);
+    assertTrue(namenodeHeartbeat(report));
+
+    // Active - 3rd oldest
+    report = createRegistration(
+        ns, nn, ROUTERS[3], FederationNamenodeServiceState.ACTIVE);
+    report.setDateModified(dateModified);
+    assertTrue(namenodeHeartbeat(report));
+
+    // standby - newest overall
+    report = createRegistration(
+        ns, nn, ROUTERS[0], FederationNamenodeServiceState.STANDBY);
+    assertTrue(namenodeHeartbeat(report));
+
+    // Load and calculate quorum
+    assertTrue(getStateStore().loadCache(MembershipStore.class, true));
+
+    // Verify quorum entry
+    MembershipState quorumEntry = getNamenodeRegistration(
+        report.getNameserviceId(), report.getNamenodeId());
+    assertNotNull(quorumEntry);
+    // The name node status should be active
+    assertEquals(FederationNamenodeServiceState.ACTIVE, quorumEntry.getState());
   }
 
   @Test
@@ -473,6 +542,144 @@ public class TestStateStoreMembershipState extends TestStateStoreBase {
     }, 100, 3000);
   }
 
+  @Test
+  public void testRegistrationExpiredRaceCondition()
+      throws InterruptedException, IOException, TimeoutException, ExecutionException {
+
+    // Populate the state store with a single NN element
+    // 1) ns0:nn0 - Expired
+    // Create a thread to refresh the cached records, pulling the expired record
+    // into the thread's memory
+    // Then insert an active record, and confirm that the refresh thread does not
+    // override the active record with the expired record it has in memory
+
+    MembershipState.setDeletionMs(-1);
+
+    MembershipState expiredReport = createRegistration(
+        NAMESERVICES[0], NAMENODES[0], ROUTERS[0],
+        FederationNamenodeServiceState.ACTIVE);
+    expiredReport.setDateModified(Time.monotonicNow() - 5000);
+    expiredReport.setState(FederationNamenodeServiceState.EXPIRED);
+    assertTrue(namenodeHeartbeat(expiredReport));
+
+    // Load cache
+    MembershipStore memStoreSpy = spy(membershipStore);
+    DelayAnswer delayer = new DelayAnswer(LOG);
+    doAnswer(delayer).when(memStoreSpy).overrideExpiredRecords(any());
+
+    ExecutorService pool = Executors.newFixedThreadPool(1);
+
+    Future<Boolean> cacheRefreshFuture = pool.submit(() -> {
+      try {
+        return memStoreSpy.loadCache(true);
+      } catch (IOException e) {
+        LOG.error("Exception while loading cache:", e);
+      }
+      return false;
+    });
+
+    // Verify quorum and entry
+    MembershipState quorumEntry = getNamenodeRegistration(
+        expiredReport.getNameserviceId(), expiredReport.getNamenodeId());
+    assertNull(quorumEntry);
+
+
+    MembershipState record = membershipStore.getDriver()
+        .get(MembershipState.class).getRecords().get(0);
+    assertNotNull(record);
+    assertEquals(ROUTERS[0], record.getRouterId());
+    assertEquals(FederationNamenodeServiceState.EXPIRED,
+        record.getState());
+
+    // Insert active while the other thread refreshing it's cache
+    MembershipState activeReport = createRegistration(
+        NAMESERVICES[0], NAMENODES[0], ROUTERS[0],
+        FederationNamenodeServiceState.ACTIVE);
+
+    delayer.waitForCall();
+    assertTrue(namenodeHeartbeat(activeReport));
+
+    record = membershipStore.getDriver()
+        .get(MembershipState.class).getRecords().get(0);
+    assertNotNull(record);
+    assertEquals(ROUTERS[0], record.getRouterId());
+    assertEquals(FederationNamenodeServiceState.ACTIVE,
+        record.getState());
+
+    quorumEntry = getExpiredNamenodeRegistration(
+        expiredReport.getNameserviceId(), expiredReport.getNamenodeId());
+    assertNull(quorumEntry);
+
+    // Allow the thread to finish refreshing the cache
+    delayer.proceed();
+    assertTrue(cacheRefreshFuture.get(5, TimeUnit.SECONDS));
+
+    // The state store should still be the active report
+    record = membershipStore.getDriver()
+        .get(MembershipState.class).getRecords().get(0);
+    assertNotNull(record);
+    assertEquals(ROUTERS[0], record.getRouterId());
+    assertEquals(FederationNamenodeServiceState.ACTIVE,
+        record.getState());
+
+    membershipStore.loadCache(true);
+
+    quorumEntry = getExpiredNamenodeRegistration(
+        expiredReport.getNameserviceId(),
+        expiredReport.getNamenodeId());
+    assertNull(quorumEntry);
+  }
+
+  @Test
+  public void testNamespaceInfoWithUnavailableNameNodeRegistration()
+      throws IOException {
+    // Populate the state store with one ACTIVE NameNode entry
+    // and one UNAVAILABLE NameNode entry
+    // 1) ns0:nn0 - ACTIVE
+    // 2) ns0:nn1 - UNAVAILABLE
+    List<MembershipState> registrationList = new ArrayList<>();
+    String router = ROUTERS[0];
+    String ns = NAMESERVICES[0];
+    String rpcAddress = "testrpcaddress";
+    String serviceAddress = "testserviceaddress";
+    String lifelineAddress = "testlifelineaddress";
+    String blockPoolId = "testblockpool";
+    String clusterId = "testcluster";
+    String webScheme = "http";
+    String webAddress = "testwebaddress";
+    boolean safemode = false;
+
+    MembershipState record = MembershipState.newInstance(
+        router, ns, NAMENODES[0], clusterId, blockPoolId,
+        rpcAddress, serviceAddress, lifelineAddress, webScheme,
+        webAddress, FederationNamenodeServiceState.ACTIVE, safemode);
+    registrationList.add(record);
+
+    // Set empty clusterId and blockPoolId for UNAVAILABLE NameNode
+    record = MembershipState.newInstance(
+        router, ns, NAMENODES[1], "", "",
+        rpcAddress, serviceAddress, lifelineAddress, webScheme,
+        webAddress, FederationNamenodeServiceState.UNAVAILABLE, safemode);
+    registrationList.add(record);
+
+    registerAndLoadRegistrations(registrationList);
+
+    GetNamespaceInfoRequest request = GetNamespaceInfoRequest.newInstance();
+    GetNamespaceInfoResponse response
+        = membershipStore.getNamespaceInfo(request);
+    Set<FederationNamespaceInfo> namespaces = response.getNamespaceInfo();
+
+    // Verify only one namespace is registered
+    assertEquals(1, namespaces.size());
+
+    // Verify the registered namespace has a valid pair of clusterId
+    // and blockPoolId derived from ACTIVE NameNode
+    FederationNamespaceInfo namespace = namespaces.iterator().next();
+    assertEquals(ns, namespace.getNameserviceId());
+    assertEquals(clusterId, namespace.getClusterId());
+    assertEquals(blockPoolId, namespace.getBlockPoolId());
+  }
+
   /**
    * Get a single namenode membership record from the store.
    *
@@ -532,8 +739,6 @@ public class TestStateStoreMembershipState extends TestStateStoreBase {
   /**
    * Register a namenode heartbeat with the state store.
    *
-   * @param store FederationMembershipStateStore instance to retrieve the
-   *          membership data records.
    * @param namenode A fully populated namenode membership record to be
    *          committed to the data store.
    * @return True if successful, false otherwise.

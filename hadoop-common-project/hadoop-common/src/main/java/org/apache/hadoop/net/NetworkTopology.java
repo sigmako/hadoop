@@ -17,9 +17,8 @@
  */
 package org.apache.hadoop.net;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.apache.hadoop.util.Preconditions;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -29,6 +28,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
@@ -52,6 +53,8 @@ public class NetworkTopology {
   private static final char PATH_SEPARATOR = '/';
   private static final String PATH_SEPARATOR_STR = "/";
   private static final String ROOT = "/";
+  private static final AtomicReference<Random> RANDOM_REF =
+      new AtomicReference<>();
 
   public static class InvalidTopologyException extends RuntimeException {
     private static final long serialVersionUID = 1L;
@@ -98,6 +101,13 @@ public class NetworkTopology {
   private int depthOfAllLeaves = -1;
   /** rack counter */
   protected int numOfRacks = 0;
+  /** empty rack map, rackname->nodenumber. */
+  private HashMap<String, Set<String>> rackMap =
+      new HashMap<String, Set<String>>();
+  /** decommission nodes, contained stoped nodes. */
+  private HashSet<String> decommissionNodes = new HashSet<>();
+  /** empty rack counter. */
+  private int numOfEmptyRacks = 0;
 
   /**
    * Whether or not this cluster has ever consisted of more than 1 rack,
@@ -147,6 +157,7 @@ public class NetworkTopology {
         if (rack == null) {
           incrementRacks();
         }
+        interAddNodeWithEmptyRack(node);
         if (depthOfAllLeaves == -1) {
           depthOfAllLeaves = node.getLevel();
         }
@@ -196,10 +207,8 @@ public class NetworkTopology {
         loc = loc.substring(1);
       }
       InnerNode rack = (InnerNode) clusterMap.getLoc(loc);
-      if (rack == null) {
-        return null;
-      }
-      return new ArrayList<Node>(rack.getChildren());
+      return (rack == null) ? new ArrayList<>(0)
+          : new ArrayList<>(rack.getChildren());
     } finally {
       netlock.readLock().unlock();
     }
@@ -223,6 +232,7 @@ public class NetworkTopology {
         if (rack == null) {
           numOfRacks--;
         }
+        interRemoveNodeWithEmptyRack(node);
       }
       LOG.debug("NetworkTopology became:\n{}", this);
     } finally {
@@ -396,28 +406,25 @@ public class NetworkTopology {
    * @exception IllegalArgumentException when either node1 or node2 is null, or
    * node1 or node2 do not belong to the cluster
    */
-  public boolean isOnSameRack( Node node1,  Node node2) {
+  public boolean isOnSameRack(Node node1, Node node2) {
     if (node1 == null || node2 == null) {
       return false;
     }
-      
-    netlock.readLock().lock();
-    try {
-      return isSameParents(node1, node2);
-    } finally {
-      netlock.readLock().unlock();
-    }
+
+    return isSameParents(node1, node2);
   }
   
   /**
-   * Check if network topology is aware of NodeGroup
+   * @return Check if network topology is aware of NodeGroup.
    */
   public boolean isNodeGroupAware() {
     return false;
   }
   
   /** 
-   * Return false directly as not aware of NodeGroup, to be override in sub-class
+   * @return Return false directly as not aware of NodeGroup, to be override in sub-class.
+   * @param node1 input node1.
+   * @param node2 input node2.
    */
   public boolean isOnSameNodeGroup(Node node1, Node node2) {
     return false;
@@ -440,11 +447,14 @@ public class NetworkTopology {
     return node1.getParent()==node2.getParent();
   }
 
-  private static final Random r = new Random();
-
   @VisibleForTesting
   void setRandomSeed(long seed) {
-    r.setSeed(seed);
+    RANDOM_REF.set(new Random(seed));
+  }
+
+  Random getRandom() {
+    Random random = RANDOM_REF.get();
+    return (random == null) ? ThreadLocalRandom.current() : random;
   }
 
   /**
@@ -487,10 +497,10 @@ public class NetworkTopology {
   protected Node chooseRandom(final String scope, String excludedScope,
       final Collection<Node> excludedNodes) {
     if (excludedScope != null) {
-      if (scope.startsWith(excludedScope)) {
+      if (isChildScope(scope, excludedScope)) {
         return null;
       }
-      if (!excludedScope.startsWith(scope)) {
+      if (!isChildScope(excludedScope, scope)) {
         excludedScope = null;
       }
     }
@@ -512,8 +522,7 @@ public class NetworkTopology {
       }
     }
     if (numOfDatanodes <= 0) {
-      LOG.debug("Failed to find datanode (scope=\"{}\" excludedScope=\"{}\")."
-              + " numOfDatanodes={}",
+      LOG.debug("Failed to find datanode (scope=\"{}\" excludedScope=\"{}\"). numOfDatanodes={}",
           scope, excludedScope, numOfDatanodes);
       return null;
     }
@@ -529,10 +538,12 @@ public class NetworkTopology {
         netlock.readLock().unlock();
       }
     }
-    LOG.debug("Choosing random from {} available nodes on node {},"
-        + " scope={}, excludedScope={}, excludeNodes={}. numOfDatanodes={}.",
-        availableNodes, innerNode, scope, excludedScope, excludedNodes,
-        numOfDatanodes);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Choosing random from {} available nodes on node {}, scope={},"
+              + " excludedScope={}, excludeNodes={}. numOfDatanodes={}.",
+          availableNodes, innerNode, scope, excludedScope, excludedNodes,
+          numOfDatanodes);
+    }
     Node ret = null;
     if (availableNodes > 0) {
       ret = chooseRandom(innerNode, node, excludedNodes, numOfDatanodes,
@@ -563,6 +574,7 @@ public class NetworkTopology {
           totalInScopeNodes, availableNodes);
       return null;
     }
+    Random r = getRandom();
     if (excludedNodes == null || excludedNodes.isEmpty()) {
       // if there are no excludedNodes, randomly choose a node
       final int index = r.nextInt(totalInScopeNodes);
@@ -668,8 +680,7 @@ public class NetworkTopology {
           if (node == null) {
             continue;
           }
-          if ((NodeBase.getPath(node) + NodeBase.PATH_SEPARATOR_STR)
-              .startsWith(scope + NodeBase.PATH_SEPARATOR_STR)) {
+          if (isNodeInScope(node, scope)) {
             if (node instanceof InnerNode) {
               excludedCountInScope += ((InnerNode) node).getNumOfLeaves();
             } else {
@@ -721,11 +732,10 @@ public class NetworkTopology {
   }
   
   /**
-   * Divide networklocation string into two parts by last separator, and get 
+   * @return Divide networklocation string into two parts by last separator, and get
    * the first part here.
    * 
-   * @param networkLocation
-   * @return
+   * @param networkLocation input networkLocation.
    */
   public static String getFirstHalf(String networkLocation) {
     int index = networkLocation.lastIndexOf(NodeBase.PATH_SEPARATOR_STR);
@@ -733,11 +743,10 @@ public class NetworkTopology {
   }
 
   /**
-   * Divide networklocation string into two parts by last separator, and get 
+   * @return Divide networklocation string into two parts by last separator, and get
    * the second part here.
    * 
-   * @param networkLocation
-   * @return
+   * @param networkLocation input networkLocation.
    */
   public static String getLastHalf(String networkLocation) {
     int index = networkLocation.lastIndexOf(NodeBase.PATH_SEPARATOR_STR);
@@ -879,7 +888,7 @@ public class NetworkTopology {
      * This method is called if the reader is a datanode,
      * so nonDataNodeReader flag is set to false.
      */
-    sortByDistance(reader, nodes, activeLen, list -> Collections.shuffle(list));
+    sortByDistance(reader, nodes, activeLen, null);
   }
 
   /**
@@ -889,7 +898,7 @@ public class NetworkTopology {
    * or on a different rack from the reader. Sorting the nodes based on network
    * distance from the reader reduces network traffic and improves
    * performance.
-   * <p>
+   * </p>
    * As an additional twist, we also randomize the nodes at each network
    * distance. This helps with load balancing when there is data skew.
    *
@@ -898,6 +907,7 @@ public class NetworkTopology {
    * @param activeLen Number of active nodes at the front of the array
    * @param secondarySort a secondary sorting strategy which can inject into
    *     that point from outside to help sort the same distance.
+   * @param <T> Generics Type T
    */
   public <T extends Node> void sortByDistance(Node reader, T[] nodes,
       int activeLen, Consumer<List<T>> secondarySort){
@@ -910,7 +920,7 @@ public class NetworkTopology {
    * is not a datanode. Sorting the nodes based on network distance
    * from the reader reduces network traffic and improves
    * performance.
-   * <p>
+   * </p>
    *
    * @param reader    Node where data will be read
    * @param nodes     Available replicas with the requested data
@@ -922,8 +932,7 @@ public class NetworkTopology {
      * This method is called if the reader is not a datanode,
      * so nonDataNodeReader flag is set to true.
      */
-    sortByDistanceUsingNetworkLocation(reader, nodes, activeLen,
-        list -> Collections.shuffle(list));
+    sortByDistanceUsingNetworkLocation(reader, nodes, activeLen, null);
   }
 
   /**
@@ -932,13 +941,14 @@ public class NetworkTopology {
    * is not a datanode. Sorting the nodes based on network distance
    * from the reader reduces network traffic and improves
    * performance.
-   * <p>
+   * </p>
    *
    * @param reader    Node where data will be read
    * @param nodes     Available replicas with the requested data
    * @param activeLen Number of active nodes at the front of the array
    * @param secondarySort a secondary sorting strategy which can inject into
    *     that point from outside to help sort the same distance.
+   * @param <T> Generics Type T.
    */
   public <T extends Node> void sortByDistanceUsingNetworkLocation(Node reader,
       T[] nodes, int activeLen, Consumer<List<T>> secondarySort) {
@@ -950,6 +960,7 @@ public class NetworkTopology {
    * <p>
    * As an additional twist, we also randomize the nodes at each network
    * distance. This helps with load balancing when there is data skew.
+   * And it helps choose node with more fast storage type.
    *
    * @param reader    Node where data will be read
    * @param nodes     Available replicas with the requested data
@@ -960,38 +971,164 @@ public class NetworkTopology {
       int activeLen, Consumer<List<T>> secondarySort,
       boolean nonDataNodeReader) {
     /** Sort weights for the nodes array */
-    int[] weights = new int[activeLen];
-    for (int i=0; i<activeLen; i++) {
-      if(nonDataNodeReader) {
-        weights[i] = getWeightUsingNetworkLocation(reader, nodes[i]);
+    TreeMap<Integer, List<T>> weightedNodeTree =
+        new TreeMap<>();
+    int nWeight;
+    for (int i = 0; i < activeLen; i++) {
+      if (nonDataNodeReader) {
+        nWeight = getWeightUsingNetworkLocation(reader, nodes[i]);
       } else {
-        weights[i] = getWeight(reader, nodes[i]);
+        nWeight = getWeight(reader, nodes[i]);
       }
+      weightedNodeTree.computeIfAbsent(
+          nWeight, k -> new ArrayList<>(1)).add(nodes[i]);
     }
-    // Add weight/node pairs to a TreeMap to sort
-    TreeMap<Integer, List<T>> tree = new TreeMap<>();
-    for (int i=0; i<activeLen; i++) {
-      int weight = weights[i];
-      T node = nodes[i];
-      List<T> list = tree.get(weight);
-      if (list == null) {
-        list = Lists.newArrayListWithExpectedSize(1);
-        tree.put(weight, list);
-      }
-      list.add(node);
-    }
-    // Sort nodes which have the same weight using secondarySort.
     int idx = 0;
-    for (List<T> list: tree.values()) {
-      if (list != null) {
-        secondarySort.accept(list);
-        for (T n: list) {
-          nodes[idx] = n;
-          idx++;
-        }
+    // Sort nodes which have the same weight using secondarySort.
+    for (List<T> nodesList : weightedNodeTree.values()) {
+      Collections.shuffle(nodesList, getRandom());
+      if (secondarySort != null) {
+        // a secondary sort breaks the tie between nodes.
+        secondarySort.accept(nodesList);
+      }
+      for (T n : nodesList) {
+        nodes[idx++] = n;
       }
     }
     Preconditions.checkState(idx == activeLen,
         "Sorted the wrong number of nodes!");
+  }
+
+  /**
+   * Checks whether one scope is contained in the other scope.
+   * @param parentScope the parent scope to check
+   * @param childScope  the child scope which needs to be checked.
+   * @return true if childScope is contained within the parentScope
+   */
+  protected static boolean isChildScope(final String parentScope,
+      final String childScope) {
+    String pScope = parentScope.endsWith(NodeBase.PATH_SEPARATOR_STR) ?
+        parentScope :  parentScope + NodeBase.PATH_SEPARATOR_STR;
+    String cScope = childScope.endsWith(NodeBase.PATH_SEPARATOR_STR) ?
+        childScope :  childScope + NodeBase.PATH_SEPARATOR_STR;
+    return pScope.startsWith(cScope);
+  }
+
+  /**
+   * Checks whether a node belongs to the scope.
+   * @param node  the node to check.
+   * @param scope scope to check.
+   * @return true if node lies within the scope
+   */
+  protected static boolean isNodeInScope(Node node, String scope) {
+    if (!scope.endsWith(NodeBase.PATH_SEPARATOR_STR)) {
+      scope += NodeBase.PATH_SEPARATOR_STR;
+    }
+    String nodeLocation = NodeBase.getPath(node) + NodeBase.PATH_SEPARATOR_STR;
+    return nodeLocation.startsWith(scope);
+  }
+
+  /** @return the number of nonempty racks */
+  public int getNumOfNonEmptyRacks() {
+    return numOfRacks - numOfEmptyRacks;
+  }
+
+  /**
+   * Update empty rack number when add a node like recommission.
+   * @param node node to be added; can be null
+   */
+  public void recommissionNode(Node node) {
+    if (node == null) {
+      return;
+    }
+    if (node instanceof InnerNode) {
+      throw new IllegalArgumentException(
+          "Not allow to remove an inner node: " + NodeBase.getPath(node));
+    }
+    netlock.writeLock().lock();
+    try {
+      decommissionNodes.remove(node.getName());
+      interAddNodeWithEmptyRack(node);
+    } finally {
+      netlock.writeLock().unlock();
+    }
+  }
+
+  /**
+   * Update empty rack number when remove a node like decommission.
+   * @param node node to be added; can be null
+   */
+  public void decommissionNode(Node node) {
+    if (node == null) {
+      return;
+    }
+    if (node instanceof InnerNode) {
+      throw new IllegalArgumentException(
+          "Not allow to remove an inner node: " + NodeBase.getPath(node));
+    }
+    netlock.writeLock().lock();
+    try {
+      decommissionNodes.add(node.getName());
+      interRemoveNodeWithEmptyRack(node);
+    } finally {
+      netlock.writeLock().unlock();
+    }
+  }
+
+  /**
+   * Internal function for update empty rack number
+   * for add or recommission a node.
+   * @param node node to be added; can be null
+   */
+  private void interAddNodeWithEmptyRack(Node node) {
+    if (node == null) {
+      return;
+    }
+    String rackname = node.getNetworkLocation();
+    Set<String> nodes = rackMap.get(rackname);
+    if (nodes == null) {
+      nodes = new HashSet<>();
+    }
+    if (!decommissionNodes.contains(node.getName())) {
+      nodes.add(node.getName());
+    }
+    rackMap.put(rackname, nodes);
+    countEmptyRacks();
+  }
+
+  /**
+   * Internal function for update empty rack number
+   * for remove or decommission a node.
+   * @param node node to be removed; can be null
+   */
+  private void interRemoveNodeWithEmptyRack(Node node) {
+    if (node == null) {
+      return;
+    }
+    String rackname = node.getNetworkLocation();
+    Set<String> nodes = rackMap.get(rackname);
+    if (nodes != null) {
+      InnerNode rack = (InnerNode) getNode(node.getNetworkLocation());
+      if (rack == null) {
+        // this node and its rack are both removed.
+        rackMap.remove(rackname);
+      } else if (nodes.contains(node.getName())) {
+        // this node is decommissioned or removed.
+        nodes.remove(node.getName());
+        rackMap.put(rackname, nodes);
+      }
+      countEmptyRacks();
+    }
+  }
+
+  private void countEmptyRacks() {
+    int count = 0;
+    for (Set<String> nodes : rackMap.values()) {
+      if (nodes != null && nodes.isEmpty()) {
+        count++;
+      }
+    }
+    numOfEmptyRacks = count;
+    LOG.debug("Current numOfEmptyRacks is {}", numOfEmptyRacks);
   }
 }

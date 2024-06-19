@@ -27,6 +27,38 @@ public final class FSConfigToCSConfigConverterParams {
   private boolean console;
   private String clusterResource;
   private String outputDirectory;
+  private boolean convertPlacementRules;
+  private boolean placementRulesToFile;
+  private boolean usePercentages;
+  private PreemptionMode preemptionMode;
+
+  public enum PreemptionMode {
+    ENABLED("enabled"),
+    NO_POLICY("nopolicy"),
+    OBSERVE_ONLY("observeonly");
+
+    private String cliOption;
+
+    PreemptionMode(String cliOption) {
+      this.cliOption = cliOption;
+    }
+
+    public String getCliOption() {
+      return cliOption;
+    }
+
+    public static PreemptionMode fromString(String cliOption) {
+      if (cliOption != null && cliOption.trim().
+          equals(PreemptionMode.OBSERVE_ONLY.getCliOption())) {
+        return PreemptionMode.OBSERVE_ONLY;
+      } else if (cliOption != null && cliOption.trim().
+          equals(PreemptionMode.NO_POLICY.getCliOption())) {
+        return PreemptionMode.NO_POLICY;
+      } else {
+        return PreemptionMode.ENABLED;
+      }
+    }
+  }
 
   private FSConfigToCSConfigConverterParams() {
     //must use builder
@@ -56,6 +88,22 @@ public final class FSConfigToCSConfigConverterParams {
     return outputDirectory;
   }
 
+  public boolean isConvertPlacementRules() {
+    return convertPlacementRules;
+  }
+
+  public boolean isPlacementRulesToFile() {
+    return placementRulesToFile;
+  }
+
+  public boolean isUsePercentages() {
+    return usePercentages;
+  }
+
+  public PreemptionMode getPreemptionMode() {
+    return preemptionMode;
+  }
+
   @Override
   public String toString() {
     return "FSConfigToCSConfigConverterParams{" +
@@ -63,7 +111,9 @@ public final class FSConfigToCSConfigConverterParams {
         ", fairSchedulerXmlConfig='" + fairSchedulerXmlConfig + '\'' +
         ", conversionRulesConfig='" + conversionRulesConfig + '\'' +
         ", clusterResource='" + clusterResource + '\'' +
-        ", console=" + console +
+        ", console=" + console + '\'' +
+        ", convertPlacementRules=" + convertPlacementRules +
+        ", placementRulesToFile=" + placementRulesToFile +
         '}';
   }
 
@@ -71,6 +121,7 @@ public final class FSConfigToCSConfigConverterParams {
    * Builder that can construct FSConfigToCSConfigConverterParams objects.
    *
    */
+  @SuppressWarnings("checkstyle:hiddenfield")
   public static final class Builder {
     private String yarnSiteXmlConfig;
     private String fairSchedulerXmlConfig;
@@ -78,6 +129,10 @@ public final class FSConfigToCSConfigConverterParams {
     private boolean console;
     private String clusterResource;
     private String outputDirectory;
+    private boolean convertPlacementRules;
+    private boolean placementRulesToFile;
+    private boolean usePercentages;
+    private PreemptionMode preemptionMode;
 
     private Builder() {
     }
@@ -116,6 +171,26 @@ public final class FSConfigToCSConfigConverterParams {
       return this;
     }
 
+    public Builder withConvertPlacementRules(boolean convertPlacementRules) {
+      this.convertPlacementRules = convertPlacementRules;
+      return this;
+    }
+
+    public Builder withPlacementRulesToFile(boolean rulesToFile) {
+      this.placementRulesToFile = rulesToFile;
+      return this;
+    }
+
+    public Builder withUsePercentages(boolean usePercentages) {
+      this.usePercentages = usePercentages;
+      return this;
+    }
+
+    public Builder withDisablePreemption(PreemptionMode preemptionMode) {
+      this.preemptionMode = preemptionMode;
+      return this;
+    }
+
     public FSConfigToCSConfigConverterParams build() {
       FSConfigToCSConfigConverterParams params =
           new FSConfigToCSConfigConverterParams();
@@ -125,6 +200,10 @@ public final class FSConfigToCSConfigConverterParams {
       params.yarnSiteXmlConfig = this.yarnSiteXmlConfig;
       params.conversionRulesConfig = this.conversionRulesConfig;
       params.outputDirectory = this.outputDirectory;
+      params.convertPlacementRules = this.convertPlacementRules;
+      params.placementRulesToFile = this.placementRulesToFile;
+      params.usePercentages = this.usePercentages;
+      params.preemptionMode = this.preemptionMode;
       return params;
     }
   }

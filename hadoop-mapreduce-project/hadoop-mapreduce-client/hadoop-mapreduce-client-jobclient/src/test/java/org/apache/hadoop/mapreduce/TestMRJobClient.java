@@ -30,6 +30,7 @@ import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,6 +47,7 @@ import java.io.OutputStream;
 import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 import static org.junit.Assert.assertEquals;
@@ -62,6 +64,11 @@ public class TestMRJobClient extends ClusterMapReduceTestCase {
 
   private static final Logger LOG =
       LoggerFactory.getLogger(TestMRJobClient.class);
+
+  @BeforeClass
+  public static void setupClass() throws Exception {
+    setupClassBase(TestMRJobClient.class);
+  }
 
   private Job runJob(Configuration conf) throws Exception {
     String input = "hello1\nhello2\nhello3\n";
@@ -187,7 +194,7 @@ public class TestMRJobClient extends ClusterMapReduceTestCase {
     assertEquals("Exit code", -1, exitCode);
 
     runTool(conf, jc, new String[] { "-fail-task", taid.toString() }, out);
-    String answer = new String(out.toByteArray(), "UTF-8");
+    String answer = new String(out.toByteArray(), StandardCharsets.UTF_8);
     assertTrue(answer.contains("Killed task " + taid + " by failing it"));
   }
 
@@ -205,7 +212,7 @@ public class TestMRJobClient extends ClusterMapReduceTestCase {
     assertEquals("Exit code", -1, exitCode);
 
     runTool(conf, jc, new String[] { "-kill-task", taid.toString() }, out);
-    String answer = new String(out.toByteArray(), "UTF-8");
+    String answer = new String(out.toByteArray(), StandardCharsets.UTF_8);
     assertTrue(answer.contains("Killed task " + taid));
   }
   
@@ -225,7 +232,7 @@ public class TestMRJobClient extends ClusterMapReduceTestCase {
     exitCode = runTool(conf, jc, new String[] { "-kill", jobId }, out);
     assertEquals("Exit code", 0, exitCode);
     
-    String answer = new String(out.toByteArray(), "UTF-8");
+    String answer = new String(out.toByteArray(), StandardCharsets.UTF_8);
     assertTrue(answer.contains("Killed job " + jobId));
   }
 

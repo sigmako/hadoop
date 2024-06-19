@@ -18,20 +18,19 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.conf;
 
-import org.apache.hadoop.util.curator.ZKCuratorManager;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.retry.RetryNTimes;
 import org.apache.curator.test.TestingServer;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.ha.HAServiceProtocol;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.service.Service;
+import org.apache.hadoop.util.curator.ZKCuratorManager;
 import org.apache.hadoop.yarn.conf.HAUtil;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.server.records.Version;
+import org.apache.hadoop.yarn.server.records.impl.pb.VersionPBImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.MockRM;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.ZKRMStateStore;
@@ -42,13 +41,19 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.conf.Yar
 import org.apache.hadoop.yarn.webapp.dao.QueueConfigInfo;
 import org.apache.hadoop.yarn.webapp.dao.SchedConfUpdateInfo;
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.io.File;
 import java.io.IOException;
+import java.io.ByteArrayOutputStream;
+import java.io.ObjectOutputStream;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashMap;
-import java.util.LinkedList;
 import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
@@ -58,12 +63,15 @@ import static org.junit.Assert.assertTrue;
 /**
  * Tests {@link ZKConfigurationStore}.
  */
-public class TestZKConfigurationStore extends ConfigurationStoreBaseTest {
-
+public class TestZKConfigurationStore extends
+    PersistentConfigurationStoreBaseTest {
   public static final Logger LOG =
       LoggerFactory.getLogger(TestZKConfigurationStore.class);
 
   private static final int ZK_TIMEOUT_MS = 10000;
+  private static final String DESERIALIZATION_VULNERABILITY_FILEPATH =
+      "/tmp/ZK_DESERIALIZATION_VULNERABILITY";
+
   private TestingServer curatorTestingServer;
   private CuratorFramework curatorFramework;
   private ResourceManager rm;
@@ -85,12 +93,13 @@ public class TestZKConfigurationStore extends ConfigurationStoreBaseTest {
   }
 
   @Before
+  @Override
   public void setUp() throws Exception {
     super.setUp();
     curatorTestingServer = setupCuratorServer();
     curatorFramework = setupCuratorFramework(curatorTestingServer);
 
-    conf.set(CommonConfigurationKeys.ZK_ADDRESS,
+    conf.set(YarnConfiguration.RM_ZK_ADDRESS,
         curatorTestingServer.getConnectString());
     rm = new MockRM(conf);
     rm.start();
@@ -104,31 +113,21 @@ public class TestZKConfigurationStore extends ConfigurationStoreBaseTest {
     curatorTestingServer.stop();
   }
 
-  @Test
-  public void testVersioning() throws Exception {
+  @Test(expected = YarnConfStoreVersionIncompatibleException.class)
+  public void testIncompatibleVersion() throws Exception {
     confStore.initialize(conf, schedConf, rmContext);
-    assertNull(confStore.getConfStoreVersion());
+
+    Version otherVersion = Version.newInstance(1, 1);
+    String zkVersionPath = getZkPath("VERSION");
+    byte[] versionData =
+        ((VersionPBImpl) otherVersion).getProto().toByteArray();
+    ((ZKConfigurationStore) confStore).safeCreateZkData(zkVersionPath,
+        versionData);
+
+    assertEquals("The configuration store should have stored the new" +
+        "version.", otherVersion, confStore.getConfStoreVersion());
     confStore.checkVersion();
-    assertEquals(ZKConfigurationStore.CURRENT_VERSION_INFO,
-        confStore.getConfStoreVersion());
   }
-
-  @Test
-  public void testPersistConfiguration() throws Exception {
-    schedConf.set("key", "val");
-    confStore.initialize(conf, schedConf, rmContext);
-    assertEquals("val", confStore.retrieve().get("key"));
-
-    assertNull(confStore.retrieve().get(YarnConfiguration.RM_HOSTNAME));
-
-    // Create a new configuration store, and check for old configuration
-    confStore = createConfStore();
-    schedConf.set("key", "badVal");
-    // Should ignore passed-in scheduler configuration.
-    confStore.initialize(conf, schedConf, rmContext);
-    assertEquals("val", confStore.retrieve().get("key"));
-  }
-
 
   @Test
   public void testFormatConfiguration() throws Exception {
@@ -139,108 +138,58 @@ public class TestZKConfigurationStore extends ConfigurationStoreBaseTest {
     assertNull(confStore.retrieve());
   }
 
-  @Test
-  public void testGetConfigurationVersion() throws Exception {
+  @Test(expected = IllegalStateException.class)
+  public void testGetConfigurationVersionOnSerializedNullData()
+      throws Exception {
     confStore.initialize(conf, schedConf, rmContext);
-    long v1 = confStore.getConfigVersion();
-    assertEquals(1, v1);
+    String confVersionPath = getZkPath("CONF_VERSION");
+    ((ZKConfigurationStore) confStore).setZkData(confVersionPath, null);
+    confStore.getConfigVersion();
+  }
+
+  /**
+   * The correct behavior of logMutation should be, that even though an
+   * Exception is thrown during serialization, the log data must not be
+   * overridden.
+   *
+   * @throws Exception
+   */
+  @Test(expected = ClassCastException.class)
+  public void testLogMutationAfterSerializationError() throws Exception {
+    byte[] data = null;
+    String logs = "NOT_LINKED_LIST";
+    confStore.initialize(conf, schedConf, rmContext);
+
+    try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
+         ObjectOutputStream oos = new ObjectOutputStream(baos)) {
+      oos.writeObject(logs);
+      oos.flush();
+      baos.flush();
+      data = baos.toByteArray();
+    }
+
+    String logsPath = getZkPath("LOGS");
+    ((ZKConfigurationStore)confStore).setZkData(logsPath, data);
+
     Map<String, String> update = new HashMap<>();
-    update.put("keyver", "valver");
-    YarnConfigurationStore.LogMutation mutation =
-        new YarnConfigurationStore.LogMutation(update, TEST_USER);
-    confStore.logMutation(mutation);
-    confStore.confirmMutation(mutation, true);
-    long v2 = confStore.getConfigVersion();
-    assertEquals(2, v2);
+    update.put("valid_key", "valid_value");
+
+    confStore.logMutation(new LogMutation(update, TEST_USER));
+
+    assertEquals(data, ((ZKConfigurationStore)confStore).getZkData(logsPath));
   }
-
-  @Test
-  public void testPersistUpdatedConfiguration() throws Exception {
-    confStore.initialize(conf, schedConf, rmContext);
-    assertNull(confStore.retrieve().get("key"));
-
-    Map<String, String> update = new HashMap<>();
-    update.put("key", "val");
-    LogMutation mutation = new LogMutation(update, TEST_USER);
-    confStore.logMutation(mutation);
-    confStore.confirmMutation(mutation, true);
-    assertEquals("val", confStore.retrieve().get("key"));
-
-    // Create a new configuration store, and check for updated configuration
-    confStore = createConfStore();
-    schedConf.set("key", "badVal");
-    // Should ignore passed-in scheduler configuration.
-    confStore.initialize(conf, schedConf, rmContext);
-    assertEquals("val", confStore.retrieve().get("key"));
-  }
-
-  @Test
-  public void testMaxLogs() throws Exception {
-    conf.setLong(YarnConfiguration.RM_SCHEDCONF_MAX_LOGS, 2);
-    confStore.initialize(conf, schedConf, rmContext);
-    LinkedList<YarnConfigurationStore.LogMutation> logs =
-        ((ZKConfigurationStore) confStore).getLogs();
-    assertEquals(0, logs.size());
-
-    Map<String, String> update1 = new HashMap<>();
-    update1.put("key1", "val1");
-    YarnConfigurationStore.LogMutation mutation =
-        new YarnConfigurationStore.LogMutation(update1, TEST_USER);
-    confStore.logMutation(mutation);
-    logs = ((ZKConfigurationStore) confStore).getLogs();
-    assertEquals(1, logs.size());
-    assertEquals("val1", logs.get(0).getUpdates().get("key1"));
-    confStore.confirmMutation(mutation, true);
-    assertEquals(1, logs.size());
-    assertEquals("val1", logs.get(0).getUpdates().get("key1"));
-
-    Map<String, String> update2 = new HashMap<>();
-    update2.put("key2", "val2");
-    mutation = new YarnConfigurationStore.LogMutation(update2, TEST_USER);
-    confStore.logMutation(mutation);
-    logs = ((ZKConfigurationStore) confStore).getLogs();
-    assertEquals(2, logs.size());
-    assertEquals("val1", logs.get(0).getUpdates().get("key1"));
-    assertEquals("val2", logs.get(1).getUpdates().get("key2"));
-    confStore.confirmMutation(mutation, true);
-    assertEquals(2, logs.size());
-    assertEquals("val1", logs.get(0).getUpdates().get("key1"));
-    assertEquals("val2", logs.get(1).getUpdates().get("key2"));
-
-    // Next update should purge first update from logs.
-    Map<String, String> update3 = new HashMap<>();
-    update3.put("key3", "val3");
-    mutation = new YarnConfigurationStore.LogMutation(update3, TEST_USER);
-    confStore.logMutation(mutation);
-    logs = ((ZKConfigurationStore) confStore).getLogs();
-    assertEquals(2, logs.size());
-    assertEquals("val2", logs.get(0).getUpdates().get("key2"));
-    assertEquals("val3", logs.get(1).getUpdates().get("key3"));
-    confStore.confirmMutation(mutation, true);
-    assertEquals(2, logs.size());
-    assertEquals("val2", logs.get(0).getUpdates().get("key2"));
-    assertEquals("val3", logs.get(1).getUpdates().get("key3"));
-  }
-
 
   @Test
   public void testDisableAuditLogs() throws Exception {
     conf.setLong(YarnConfiguration.RM_SCHEDCONF_MAX_LOGS, 0);
     confStore.initialize(conf, schedConf, rmContext);
-    String znodeParentPath = conf.get(YarnConfiguration.
-        RM_SCHEDCONF_STORE_ZK_PARENT_PATH,
-        YarnConfiguration.DEFAULT_RM_SCHEDCONF_STORE_ZK_PARENT_PATH);
-    String logsPath = ZKCuratorManager.getNodePath(znodeParentPath, "LOGS");
+    String logsPath = getZkPath("LOGS");
     byte[] data = null;
-    ((ZKConfigurationStore) confStore).zkManager.setData(logsPath, data, -1);
+    ((ZKConfigurationStore) confStore).setZkData(logsPath, data);
 
-    Map<String, String> update = new HashMap<>();
-    update.put("key1", "val1");
-    YarnConfigurationStore.LogMutation mutation =
-        new YarnConfigurationStore.LogMutation(update, TEST_USER);
-    confStore.logMutation(mutation);
+    prepareLogMutation("key1", "val1");
 
-    data = ((ZKConfigurationStore) confStore).zkManager.getData(logsPath);
+    data = ((ZKConfigurationStore) confStore).getZkData(logsPath);
     assertNull("Failed to Disable Audit Logs", data);
   }
 
@@ -457,8 +406,49 @@ public class TestZKConfigurationStore extends ConfigurationStoreBaseTest {
     rm2.close();
   }
 
+  @Test(timeout = 3000)
+  @SuppressWarnings("checkstyle:linelength")
+  public void testDeserializationIsNotVulnerable() throws Exception {
+    confStore.initialize(conf, schedConf, rmContext);
+    String confStorePath = getZkPath("CONF_STORE");
+
+    File flagFile = new File(DESERIALIZATION_VULNERABILITY_FILEPATH);
+    if (flagFile.exists()) {
+      Assert.assertTrue(flagFile.delete());
+    }
+
+    // Generated using ysoserial (https://github.com/frohoff/ysoserial)
+    // java -jar ysoserial.jar CommonsBeanutils1 'touch /tmp/ZK_DESERIALIZATION_VULNERABILITY' | base64
+    ((ZKConfigurationStore) confStore).setZkData(confStorePath, Base64.getDecoder().decode("rO0ABXNyABdqYXZhLnV0aWwuUHJpb3JpdHlRdWV1ZZTaMLT7P4KxAwACSQAEc2l6ZUwACmNvbXBhcmF0b3J0ABZMamF2YS91dGlsL0NvbXBhcmF0b3I7eHAAAAACc3IAK29yZy5hcGFjaGUuY29tbW9ucy5iZWFudXRpbHMuQmVhbkNvbXBhcmF0b3LjoYjqcyKkSAIAAkwACmNvbXBhcmF0b3JxAH4AAUwACHByb3BlcnR5dAASTGphdmEvbGFuZy9TdHJpbmc7eHBzcgA/b3JnLmFwYWNoZS5jb21tb25zLmNvbGxlY3Rpb25zLmNvbXBhcmF0b3JzLkNvbXBhcmFibGVDb21wYXJhdG9y+/SZJbhusTcCAAB4cHQAEG91dHB1dFByb3BlcnRpZXN3BAAAAANzcgA6Y29tLnN1bi5vcmcuYXBhY2hlLnhhbGFuLmludGVybmFsLnhzbHRjLnRyYXguVGVtcGxhdGVzSW1wbAlXT8FurKszAwAGSQANX2luZGVudE51bWJlckkADl90cmFuc2xldEluZGV4WwAKX2J5dGVjb2Rlc3QAA1tbQlsABl9jbGFzc3QAEltMamF2YS9sYW5nL0NsYXNzO0wABV9uYW1lcQB+AARMABFfb3V0cHV0UHJvcGVydGllc3QAFkxqYXZhL3V0aWwvUHJvcGVydGllczt4cAAAAAD/////dXIAA1tbQkv9GRVnZ9s3AgAAeHAAAAACdXIAAltCrPMX+AYIVOACAAB4cAAABsHK/rq+AAAAMgA5CgADACIHADcHACUHACYBABBzZXJpYWxWZXJzaW9uVUlEAQABSgEADUNvbnN0YW50VmFsdWUFrSCT85Hd7z4BAAY8aW5pdD4BAAMoKVYBAARDb2RlAQAPTGluZU51bWJlclRhYmxlAQASTG9jYWxWYXJpYWJsZVRhYmxlAQAEdGhpcwEAE1N0dWJUcmFuc2xldFBheWxvYWQBAAxJbm5lckNsYXNzZXMBADVMeXNvc2VyaWFsL3BheWxvYWRzL3V0aWwvR2FkZ2V0cyRTdHViVHJhbnNsZXRQYXlsb2FkOwEACXRyYW5zZm9ybQEAcihMY29tL3N1bi9vcmcvYXBhY2hlL3hhbGFuL2ludGVybmFsL3hzbHRjL0RPTTtbTGNvbS9zdW4vb3JnL2FwYWNoZS94bWwvaW50ZXJuYWwvc2VyaWFsaXplci9TZXJpYWxpemF0aW9uSGFuZGxlcjspVgEACGRvY3VtZW50AQAtTGNvbS9zdW4vb3JnL2FwYWNoZS94YWxhbi9pbnRlcm5hbC94c2x0Yy9ET007AQAIaGFuZGxlcnMBAEJbTGNvbS9zdW4vb3JnL2FwYWNoZS94bWwvaW50ZXJuYWwvc2VyaWFsaXplci9TZXJpYWxpemF0aW9uSGFuZGxlcjsBAApFeGNlcHRpb25zBwAnAQCmKExjb20vc3VuL29yZy9hcGFjaGUveGFsYW4vaW50ZXJuYWwveHNsdGMvRE9NO0xjb20vc3VuL29yZy9hcGFjaGUveG1sL2ludGVybmFsL2R0bS9EVE1BeGlzSXRlcmF0b3I7TGNvbS9zdW4vb3JnL2FwYWNoZS94bWwvaW50ZXJuYWwvc2VyaWFsaXplci9TZXJpYWxpemF0aW9uSGFuZGxlcjspVgEACGl0ZXJhdG9yAQA1TGNvbS9zdW4vb3JnL2FwYWNoZS94bWwvaW50ZXJuYWwvZHRtL0RUTUF4aXNJdGVyYXRvcjsBAAdoYW5kbGVyAQBBTGNvbS9zdW4vb3JnL2FwYWNoZS94bWwvaW50ZXJuYWwvc2VyaWFsaXplci9TZXJpYWxpemF0aW9uSGFuZGxlcjsBAApTb3VyY2VGaWxlAQAMR2FkZ2V0cy5qYXZhDAAKAAsHACgBADN5c29zZXJpYWwvcGF5bG9hZHMvdXRpbC9HYWRnZXRzJFN0dWJUcmFuc2xldFBheWxvYWQBAEBjb20vc3VuL29yZy9hcGFjaGUveGFsYW4vaW50ZXJuYWwveHNsdGMvcnVudGltZS9BYnN0cmFjdFRyYW5zbGV0AQAUamF2YS9pby9TZXJpYWxpemFibGUBADljb20vc3VuL29yZy9hcGFjaGUveGFsYW4vaW50ZXJuYWwveHNsdGMvVHJhbnNsZXRFeGNlcHRpb24BAB95c29zZXJpYWwvcGF5bG9hZHMvdXRpbC9HYWRnZXRzAQAIPGNsaW5pdD4BABFqYXZhL2xhbmcvUnVudGltZQcAKgEACmdldFJ1bnRpbWUBABUoKUxqYXZhL2xhbmcvUnVudGltZTsMACwALQoAKwAuAQArdG91Y2ggL3RtcC9aS19ERVNFUklBTElaQVRJT05fVlVMTkVSQUJJTElUWQgAMAEABGV4ZWMBACcoTGphdmEvbGFuZy9TdHJpbmc7KUxqYXZhL2xhbmcvUHJvY2VzczsMADIAMwoAKwA0AQANU3RhY2tNYXBUYWJsZQEAHnlzb3NlcmlhbC9Qd25lcjExNTM4MjYwNDMyOTA1MQEAIEx5c29zZXJpYWwvUHduZXIxMTUzODI2MDQzMjkwNTE7ACEAAgADAAEABAABABoABQAGAAEABwAAAAIACAAEAAEACgALAAEADAAAAC8AAQABAAAABSq3AAGxAAAAAgANAAAABgABAAAALwAOAAAADAABAAAABQAPADgAAAABABMAFAACAAwAAAA/AAAAAwAAAAGxAAAAAgANAAAABgABAAAANAAOAAAAIAADAAAAAQAPADgAAAAAAAEAFQAWAAEAAAABABcAGAACABkAAAAEAAEAGgABABMAGwACAAwAAABJAAAABAAAAAGxAAAAAgANAAAABgABAAAAOAAOAAAAKgAEAAAAAQAPADgAAAAAAAEAFQAWAAEAAAABABwAHQACAAAAAQAeAB8AAwAZAAAABAABABoACAApAAsAAQAMAAAAJAADAAIAAAAPpwADAUy4AC8SMbYANVexAAAAAQA2AAAAAwABAwACACAAAAACACEAEQAAAAoAAQACACMAEAAJdXEAfgAQAAAB1Mr+ur4AAAAyABsKAAMAFQcAFwcAGAcAGQEAEHNlcmlhbFZlcnNpb25VSUQBAAFKAQANQ29uc3RhbnRWYWx1ZQVx5mnuPG1HGAEABjxpbml0PgEAAygpVgEABENvZGUBAA9MaW5lTnVtYmVyVGFibGUBABJMb2NhbFZhcmlhYmxlVGFibGUBAAR0aGlzAQADRm9vAQAMSW5uZXJDbGFzc2VzAQAlTHlzb3NlcmlhbC9wYXlsb2Fkcy91dGlsL0dhZGdldHMkRm9vOwEAClNvdXJjZUZpbGUBAAxHYWRnZXRzLmphdmEMAAoACwcAGgEAI3lzb3NlcmlhbC9wYXlsb2Fkcy91dGlsL0dhZGdldHMkRm9vAQAQamF2YS9sYW5nL09iamVjdAEAFGphdmEvaW8vU2VyaWFsaXphYmxlAQAfeXNvc2VyaWFsL3BheWxvYWRzL3V0aWwvR2FkZ2V0cwAhAAIAAwABAAQAAQAaAAUABgABAAcAAAACAAgAAQABAAoACwABAAwAAAAvAAEAAQAAAAUqtwABsQAAAAIADQAAAAYAAQAAADwADgAAAAwAAQAAAAUADwASAAAAAgATAAAAAgAUABEAAAAKAAEAAgAWABAACXB0AARQd25ycHcBAHhxAH4ADXg="));
+    Assert.assertNull(confStore.retrieve());
+
+    if (!System.getProperty("os.name").startsWith("Windows")) {
+      for (int i = 0; i < 20; ++i) {
+        if (flagFile.exists()) {
+          continue;
+        }
+        Thread.sleep(100);
+      }
+
+      Assert.assertFalse("The file '" + DESERIALIZATION_VULNERABILITY_FILEPATH +
+          "' should not have been created by deserialization attack", flagFile.exists());
+    }
+  }
+
   @Override
   public YarnConfigurationStore createConfStore() {
     return new ZKConfigurationStore();
+  }
+
+  private String getZkPath(String nodeName) {
+    String znodeParentPath = conf.get(YarnConfiguration.
+            RM_SCHEDCONF_STORE_ZK_PARENT_PATH,
+        YarnConfiguration.DEFAULT_RM_SCHEDCONF_STORE_ZK_PARENT_PATH);
+    return ZKCuratorManager.getNodePath(znodeParentPath, nodeName);
+  }
+
+  @Override
+  Version getVersion() {
+    return ZKConfigurationStore.CURRENT_VERSION_INFO;
   }
 }

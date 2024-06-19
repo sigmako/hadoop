@@ -38,7 +38,10 @@ import java.io.OutputStreamWriter;
 import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.io.UnsupportedEncodingException;
+import java.nio.charset.StandardCharsets;
+import java.text.DecimalFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.EnumSet;
@@ -52,6 +55,7 @@ import java.util.regex.Pattern;
 import org.apache.commons.cli.Options;
 import org.apache.commons.lang3.time.DateFormatUtils;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.util.Sets;
 import org.apache.hadoop.yarn.api.protocolrecords.UpdateApplicationTimeoutsRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.UpdateApplicationTimeoutsResponse;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
@@ -80,10 +84,13 @@ import org.apache.hadoop.yarn.api.records.SignalContainerCommand;
 import org.apache.hadoop.yarn.api.records.YarnApplicationAttemptState;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.client.api.YarnClient;
+import org.apache.hadoop.yarn.client.util.FormattingCLIUtils;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.ApplicationAttemptNotFoundException;
 import org.apache.hadoop.yarn.exceptions.ApplicationNotFoundException;
 import org.apache.hadoop.yarn.exceptions.ContainerNotFoundException;
+import org.apache.hadoop.yarn.factories.RecordFactory;
+import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.server.MiniYARNCluster;
 import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationSystemTestUtil;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
@@ -100,8 +107,7 @@ import org.eclipse.jetty.util.log.Log;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Sets;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ImmutableSet;
 
 public class TestYarnCLI {
   private static final Logger LOG = LoggerFactory.getLogger(TestYarnCLI.class);
@@ -128,17 +134,17 @@ public class TestYarnCLI {
       ApplicationCLI cli = createAndGetAppCLI();
       ApplicationId applicationId = ApplicationId.newInstance(1234, 5);
       Map<String, Long> resourceSecondsMap = new HashMap<>();
-      Map<String, Long> preemptedResoureSecondsMap = new HashMap<>();
+      Map<String, Long> preemptedResourceSecondsMap = new HashMap<>();
       resourceSecondsMap.put(ResourceInformation.MEMORY_MB.getName(), 123456L);
       resourceSecondsMap.put(ResourceInformation.VCORES.getName(), 4567L);
-      preemptedResoureSecondsMap
+      preemptedResourceSecondsMap
           .put(ResourceInformation.MEMORY_MB.getName(), 1111L);
-      preemptedResoureSecondsMap
+      preemptedResourceSecondsMap
           .put(ResourceInformation.VCORES.getName(), 2222L);
       ApplicationResourceUsageReport usageReport = i == 0 ? null :
           ApplicationResourceUsageReport
               .newInstance(2, 0, null, null, null, resourceSecondsMap, 0, 0,
-                  preemptedResoureSecondsMap);
+                  preemptedResourceSecondsMap);
       ApplicationReport newApplicationReport = ApplicationReport.newInstance(
           applicationId, ApplicationAttemptId.newInstance(applicationId, 1),
           "user", "queue", "appname", "host", 124, null,
@@ -147,6 +153,7 @@ public class TestYarnCLI {
           null, null, false, Priority.newInstance(0), "high-mem", "high-mem");
       newApplicationReport.setLogAggregationStatus(LogAggregationStatus.SUCCEEDED);
       newApplicationReport.setPriority(Priority.newInstance(0));
+      newApplicationReport.setRMClusterId("Cluster1");
       ApplicationTimeout timeout = ApplicationTimeout
           .newInstance(ApplicationTimeoutType.LIFETIME, "UNLIMITED", -1);
       newApplicationReport.setApplicationTimeouts(
@@ -186,6 +193,7 @@ public class TestYarnCLI {
       pw.print("\tTimeoutType : LIFETIME");
       pw.print("\tExpiryTime : UNLIMITED");
       pw.println("\tRemainingTime : -1seconds");
+      pw.println("\tRMClusterId : Cluster1");
       pw.println();
       pw.close();
       String appReportStr = baos.toString("UTF-8");
@@ -357,7 +365,7 @@ public class TestYarnCLI {
     verify(client).getContainers(attemptId);
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     OutputStreamWriter stream =
-        new OutputStreamWriter(baos, "UTF-8");
+        new OutputStreamWriter(baos, StandardCharsets.UTF_8);
     PrintWriter pw = new PrintWriter(stream);
     pw.println("Total number of containers :3");
     pw.printf(ApplicationCLI.CONTAINER_PATTERN, "Container-Id", "Start Time",
@@ -1716,9 +1724,12 @@ public class TestYarnCLI {
     Set<String> nodeLabels = new HashSet<String>();
     nodeLabels.add("GPU");
     nodeLabels.add("JDK_7");
-    QueueInfo queueInfo = QueueInfo.newInstance("queueA", 0.4f, 0.8f, 0.5f,
-        null, null, QueueState.RUNNING, nodeLabels, "GPU", null, false, null,
-        false);
+    QueueInfo queueInfo = QueueInfo.
+        newInstance("queueA", "root.queueA",
+            0.4f, 0.8f, 0.5f,
+        null, null, QueueState.RUNNING, nodeLabels,
+        "GPU", null, false, -1.0f, 10,
+            null, false);
     when(client.getQueueInfo(any(String.class))).thenReturn(queueInfo);
     int result = cli.run(new String[] { "-status", "queueA" });
     assertEquals(0, result);
@@ -1727,15 +1738,63 @@ public class TestYarnCLI {
     PrintWriter pw = new PrintWriter(baos);
     pw.println("Queue Information : ");
     pw.println("Queue Name : " + "queueA");
+    pw.println("Queue Path : " + "root.queueA");
     pw.println("\tState : " + "RUNNING");
     pw.println("\tCapacity : " + "40.00%");
     pw.println("\tCurrent Capacity : " + "50.00%");
     pw.println("\tMaximum Capacity : " + "80.00%");
+    pw.println("\tWeight : " + "-1.00");
+    pw.println("\tMaximum Parallel Apps : " + "10");
     pw.println("\tDefault Node Label expression : " + "GPU");
     pw.println("\tAccessible Node Labels : " + "JDK_7,GPU");
     pw.println("\tPreemption : " + "enabled");
     pw.println("\tIntra-queue Preemption : " + "enabled");
     pw.close();
+    String queueInfoStr = baos.toString("UTF-8");
+    Assert.assertEquals(queueInfoStr, sysOutStream.toString());
+  }
+
+  @Test
+  public void testGetQueueInfos() throws Exception {
+    QueueCLI cli = createAndGetQueueCLI();
+    Set<String> nodeLabels = new HashSet<String>();
+    nodeLabels.add("GPU");
+    nodeLabels.add("JDK_7");
+    List<QueueInfo> queueInfos = new ArrayList<>();
+    QueueInfo queueInfo = QueueInfo.newInstance("queueA", "root.queueA", 0.4f, 0.8f, 0.5f,
+        null, null, QueueState.RUNNING, nodeLabels, "GPU", null, false, -1.0f, 10, null, false);
+    queueInfos.add(queueInfo);
+    QueueInfo queueInfo1 = QueueInfo.newInstance("queueB", "root.queueB", 0.4f, 0.8f, 0.5f,
+        null, null, QueueState.RUNNING, nodeLabels, "GPU", null, false, -1.0f, 10, null, false);
+    queueInfos.add(queueInfo1);
+    QueueInfo queueInfo2 = QueueInfo.newInstance("queueC", "root.queueC", 0.4f, 0.8f, 0.5f,
+        null, null, QueueState.RUNNING, nodeLabels, "GPU", null, false, -1.0f, 10, null, false);
+    queueInfos.add(queueInfo2);
+    QueueInfo queueInfo3 = QueueInfo.newInstance("queueD", "root.queueD", 0.4f, 0.8f, 0.5f,
+        null, null, QueueState.RUNNING, nodeLabels, "GPU", null, false, -1.0f, 10, null, false);
+    queueInfos.add(queueInfo3);
+    when(client.getAllQueues()).thenReturn(queueInfos);
+    int result = cli.run(new String[] {"-list", "all"});
+    Assert.assertEquals(0, result);
+    verify(client).getAllQueues();
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    PrintWriter writer = new PrintWriter(baos);
+    String titleString = queueInfos.size() + " queues were found";
+    List<String> headerStrings = Arrays.asList("Queue Name", "Queue Path", "State", "Capacity",
+        "Current Capacity", "Maximum Capacity", "Weight", "Maximum Parallel Apps");
+    FormattingCLIUtils formattingCLIUtils = new FormattingCLIUtils(titleString)
+        .addHeaders(headerStrings);
+    DecimalFormat df = new DecimalFormat("#.00");
+    for (QueueInfo queueInfoe : queueInfos) {
+      formattingCLIUtils.addLine(queueInfoe.getQueueName(), queueInfoe.getQueuePath(),
+          queueInfoe.getQueueState(), df.format(queueInfoe.getCapacity() * 100) + "%",
+          df.format(queueInfoe.getCurrentCapacity() * 100) + "%",
+          df.format(queueInfoe.getMaximumCapacity() * 100) + "%",
+          df.format(queueInfoe.getWeight()),
+          queueInfoe.getMaxParallelApps());
+    }
+    writer.print(formattingCLIUtils.render());
+    writer.close();
     String queueInfoStr = baos.toString("UTF-8");
     Assert.assertEquals(queueInfoStr, sysOutStream.toString());
   }
@@ -1884,8 +1943,11 @@ public class TestYarnCLI {
   @Test
   public void testGetQueueInfoWithEmptyNodeLabel() throws Exception {
     QueueCLI cli = createAndGetQueueCLI();
-    QueueInfo queueInfo = QueueInfo.newInstance("queueA", 0.4f, 0.8f, 0.5f,
-        null, null, QueueState.RUNNING, null, null, null, true, null, true);
+    QueueInfo queueInfo = QueueInfo.
+        newInstance("queueA", "root.queueA",
+            0.4f, 0.8f, 0.5f,
+        null, null, QueueState.RUNNING, null, null, null,
+        true, -1.0f, 10, null, true);
     when(client.getQueueInfo(any(String.class))).thenReturn(queueInfo);
     int result = cli.run(new String[] { "-status", "queueA" });
     assertEquals(0, result);
@@ -1894,15 +1956,110 @@ public class TestYarnCLI {
     PrintWriter pw = new PrintWriter(baos);
     pw.println("Queue Information : ");
     pw.println("Queue Name : " + "queueA");
+    pw.println("Queue Path : " + "root.queueA");
     pw.println("\tState : " + "RUNNING");
     pw.println("\tCapacity : " + "40.00%");
     pw.println("\tCurrent Capacity : " + "50.00%");
     pw.println("\tMaximum Capacity : " + "80.00%");
+    pw.println("\tWeight : " + "-1.00");
+    pw.println("\tMaximum Parallel Apps : " + "10");
     pw.println("\tDefault Node Label expression : "
         + NodeLabel.DEFAULT_NODE_LABEL_PARTITION);
     pw.println("\tAccessible Node Labels : ");
     pw.println("\tPreemption : " + "disabled");
     pw.println("\tIntra-queue Preemption : " + "disabled");
+    pw.close();
+    String queueInfoStr = baos.toString("UTF-8");
+    Assert.assertEquals(queueInfoStr, sysOutStream.toString());
+  }
+
+  @Test
+  public void testGetQueueInfoWithFairScheduler() throws Exception {
+    // In this test case, we will simulate the queue information of fairScheduler
+    // and check the results of the queue information.
+    QueueCLI cli = createAndGetQueueCLI();
+    RecordFactory recordFactory = RecordFactoryProvider.getRecordFactory(null);
+    QueueInfo queueInfo = recordFactory.newRecordInstance(QueueInfo.class);
+    queueInfo.setQueueName("queueA");
+    queueInfo.setSchedulerType("FairScheduler");
+    queueInfo.setQueueState(QueueState.RUNNING);
+    queueInfo.setCapacity(0.3f);
+    queueInfo.setCurrentCapacity(0.1f);
+    queueInfo.setWeight(0.3f);
+    queueInfo.setMinResourceVCore(1);
+    queueInfo.setMinResourceMemory(1024);
+    queueInfo.setMaxResourceVCore(10);
+    queueInfo.setMaxResourceMemory(8192);
+    queueInfo.setReservedResourceVCore(0);
+    queueInfo.setReservedResourceMemory(0);
+    queueInfo.setSteadyFairShareVCore(10);
+    queueInfo.setSteadyFairShareMemory(8192);
+    queueInfo.setMaxRunningApp(10);
+    queueInfo.setPreemptionDisabled(true);
+    when(client.getQueueInfo(any(String.class))).thenReturn(queueInfo);
+    int result = cli.run(new String[]{"-status", "queueA"});
+    assertEquals(0, result);
+    verify(client).getQueueInfo("queueA");
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    PrintWriter pw = new PrintWriter(baos);
+    pw.println("Queue Information : ");
+    pw.println("Scheduler Name : FairScheduler");
+    pw.println("Queue Name : queueA");
+    pw.println("\tWeight : 0.30");
+    pw.println("\tState : RUNNING");
+    pw.println("\tMinResource : <memory : 0, vCores:10>");
+    pw.println("\tMaxResource : <memory : 8192, vCores:0>");
+    pw.println("\tReservedResource : <memory : 0, vCores:0>");
+    pw.println("\tSteadyFairShare : <memory : 8192, vCores:10>");
+    pw.println("\tQueue Preemption : enabled");
+    pw.close();
+    String queueInfoStr = baos.toString("UTF-8");
+    Assert.assertEquals(queueInfoStr, sysOutStream.toString());
+  }
+
+  @Test
+  public void testGetQueueInfoWithFairSchedulerAndSubClusterId() throws Exception {
+    // In this test case,
+    // we simulated printing FairScheduler queue information in YARN Federation mode.
+    QueueCLI cli = createAndGetQueueCLI();
+    Configuration config = new Configuration();
+    config.setBoolean(YarnConfiguration.FEDERATION_ENABLED, true);
+    cli.setConf(config);
+    RecordFactory recordFactory = RecordFactoryProvider.getRecordFactory(null);
+    QueueInfo queueInfo = recordFactory.newRecordInstance(QueueInfo.class);
+    queueInfo.setQueueName("queueA");
+    queueInfo.setSchedulerType("FairScheduler");
+    queueInfo.setQueueState(QueueState.RUNNING);
+    queueInfo.setCapacity(0.3f);
+    queueInfo.setCurrentCapacity(0.1f);
+    queueInfo.setWeight(0.3f);
+    queueInfo.setMinResourceVCore(1);
+    queueInfo.setMinResourceMemory(1024);
+    queueInfo.setMaxResourceVCore(10);
+    queueInfo.setMaxResourceMemory(8192);
+    queueInfo.setReservedResourceVCore(0);
+    queueInfo.setReservedResourceMemory(0);
+    queueInfo.setSteadyFairShareVCore(10);
+    queueInfo.setSteadyFairShareMemory(8192);
+    queueInfo.setMaxRunningApp(10);
+    queueInfo.setPreemptionDisabled(true);
+    when(client.getQueueInfo(any(String.class), any(String.class))).thenReturn(queueInfo);
+    int result = cli.run(new String[]{"-status", "queueA", "-subClusterId", "SC-1"});
+    assertEquals(0, result);
+    verify(client).getQueueInfo("queueA", "SC-1");
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    PrintWriter pw = new PrintWriter(baos);
+    pw.println("Using YARN Federation mode.");
+    pw.println("SubClusterId : SC-1, Queue Information : ");
+    pw.println("Scheduler Name : FairScheduler");
+    pw.println("Queue Name : " + "queueA");
+    pw.println("\tWeight : " + "0.30");
+    pw.println("\tState : " + "RUNNING");
+    pw.println("\tMinResource : " + "<memory : 0, vCores:10>");
+    pw.println("\tMaxResource : " + "<memory : 8192, vCores:0>");
+    pw.println("\tReservedResource : " + "<memory : 0, vCores:0>");
+    pw.println("\tSteadyFairShare : " + "<memory : 8192, vCores:10>");
+    pw.println("\tQueue Preemption : " + "enabled");
     pw.close();
     String queueInfoStr = baos.toString("UTF-8");
     Assert.assertEquals(queueInfoStr, sysOutStream.toString());
@@ -1914,7 +2071,7 @@ public class TestYarnCLI {
     QueueCLI cli = createAndGetQueueCLI();
     when(client.getQueueInfo(any(String.class))).thenReturn(null);
     int result = cli.run(new String[] { "-status", queueName });
-    assertEquals(-1, result);;
+    assertEquals(-1, result);
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     PrintWriter pw = new PrintWriter(baos);
     pw.println("Cannot get queue from RM by queueName = " + queueName

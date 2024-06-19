@@ -60,7 +60,7 @@ public class TestFavoredNodesEndToEnd {
   private static Configuration conf;
   private final static int NUM_DATA_NODES = 10;
   private final static int NUM_FILES = 10;
-  private final static byte[] SOME_BYTES = new String("foo").getBytes();
+  private final static byte[] SOME_BYTES = "foo".getBytes();
   private static DistributedFileSystem dfs;
   private static ArrayList<DataNode> datanodes;
   
@@ -150,7 +150,7 @@ public class TestFavoredNodesEndToEnd {
     d.stopDecommission();
 
     BlockLocation[] locations = getBlockLocations(p);
-    Assert.assertEquals(replication, locations[0].getNames().length);;
+    Assert.assertEquals(replication, locations[0].getNames().length);
     //also make sure that the datanode[0] is not in the list of hosts
     for (int i = 0; i < replication; i++) {
       final String loc = locations[0].getNames()[i];

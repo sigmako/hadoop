@@ -26,6 +26,7 @@ import org.apache.hadoop.ha.ClientBaseWithFixes;
 import org.apache.hadoop.ha.HAServiceProtocol;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
 import org.apache.hadoop.ha.HAServiceProtocol.StateChangeRequestInfo;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
 import org.apache.hadoop.yarn.conf.HAUtil;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
@@ -63,7 +64,7 @@ public abstract class RMHATestBase extends ClientBaseWithFixes{
     configuration.setBoolean(YarnConfiguration.RECOVERY_ENABLED, true);
     configuration.set(YarnConfiguration.RM_STORE,
         ZKRMStateStore.class.getName());
-    configuration.set(CommonConfigurationKeys.ZK_ADDRESS, hostPort);
+    configuration.set(YarnConfiguration.RM_ZK_ADDRESS, hostPort);
     configuration.setInt(CommonConfigurationKeys.ZK_TIMEOUT_MS, ZK_TIMEOUT_MS);
     configuration.setBoolean(YarnConfiguration.AUTO_FAILOVER_ENABLED, false);
     configuration.set(YarnConfiguration.RM_CLUSTER_ID, "test-yarn-cluster");
@@ -169,7 +170,8 @@ public abstract class RMHATestBase extends ClientBaseWithFixes{
     @Override
     protected void submitApplication(
         ApplicationSubmissionContext submissionContext, long submitTime,
-        String user) throws YarnException {
+        UserGroupInformation userUgi) throws YarnException {
+      String user = userUgi.getShortUserName();
       //Do nothing, just add the application to RMContext
       RMAppImpl application =
           new RMAppImpl(submissionContext.getApplicationId(), this.rmContext,

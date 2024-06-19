@@ -19,9 +19,11 @@
 package org.apache.hadoop.fs.s3a;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.EtagSource;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileContext;
@@ -29,58 +31,93 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.PathIOException;
 import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.s3a.auth.MarshalledCredentialBinding;
 import org.apache.hadoop.fs.s3a.auth.MarshalledCredentials;
-import org.apache.hadoop.fs.s3a.commit.CommitConstants;
-
+import org.apache.hadoop.fs.s3a.auth.delegation.EncryptionSecrets;
+import org.apache.hadoop.fs.s3a.impl.ChangeDetectionPolicy;
+import org.apache.hadoop.fs.s3a.impl.ContextAccessors;
+import org.apache.hadoop.fs.s3a.impl.NetworkBinding;
+import org.apache.hadoop.fs.s3a.impl.S3ExpressStorage;
 import org.apache.hadoop.fs.s3a.impl.StatusProbeEnum;
-import org.apache.hadoop.fs.s3a.s3guard.MetadataStore;
-import org.apache.hadoop.fs.s3a.s3guard.MetadataStoreCapabilities;
+import org.apache.hadoop.fs.s3a.impl.StoreContext;
+import org.apache.hadoop.fs.s3a.impl.StoreContextBuilder;
+import org.apache.hadoop.fs.s3a.prefetch.S3APrefetchingInputStream;
+import org.apache.hadoop.fs.s3a.statistics.BlockOutputStreamStatistics;
+import org.apache.hadoop.fs.s3a.statistics.S3AInputStreamStatistics;
+import org.apache.hadoop.fs.s3a.statistics.impl.EmptyS3AStatisticsContext;
 import org.apache.hadoop.fs.s3native.S3xLoginHelper;
 import org.apache.hadoop.io.DataInputBuffer;
 import org.apache.hadoop.io.DataOutputBuffer;
 import org.apache.hadoop.io.Writable;
+import org.apache.hadoop.io.retry.RetryPolicies;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.service.Service;
 import org.apache.hadoop.service.ServiceOperations;
+import org.apache.hadoop.thirdparty.com.google.common.util.concurrent.ListeningExecutorService;
+import org.apache.hadoop.thirdparty.com.google.common.util.concurrent.MoreExecutors;
+import org.apache.hadoop.util.BlockingThreadPoolExecutorService;
+import org.apache.hadoop.util.DurationInfo;
+import org.apache.hadoop.util.ExitUtil;
+import org.apache.hadoop.util.Preconditions;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.hadoop.util.functional.CallableRaisingIOE;
+import org.apache.hadoop.util.functional.FutureIO;
 
-import com.amazonaws.auth.AWSCredentialsProvider;
-import org.hamcrest.core.Is;
+import org.assertj.core.api.Assertions;
 import org.junit.Assert;
 import org.junit.Assume;
+import org.junit.AssumptionViolatedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.exception.SdkClientException;
+import software.amazon.awssdk.core.internal.io.ChecksumValidatingInputStream;
+import software.amazon.awssdk.services.s3.internal.checksums.S3ChecksumValidatingInputStream;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 
 import java.io.Closeable;
 import java.io.File;
-import java.io.FileNotFoundException;
+import java.io.FilterInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.lang.reflect.Field;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
-import static com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.hadoop.fs.contract.ContractTestUtils.createFile;
+import static org.apache.hadoop.fs.s3a.impl.CallableSupplier.submit;
+import static org.apache.hadoop.fs.s3a.impl.CallableSupplier.waitForCompletion;
+import static org.apache.hadoop.fs.s3a.impl.S3ExpressStorage.STORE_CAPABILITY_S3_EXPRESS_STORAGE;
+import static org.apache.hadoop.fs.s3a.test.PublicDatasetTestUtils.getExternalData;
+import static org.apache.hadoop.fs.s3a.test.PublicDatasetTestUtils.requireDefaultExternalDataFile;
+import static org.apache.hadoop.test.GenericTestUtils.buildPaths;
+import static org.apache.hadoop.util.Preconditions.checkNotNull;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SECURITY_CREDENTIAL_PROVIDER_PATH;
 import static org.apache.commons.lang3.StringUtils.isNotEmpty;
 import static org.apache.hadoop.fs.contract.ContractTestUtils.skip;
-import static org.apache.hadoop.fs.impl.FutureIOSupport.awaitFuture;
-import static org.apache.hadoop.fs.s3a.FailureInjectionPolicy.*;
 import static org.apache.hadoop.fs.s3a.S3ATestConstants.*;
 import static org.apache.hadoop.fs.s3a.Constants.*;
-import static org.apache.hadoop.fs.s3a.S3AUtils.propagateBucketOptions;
-import static org.apache.hadoop.test.LambdaTestUtils.eventually;
+import static org.apache.hadoop.fs.s3a.S3AUtils.buildEncryptionSecrets;
 import static org.apache.hadoop.test.LambdaTestUtils.intercept;
-import static org.apache.hadoop.fs.s3a.commit.CommitConstants.MAGIC_COMMITTER_ENABLED;
+import static org.apache.hadoop.util.functional.RemoteIterators.mappingRemoteIterator;
+import static org.apache.hadoop.util.functional.RemoteIterators.toList;
 import static org.junit.Assert.*;
 
 /**
@@ -89,8 +126,23 @@ import static org.junit.Assert.*;
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 public final class S3ATestUtils {
+
   private static final Logger LOG = LoggerFactory.getLogger(
-      S3ATestUtils.class);
+          S3ATestUtils.class);
+
+  /** Many threads for scale performance: {@value}. */
+  public static final int EXECUTOR_THREAD_COUNT = 64;
+  /**
+   * For submitting work.
+   */
+  private static final ListeningExecutorService EXECUTOR =
+      MoreExecutors.listeningDecorator(
+          BlockingThreadPoolExecutorService.newInstance(
+              EXECUTOR_THREAD_COUNT,
+              EXECUTOR_THREAD_COUNT * 2,
+              30, TimeUnit.SECONDS,
+              "test-operations"));
+
 
   /**
    * Value to set a system property to (in maven) to declare that
@@ -98,10 +150,6 @@ public final class S3ATestUtils {
    */
   public static final String UNSET_PROPERTY = "unset";
   public static final int PURGE_DELAY_SECONDS = 60 * 60;
-
-  public static final int TIMESTAMP_SLEEP = 2000;
-  public static final int STABILIZATION_TIME = 20_000;
-  public static final int PROBE_INTERVAL_MILLIS = 500;
 
   /** Add any deprecated keys. */
   @SuppressWarnings("deprecation")
@@ -176,8 +224,7 @@ public final class S3ATestUtils {
     // make this whole class not run by default
     Assume.assumeTrue("No test filesystem in " + TEST_FS_S3A_NAME,
         liveTest);
-    // patch in S3Guard options
-    maybeEnableS3Guard(conf);
+
     S3AFileSystem fs1 = new S3AFileSystem();
     //enable purging in tests
     if (purge) {
@@ -219,10 +266,26 @@ public final class S3ATestUtils {
     // make this whole class not run by default
     Assume.assumeTrue("No test filesystem in " + TEST_FS_S3A_NAME,
         liveTest);
-    // patch in S3Guard options
-    maybeEnableS3Guard(conf);
     FileContext fc = FileContext.getFileContext(testURI, conf);
     return fc;
+  }
+
+  /**
+   * Skip if PathIOE occurred due to exception which contains a message which signals
+   * an incompatibility or throw the PathIOE.
+   *
+   * @param ioe PathIOE being parsed.
+   * @param messages messages found in the PathIOE that trigger a test to skip
+   * @throws PathIOException Throws PathIOE if it doesn't relate to any message in {@code messages}.
+   */
+  public static void skipIfIOEContainsMessage(PathIOException ioe, String...messages)
+      throws PathIOException {
+    for (String message: messages) {
+      if (ioe.toString().contains(message)) {
+        skip("Skipping because: " + message);
+      }
+    }
+    throw ioe;
   }
 
   /**
@@ -344,22 +407,22 @@ public final class S3ATestUtils {
    * Get the test CSV file; assume() that it is not empty.
    * @param conf test configuration
    * @return test file.
+   * @deprecated Retained only to assist cherrypicking patches
    */
+  @Deprecated
   public static String getCSVTestFile(Configuration conf) {
-    String csvFile = conf
-        .getTrimmed(KEY_CSVTEST_FILE, DEFAULT_CSVTEST_FILE);
-    Assume.assumeTrue("CSV test file is not the default",
-        isNotEmpty(csvFile));
-    return csvFile;
+    return getExternalData(conf).toUri().toString();
   }
 
   /**
    * Get the test CSV path; assume() that it is not empty.
    * @param conf test configuration
    * @return test file as a path.
+   * @deprecated Retained only to assist cherrypicking patches
    */
+  @Deprecated
   public static Path getCSVTestPath(Configuration conf) {
-    return new Path(getCSVTestFile(conf));
+    return getExternalData(conf);
   }
 
   /**
@@ -368,12 +431,11 @@ public final class S3ATestUtils {
    * read only).
    * @return test file.
    * @param conf test configuration
+   * @deprecated Retained only to assist cherrypicking patches
    */
+  @Deprecated
   public static String getLandsatCSVFile(Configuration conf) {
-    String csvFile = getCSVTestFile(conf);
-    Assume.assumeTrue("CSV test file is not the default",
-        DEFAULT_CSVTEST_FILE.equals(csvFile));
-    return csvFile;
+    return requireDefaultExternalDataFile(conf);
   }
   /**
    * Get the test CSV file; assume() that it is not modified (i.e. we haven't
@@ -381,9 +443,11 @@ public final class S3ATestUtils {
    * read only).
    * @param conf test configuration
    * @return test file as a path.
+   * @deprecated Retained only to assist cherrypicking patches
    */
+  @Deprecated
   public static Path getLandsatCSVPath(Configuration conf) {
-    return new Path(getLandsatCSVFile(conf));
+    return getExternalData(conf);
   }
 
   /**
@@ -393,16 +457,23 @@ public final class S3ATestUtils {
    * @param clazz the expected exception class
    * @param ex the exception caught
    * @return the exception, if it is of the expected class
-   * @throws Exception the exception passed in.
+   * @throws AssertionError if the exception is {@code null}.
+   * @throws Exception the exception passed in if it is of a different type
    */
   public static <E extends Throwable> E verifyExceptionClass(Class<E> clazz,
       Exception ex)
       throws Exception {
+    Assertions.assertThat(ex)
+        .describedAs("Exception expected of class %s", clazz)
+        .isNotNull();
     if (!(ex.getClass().equals(clazz))) {
+      LOG.warn("Rethrowing exception: {} as it is not an instance of {}",
+          ex, clazz, ex);
       throw ex;
     }
     return (E)ex;
   }
+
 
   /**
    * Turn off FS Caching: use if a filesystem with different options from
@@ -414,126 +485,131 @@ public final class S3ATestUtils {
   }
 
   /**
-   * Skip a test if encryption tests are disabled.
+   * Disable S3Express createSession calls.
+   * @param conf configuration to patch
+   * @return the configuration.
+   */
+  public static Configuration disableCreateSession(Configuration conf) {
+    conf.setBoolean(S3EXPRESS_CREATE_SESSION, false);
+    return conf;
+  }
+
+  /**
+   * Skip a test if encryption tests are disabled,
+   * or the bucket is an S3Express bucket.
    * @param configuration configuration to probe
    */
   public static void skipIfEncryptionTestsDisabled(
       Configuration configuration) {
-    if (!configuration.getBoolean(KEY_ENCRYPTION_TESTS, true)) {
-      skip("Skipping encryption tests");
+    skipIfNotEnabled(configuration, KEY_ENCRYPTION_TESTS, "Skipping encryption tests");
+    skipIfS3ExpressBucket(configuration);
+  }
+
+  /**
+   * Skip a test suite/casee if a configuration has been explicitly disabled.
+   * @param configuration configuration to probe
+   * @param key key to resolve
+   * @param message assertion text
+   */
+  public static void skipIfNotEnabled(final Configuration configuration,
+      final String key,
+      final String message) {
+    if (!configuration.getBoolean(key, true)) {
+      skip(message);
+    }
+  }
+
+  /**
+   * Skip a test if storage class tests are disabled,
+   * or the bucket is an S3Express bucket.
+   * @param configuration configuration to probe
+   */
+  public static void skipIfStorageClassTestsDisabled(
+      Configuration configuration) {
+    skipIfNotEnabled(configuration, KEY_STORAGE_CLASS_TESTS_ENABLED,
+        "Skipping storage class tests");
+    skipIfS3ExpressBucket(configuration);
+  }
+
+  /**
+   * Skip a test if ACL class tests are disabled,
+   * or the bucket is an S3Express bucket.
+   * @param configuration configuration to probe
+   */
+  public static void skipIfACLTestsDisabled(
+      Configuration configuration) {
+    skipIfNotEnabled(configuration, KEY_ACL_TESTS_ENABLED,
+        "Skipping storage class ACL tests");
+    skipIfS3ExpressBucket(configuration);
+  }
+
+  /**
+   * Skip a test if the test bucket is an S3Express bucket.
+   * @param configuration configuration to probe
+   */
+  public static void skipIfS3ExpressBucket(
+      Configuration configuration) {
+    assume("Skipping test as bucket is an S3Express bucket",
+        !isS3ExpressTestBucket(configuration));
+  }
+
+  /**
+   * Skip a test if the test bucket is not an S3Express bucket.
+   * @param configuration configuration to probe
+   */
+  public static void skipIfNotS3ExpressBucket(
+      Configuration configuration) {
+    assume("Skipping test as bucket is not an S3Express bucket",
+        isS3ExpressTestBucket(configuration));
+  }
+
+  /**
+   * Is the test bucket an S3Express bucket?
+   * @param conf configuration
+   * @return true if the bucket is an S3Express bucket.
+   */
+  public static boolean isS3ExpressTestBucket(final Configuration conf) {
+    return S3ExpressStorage.isS3ExpressStore(getTestBucketName(conf), "");
+  }
+
+  /**
+   * Skip a test if the filesystem lacks a required capability.
+   * @param fs filesystem
+   * @param capability capability
+   */
+  public static void assumePathCapability(FileSystem fs, String capability) {
+    try {
+      assume("Filesystem lacks capability " + capability,
+          fs.hasPathCapability(new Path("/"), capability));
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
+  }  /**
+   * Skip a test if the filesystem has a required capability.
+   * @param fs filesystem
+   * @param capability capability
+   */
+  public static void assumePathCapabilityFalse(FileSystem fs, String capability) {
+    try {
+      assume("Filesystem has capability " + capability,
+          !fs.hasPathCapability(new Path("/"), capability));
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
     }
   }
 
   /**
    * Create a test path, using the value of
    * {@link S3ATestConstants#TEST_UNIQUE_FORK_ID} if it is set.
+   * This path is *not* qualified.
    * @param defVal default value
    * @return a path
    */
   public static Path createTestPath(Path defVal) {
     String testUniqueForkId =
-        System.getProperty(S3ATestConstants.TEST_UNIQUE_FORK_ID);
+        System.getProperty(TEST_UNIQUE_FORK_ID);
     return testUniqueForkId == null ? defVal :
         new Path("/" + testUniqueForkId, "test");
-  }
-
-  /**
-   * Test assumption that S3Guard is/is not enabled.
-   * @param shouldBeEnabled should S3Guard be enabled?
-   * @param originalConf configuration to check
-   * @throws URISyntaxException
-   */
-  public static void assumeS3GuardState(boolean shouldBeEnabled,
-      Configuration originalConf) throws URISyntaxException {
-    boolean isEnabled = isS3GuardTestPropertySet(originalConf);
-    Assume.assumeThat("Unexpected S3Guard test state:"
-            + " shouldBeEnabled=" + shouldBeEnabled
-            + " and isEnabled=" + isEnabled,
-        shouldBeEnabled, Is.is(isEnabled));
-
-    final String fsname = originalConf.getTrimmed(TEST_FS_S3A_NAME);
-    Assume.assumeNotNull(fsname);
-    final String bucket = new URI(fsname).getHost();
-    final Configuration conf = propagateBucketOptions(originalConf, bucket);
-    boolean usingNullImpl = S3GUARD_METASTORE_NULL.equals(
-        conf.getTrimmed(S3_METADATA_STORE_IMPL, S3GUARD_METASTORE_NULL));
-    Assume.assumeThat("Unexpected S3Guard test state:"
-            + " shouldBeEnabled=" + shouldBeEnabled
-            + " but usingNullImpl=" + usingNullImpl,
-        shouldBeEnabled, Is.is(!usingNullImpl));
-  }
-
-  /**
-   * Is the test option for S3Guard set?
-   * @param conf configuration to examine.
-   * @return true if the config or system property turns s3guard tests on
-   */
-  public static boolean isS3GuardTestPropertySet(final Configuration conf) {
-    return getTestPropertyBool(conf, TEST_S3GUARD_ENABLED,
-        conf.getBoolean(TEST_S3GUARD_ENABLED, false));
-  }
-
-  /**
-   * Conditionally set the S3Guard options from test properties.
-   * @param conf configuration
-   */
-  public static void maybeEnableS3Guard(Configuration conf) {
-    if (isS3GuardTestPropertySet(conf)) {
-      // S3Guard is enabled.
-      boolean authoritative = getTestPropertyBool(conf,
-          TEST_S3GUARD_AUTHORITATIVE,
-          conf.getBoolean(TEST_S3GUARD_AUTHORITATIVE, true));
-      String impl = getTestProperty(conf, TEST_S3GUARD_IMPLEMENTATION,
-          conf.get(TEST_S3GUARD_IMPLEMENTATION,
-              TEST_S3GUARD_IMPLEMENTATION_LOCAL));
-      String implClass = "";
-      switch (impl) {
-      case TEST_S3GUARD_IMPLEMENTATION_LOCAL:
-        implClass = S3GUARD_METASTORE_LOCAL;
-        break;
-      case TEST_S3GUARD_IMPLEMENTATION_DYNAMO:
-        implClass = S3GUARD_METASTORE_DYNAMO;
-        break;
-      case TEST_S3GUARD_IMPLEMENTATION_NONE:
-        implClass = S3GUARD_METASTORE_NULL;
-        break;
-      default:
-        fail("Unknown s3guard back end: \"" + impl + "\"");
-      }
-      LOG.debug("Enabling S3Guard, authoritative={}, implementation={}",
-          authoritative, implClass);
-      conf.setBoolean(METADATASTORE_AUTHORITATIVE, authoritative);
-      conf.set(AUTHORITATIVE_PATH, "");
-      conf.set(S3_METADATA_STORE_IMPL, implClass);
-      conf.setBoolean(S3GUARD_DDB_TABLE_CREATE_KEY, true);
-    }
-  }
-
-  /**
-   * Is there a MetadataStore configured for s3a with authoritative enabled?
-   * @param conf Configuration to test.
-   * @return true iff there is a MetadataStore configured, and it is
-   * configured allow authoritative results.  This can result in reducing
-   * round trips to S3 service for cached results, which may affect FS/FC
-   * statistics.
-   */
-  public static boolean isMetadataStoreAuthoritative(Configuration conf) {
-    if (conf == null) {
-      return Constants.DEFAULT_METADATASTORE_AUTHORITATIVE;
-    }
-    return conf.getBoolean(
-        Constants.METADATASTORE_AUTHORITATIVE,
-        Constants.DEFAULT_METADATASTORE_AUTHORITATIVE);
-  }
-
-  /**
-   * Require a filesystem to have a metadata store; skip test
-   * if not.
-   * @param fs filesystem to check
-   */
-  public static void assumeFilesystemHasMetadatastore(S3AFileSystem fs) {
-    assume("Filesystem does not have a metastore",
-        fs.hasMetadataStore());
   }
 
   /**
@@ -597,14 +673,12 @@ public final class S3ATestUtils {
 
   /**
    * Patch a configuration for testing.
-   * This includes possibly enabling s3guard, setting up the local
+   * This includes setting up the local
    * FS temp dir and anything else needed for test runs.
    * @param conf configuration to patch
    * @return the now-patched configuration
    */
   public static Configuration prepareTestConfiguration(final Configuration conf) {
-    // patch in S3Guard options
-    maybeEnableS3Guard(conf);
     // set hadoop temp dir to a default value
     String testUniqueForkId =
         System.getProperty(TEST_UNIQUE_FORK_ID);
@@ -615,10 +689,32 @@ public final class S3ATestUtils {
       conf.set(HADOOP_TMP_DIR, tmpDir);
     }
     conf.set(BUFFER_DIR, tmpDir);
-    // add this so that even on tests where the FS is shared,
-    // the FS is always "magic"
-    conf.setBoolean(MAGIC_COMMITTER_ENABLED, true);
+
+    // directory marker policy
+    String directoryRetention = getTestProperty(
+        conf,
+        DIRECTORY_MARKER_POLICY,
+        DEFAULT_DIRECTORY_MARKER_POLICY);
+    conf.set(DIRECTORY_MARKER_POLICY, directoryRetention);
+
+    boolean prefetchEnabled =
+        getTestPropertyBool(conf, PREFETCH_ENABLED_KEY, PREFETCH_ENABLED_DEFAULT);
+    conf.setBoolean(PREFETCH_ENABLED_KEY, prefetchEnabled);
+
     return conf;
+  }
+
+  /**
+   * build dir.
+   * @return the directory for the project's build, as set by maven,
+   * falling back to pwd + "target" if running from an IDE;
+   */
+  public static File getProjectBuildDir() {
+    String propval = System.getProperty(PROJECT_BUILD_DIRECTORY_PROPERTY);
+    if (StringUtils.isEmpty(propval)) {
+      propval = "target";
+    }
+    return new File(propval).getAbsoluteFile();
   }
 
   /**
@@ -638,7 +734,7 @@ public final class S3ATestUtils {
    * @return a set of credentials
    * @throws IOException on a failure
    */
-  public static AWSCredentialsProvider buildAwsCredentialsProvider(
+  public static AwsCredentialsProvider buildAwsCredentialsProvider(
       final Configuration conf)
       throws IOException {
     assumeSessionTestsEnabled(conf);
@@ -656,9 +752,7 @@ public final class S3ATestUtils {
    * @param conf configuration to examine
    */
   public static void assumeSessionTestsEnabled(final Configuration conf) {
-    if (!conf.getBoolean(TEST_STS_ENABLED, true)) {
-      skip("STS functional tests disabled");
-    }
+    skipIfNotEnabled(conf, TEST_STS_ENABLED, "STS functional tests disabled");
   }
 
   /**
@@ -693,13 +787,14 @@ public final class S3ATestUtils {
     MarshalledCredentials sc = MarshalledCredentialBinding
         .requestSessionCredentials(
           buildAwsCredentialsProvider(conf),
-          S3AUtils.createAwsConf(conf, bucket, AWS_SERVICE_IDENTIFIER_STS),
+          conf,
           conf.getTrimmed(ASSUMED_ROLE_STS_ENDPOINT,
               DEFAULT_ASSUMED_ROLE_STS_ENDPOINT),
           conf.getTrimmed(ASSUMED_ROLE_STS_ENDPOINT_REGION,
               ASSUMED_ROLE_STS_ENDPOINT_REGION_DEFAULT),
           duration,
-          new Invoker(new S3ARetryPolicy(conf), Invoker.LOG_EVENT));
+          new Invoker(new S3ARetryPolicy(conf), Invoker.LOG_EVENT),
+           bucket);
     sc.validate("requested session credentials: ",
         MarshalledCredentials.CredentialTypeRequired.SessionOnly);
     return sc;
@@ -739,16 +834,6 @@ public final class S3ATestUtils {
     String bucket = checkNotNull(conf.get(TEST_FS_S3A_NAME),
         "No test bucket");
     return URI.create(bucket).getHost();
-  }
-
-  /**
-   * Get the prefix for DynamoDB table names used in tests.
-   * @param conf configuration to scan.
-   * @return the table name prefix
-   */
-  public static String getTestDynamoTablePrefix(final Configuration conf) {
-    return getTestProperty(conf, TEST_S3GUARD_DYNAMO_TABLE_PREFIX,
-        TEST_S3GUARD_DYNAMO_TABLE_PREFIX_DEFAULT);
   }
 
   /**
@@ -818,24 +903,9 @@ public final class S3ATestUtils {
    * @param <T> type of operation.
    */
   public static <T> void callQuietly(final Logger log,
-      final Invoker.Operation<T> operation) {
+      final CallableRaisingIOE<T> operation) {
     try {
-      operation.execute();
-    } catch (Exception e) {
-      log.info(e.toString(), e);
-    }
-  }
-
-  /**
-   * Call a void operation; any exception raised is logged at info.
-   * This is for test teardowns.
-   * @param log log to use.
-   * @param operation operation to invoke
-   */
-  public static void callQuietly(final Logger log,
-      final Invoker.VoidOperation operation) {
-    try {
-      operation.execute();
+      operation.apply();
     } catch (Exception e) {
       log.info(e.toString(), e);
     }
@@ -882,7 +952,174 @@ public final class S3ATestUtils {
   public static S3AFileStatus getStatusWithEmptyDirFlag(
       final S3AFileSystem fs,
       final Path dir) throws IOException {
-    return fs.innerGetFileStatus(dir, true, StatusProbeEnum.ALL);
+    return fs.innerGetFileStatus(dir, true,
+        StatusProbeEnum.ALL);
+  }
+
+  /**
+   * Create mock implementation of store context.
+   * @param multiDelete
+   * @param accessors
+   * @return
+   * @throws URISyntaxException
+   * @throws IOException
+   */
+  public static StoreContext createMockStoreContext(
+      boolean multiDelete,
+      ContextAccessors accessors)
+          throws URISyntaxException, IOException {
+    URI name = new URI("s3a://bucket");
+    Configuration conf = new Configuration();
+    return new StoreContextBuilder().setFsURI(name)
+        .setBucket("bucket")
+        .setConfiguration(conf)
+        .setUsername("alice")
+        .setOwner(UserGroupInformation.getCurrentUser())
+        .setExecutor(BlockingThreadPoolExecutorService.newInstance(
+            4,
+            4,
+            10, TimeUnit.SECONDS,
+            "s3a-transfer-shared"))
+        .setExecutorCapacity(DEFAULT_EXECUTOR_CAPACITY)
+        .setInvoker(
+            new Invoker(RetryPolicies.TRY_ONCE_THEN_FAIL, Invoker.LOG_EVENT))
+        .setInstrumentation(new EmptyS3AStatisticsContext())
+        .setStorageStatistics(new S3AStorageStatistics())
+        .setInputPolicy(S3AInputPolicy.Normal)
+        .setChangeDetectionPolicy(
+            ChangeDetectionPolicy.createPolicy(ChangeDetectionPolicy.Mode.None,
+                ChangeDetectionPolicy.Source.ETag, false))
+        .setMultiObjectDeleteEnabled(multiDelete)
+        .setUseListV1(false)
+        .setContextAccessors(accessors)
+        .build();
+  }
+
+  /**
+   * Write the text to a file asynchronously. Logs the operation duration.
+   * @param fs filesystem
+   * @param path path
+   * @return future to the patch created.
+   */
+  private static CompletableFuture<Path> put(FileSystem fs,
+      Path path, String text) {
+    return submit(EXECUTOR, () -> {
+      try (DurationInfo ignore =
+               new DurationInfo(LOG, false, "Creating %s", path)) {
+        createFile(fs, path, true, text.getBytes(StandardCharsets.UTF_8));
+        return path;
+      }
+    });
+  }
+
+  /**
+   * Build a set of files in a directory tree.
+   * @param fs filesystem
+   * @param destDir destination
+   * @param depth file depth
+   * @param fileCount number of files to create.
+   * @param dirCount number of dirs to create at each level
+   * @return the list of files created.
+   */
+  public static List<Path> createFiles(final FileSystem fs,
+      final Path destDir,
+      final int depth,
+      final int fileCount,
+      final int dirCount) throws IOException {
+    return createDirsAndFiles(fs, destDir, depth, fileCount, dirCount,
+        new ArrayList<>(fileCount),
+        new ArrayList<>(dirCount));
+  }
+
+  /**
+   * Build a set of files in a directory tree.
+   * @param fs filesystem
+   * @param destDir destination
+   * @param depth file depth
+   * @param fileCount number of files to create.
+   * @param dirCount number of dirs to create at each level
+   * @param paths [out] list of file paths created
+   * @param dirs [out] list of directory paths created.
+   * @return the list of files created.
+   */
+  public static List<Path> createDirsAndFiles(final FileSystem fs,
+      final Path destDir,
+      final int depth,
+      final int fileCount,
+      final int dirCount,
+      final List<Path> paths,
+      final List<Path> dirs) throws IOException {
+    buildPaths(paths, dirs, destDir, depth, fileCount, dirCount);
+    List<CompletableFuture<Path>> futures = new ArrayList<>(paths.size()
+        + dirs.size());
+
+    // create directories. With dir marker retention, that adds more entries
+    // to cause deletion issues
+    try (DurationInfo ignore =
+             new DurationInfo(LOG, "Creating %d directories", dirs.size())) {
+      for (Path path : dirs) {
+        futures.add(submit(EXECUTOR, () ->{
+          fs.mkdirs(path);
+          return path;
+        }));
+      }
+      waitForCompletion(futures);
+    }
+
+    try (DurationInfo ignore =
+            new DurationInfo(LOG, "Creating %d files", paths.size())) {
+      for (Path path : paths) {
+        futures.add(put(fs, path, path.getName()));
+      }
+      waitForCompletion(futures);
+      return paths;
+    }
+  }
+
+  /**
+   * Given a RemoteIterator to a list of file statuses, return a list of paths.
+   * @param i iterator
+   * @return list of paths
+   * @param <T> type of status
+   * @throws IOException failure retrieving values from the iterator
+   */
+  public static <T extends FileStatus> List<Path> toPathList(RemoteIterator<T> i)
+      throws IOException {
+    return toList(mappingRemoteIterator(i, FileStatus::getPath));
+  }
+
+  /**
+   * Expect an error code from the exception.
+   * @param code error code
+   * @param error exception
+   */
+  public static void expectErrorCode(final int code, final ExitUtil.ExitException error) {
+    if (error.getExitCode() != code) {
+      throw error;
+    }
+  }
+
+  /**
+   * Require a test case to be against Amazon S3 Express store.
+   */
+  public static void assumeS3ExpressFileSystem(final FileSystem fs) throws IOException {
+    assumePathCapability(fs, STORE_CAPABILITY_S3_EXPRESS_STORAGE);
+  }
+
+  /**
+   * Require a test case to be against a standard S3 store.
+   */
+  public static void assumeNotS3ExpressFileSystem(final FileSystem fs) {
+    assumePathCapabilityFalse(fs, STORE_CAPABILITY_S3_EXPRESS_STORAGE);
+  }
+
+  /**
+   * Require a store to be hosted by Amazon -i.e. not a third party store.
+   */
+  public static void assumeStoreAwsHosted(final FileSystem fs) {
+    assume("store is not AWS S3",
+        !NetworkBinding.isAwsEndpoint(fs.getConf()
+            .getTrimmed(ENDPOINT, DEFAULT_ENDPOINT)));
   }
 
   /**
@@ -948,8 +1185,14 @@ public final class S3ATestUtils {
      * @param expected expected value.
      */
     public void assertDiffEquals(String message, long expected) {
-      Assert.assertEquals(message + ": " + statistic.getSymbol(),
-          expected, diff());
+      String text = message + ": " + statistic.getSymbol();
+      long diff = diff();
+      if (expected != diff) {
+        // Log in error ensures that the details appear in the test output
+        LOG.error(text + " expected {}, actual {}", expected, diff);
+      }
+      Assert.assertEquals(text,
+          expected, diff);
     }
 
     /**
@@ -1141,7 +1384,13 @@ public final class S3ATestUtils {
   public static void assertOptionEquals(Configuration conf,
       String key,
       String expected) {
-    assertEquals("Value of " + key, expected, conf.get(key));
+    String actual = conf.get(key);
+    String origin = actual == null
+        ? "(none)"
+        : "[" + StringUtils.join(conf.getPropertySources(key), ", ") + "]";
+    Assertions.assertThat(actual)
+        .describedAs("Value of %s with origin %s", key, origin)
+        .isEqualTo(expected);
   }
 
   /**
@@ -1158,11 +1407,19 @@ public final class S3ATestUtils {
   }
 
   /**
+   * Convert a throwable to an assumption failure.
+   * @param t thrown exception.
+   */
+  public static void raiseAsAssumption(Throwable t) {
+    throw new AssumptionViolatedException(t.toString(), t);
+  }
+
+  /**
    * Get the statistics from a wrapped block output stream.
    * @param out output stream
    * @return the (active) stats of the write
    */
-  public static S3AInstrumentation.OutputStreamStatistics
+  public static BlockOutputStreamStatistics
       getOutputStreamStatistics(FSDataOutputStream out) {
     S3ABlockOutputStream blockOutputStream
         = (S3ABlockOutputStream) out.getWrappedStream();
@@ -1204,7 +1461,7 @@ public final class S3ATestUtils {
             .withFileStatus(status)
             .build();
 
-    try (FSDataInputStream in = awaitFuture(future)) {
+    try (FSDataInputStream in = FutureIO.awaitFuture(future)) {
       byte[] buf = new byte[(int) status.getLen()];
       in.readFully(0, buf);
       return new String(buf);
@@ -1232,61 +1489,10 @@ public final class S3ATestUtils {
   }
 
   /**
-   * Turn on the inconsistent S3A FS client in a configuration,
-   * with 100% probability of inconsistency, default delays.
-   * For this to go live, the paths must include the element
-   * {@link FailureInjectionPolicy#DEFAULT_DELAY_KEY_SUBSTRING}.
-   * @param conf configuration to patch
-   * @param delay delay in millis
-   */
-  public static void enableInconsistentS3Client(Configuration conf,
-      long delay) {
-    LOG.info("Enabling inconsistent S3 client");
-    conf.setClass(S3_CLIENT_FACTORY_IMPL, InconsistentS3ClientFactory.class,
-        S3ClientFactory.class);
-    conf.set(FAIL_INJECT_INCONSISTENCY_KEY, DEFAULT_DELAY_KEY_SUBSTRING);
-    conf.setLong(FAIL_INJECT_INCONSISTENCY_MSEC, delay);
-    conf.setFloat(FAIL_INJECT_INCONSISTENCY_PROBABILITY, 0.0f);
-    conf.setFloat(FAIL_INJECT_THROTTLE_PROBABILITY, 0.0f);
-  }
-
-  /**
-   * Is the filesystem using the inconsistent/throttling/unreliable client?
-   * @param fs filesystem
-   * @return true if the filesystem's client is the inconsistent one.
-   */
-  public static boolean isFaultInjecting(S3AFileSystem fs) {
-    return fs.getAmazonS3Client() instanceof InconsistentAmazonS3Client;
-  }
-
-  /**
-   * Skip a test because the client is using fault injection.
-   * This should only be done for those tests which are measuring the cost
-   * of operations or otherwise cannot handle retries.
-   * @param fs filesystem to check
-   */
-  public static void skipDuringFaultInjection(S3AFileSystem fs) {
-    Assume.assumeFalse("Skipping as filesystem has fault injection",
-        isFaultInjecting(fs));
-  }
-
-  /**
    * Date format used for mapping upload initiation time to human string.
    */
   public static final DateFormat LISTING_FORMAT = new SimpleDateFormat(
       "yyyy-MM-dd HH:mm:ss");
-
-  /**
-   * Skip a test if the FS isn't marked as supporting magic commits.
-   * @param fs filesystem
-   */
-  public static void assumeMagicCommitEnabled(S3AFileSystem fs)
-      throws IOException {
-    assume("Magic commit option disabled on " + fs,
-        fs.hasPathCapability(
-            fs.getWorkingDirectory(),
-            CommitConstants.STORE_CAPABILITY_MAGIC_COMMITTER));
-  }
 
   /**
    * Probe for the configuration containing a specific credential provider.
@@ -1302,27 +1508,6 @@ public final class S3ATestUtils {
     return conf.getTrimmedStringCollection(AWS_CREDENTIALS_PROVIDER)
         .contains(providerClassname);
   }
-
-  public static boolean metadataStorePersistsAuthoritativeBit(MetadataStore ms)
-      throws IOException {
-    Map<String, String> diags = ms.getDiagnostics();
-    String persists =
-        diags.get(MetadataStoreCapabilities.PERSISTS_AUTHORITATIVE_BIT);
-    if(persists == null){
-      return false;
-    }
-    return Boolean.valueOf(persists);
-  }
-
-  /**
-   * Set the metadata store of a filesystem instance to the given
-   * store, via a package-private setter method.
-   * @param fs filesystem.
-   * @param ms metastore
-   */
-  public static void setMetadataStore(S3AFileSystem fs, MetadataStore ms) {
-    fs.setMetadataStore(ms);
-}
 
   public static void checkListingDoesNotContainPath(S3AFileSystem fs, Path filePath)
       throws IOException {
@@ -1373,35 +1558,6 @@ public final class S3ATestUtils {
   }
 
   /**
-   * Wait for a deleted file to no longer be visible.
-   * @param fs filesystem
-   * @param testFilePath path to query
-   * @throws Exception failure
-   */
-  public static void awaitDeletedFileDisappearance(final S3AFileSystem fs,
-      final Path testFilePath) throws Exception {
-    eventually(
-        STABILIZATION_TIME, PROBE_INTERVAL_MILLIS,
-        () -> intercept(FileNotFoundException.class,
-            () -> fs.getFileStatus(testFilePath)));
-  }
-
-  /**
-   * Wait for a file to be visible.
-   * @param fs filesystem
-   * @param testFilePath path to query
-   * @return the file status.
-   * @throws Exception failure
-   */
-  public static S3AFileStatus awaitFileStatus(S3AFileSystem fs,
-      final Path testFilePath)
-      throws Exception {
-    return (S3AFileStatus) eventually(
-        STABILIZATION_TIME, PROBE_INTERVAL_MILLIS,
-        () -> fs.getFileStatus(testFilePath));
-  }
-
-  /**
    * This creates a set containing all current threads and some well-known
    * thread names whose existence should not fail test runs.
    * They are generally static cleaner threads created by various classes
@@ -1440,5 +1596,255 @@ public final class S3ATestUtils {
         .filter(n -> n.startsWith("surefire"))
         .collect(Collectors.toCollection(TreeSet::new));
     return threads;
+  }
+
+  /**
+   * Call the package-private {@code innerGetFileStatus()} method
+   * on the passed in FS.
+   * @param fs filesystem
+   * @param path path
+   * @param needEmptyDirectoryFlag look for empty directory
+   * @param probes file status probes to perform
+   * @return the status
+   * @throws IOException
+   */
+  public static S3AFileStatus innerGetFileStatus(
+      S3AFileSystem fs,
+      Path path,
+      boolean needEmptyDirectoryFlag,
+      Set<StatusProbeEnum> probes) throws IOException {
+
+    return fs.innerGetFileStatus(
+        path,
+        needEmptyDirectoryFlag,
+        probes);
+  }
+
+  /**
+   * Skip a test if encryption algorithm or encryption key is not set.
+   *
+   * @param configuration configuration to probe.
+   * @param s3AEncryptionMethods list of encryption algorithms to probe.
+   * @throws IOException if the secret lookup fails.
+   */
+  public static void skipIfEncryptionNotSet(Configuration configuration,
+      S3AEncryptionMethods... s3AEncryptionMethods) throws IOException {
+    if (s3AEncryptionMethods == null || s3AEncryptionMethods.length == 0) {
+      throw new IllegalArgumentException("Specify at least one encryption method");
+    }
+    // if S3 encryption algorithm is not set to desired method or AWS encryption
+    // key is not set, then skip.
+    String bucket = getTestBucketName(configuration);
+    final EncryptionSecrets secrets = buildEncryptionSecrets(bucket, configuration);
+    boolean encryptionMethodMatching = Arrays.stream(s3AEncryptionMethods).anyMatch(
+        s3AEncryptionMethod -> s3AEncryptionMethod.getMethod()
+            .equals(secrets.getEncryptionMethod().getMethod()));
+    if (!encryptionMethodMatching || StringUtils.isBlank(secrets.getEncryptionKey())) {
+      skip(S3_ENCRYPTION_KEY + " is not set or " + S3_ENCRYPTION_ALGORITHM + " is not set to "
+          + Arrays.stream(s3AEncryptionMethods).map(S3AEncryptionMethods::getMethod)
+          .collect(Collectors.toList()) + " in " + secrets);
+    }
+  }
+
+  /**
+   * Get the input stream statistics of an input stream.
+   * Raises an exception if the inner stream is not an S3A input stream
+   * or prefetching input stream
+   * @param in wrapper
+   * @return the statistics for the inner stream
+   */
+  public static S3AInputStreamStatistics getInputStreamStatistics(
+      FSDataInputStream in) {
+
+    InputStream inner = in.getWrappedStream();
+    if (inner instanceof S3AInputStream) {
+      return ((S3AInputStream) inner).getS3AStreamStatistics();
+    } else if (inner instanceof S3APrefetchingInputStream) {
+      return ((S3APrefetchingInputStream) inner).getS3AStreamStatistics();
+    } else {
+      throw new AssertionError("Not an S3AInputStream or S3APrefetchingInputStream: " + inner);
+    }
+  }
+
+  /**
+   * Get the inner stream of an input stream.
+   * Raises an exception if the inner stream is not an S3A input stream
+   * @param in wrapper
+   * @return the inner stream
+   * @throws AssertionError if the inner stream is of the wrong type
+   */
+  public static S3AInputStream getS3AInputStream(
+          FSDataInputStream in) {
+    InputStream inner = in.getWrappedStream();
+    if (inner instanceof S3AInputStream) {
+      return (S3AInputStream) inner;
+    } else {
+      throw new AssertionError("Not an S3AInputStream: " + inner);
+    }
+  }
+
+  /**
+   * Get the inner stream of a FilterInputStream.
+   * Uses reflection to access a protected field.
+   * @param fis input stream.
+   * @return the inner stream.
+   */
+  public static InputStream getInnerStream(FilterInputStream fis) {
+    try {
+      final Field field = FilterInputStream.class.getDeclaredField("in");
+      field.setAccessible(true);
+      return (InputStream) field.get(fis);
+    } catch (IllegalAccessException | NoSuchFieldException e) {
+      throw new AssertionError("Failed to get inner stream: " + e, e);
+    }
+  }
+
+  /**
+   * Get the innermost stream of a chain of FilterInputStreams.
+   * This allows tests into the internals of an AWS SDK stream chain.
+   * @param fis input stream.
+   * @return the inner stream.
+   */
+  public static InputStream getInnermostStream(FilterInputStream fis) {
+    InputStream inner = fis;
+    while (inner instanceof FilterInputStream) {
+      inner = getInnerStream((FilterInputStream) inner);
+    }
+    return inner;
+  }
+
+  /**
+   * Verify that an s3a stream is not checksummed.
+   * The inner stream must be active.
+   */
+  public static void assertStreamIsNotChecksummed(final S3AInputStream wrappedS3A) {
+    final ResponseInputStream<GetObjectResponse> wrappedStream =
+        wrappedS3A.getWrappedStream();
+    Assertions.assertThat(wrappedStream)
+        .describedAs("wrapped stream is not open: call read() on %s", wrappedS3A)
+        .isNotNull();
+
+    final InputStream inner = getInnermostStream(wrappedStream);
+    Assertions.assertThat(inner)
+        .describedAs("innermost stream of %s", wrappedS3A)
+        .isNotInstanceOf(ChecksumValidatingInputStream.class)
+        .isNotInstanceOf(S3ChecksumValidatingInputStream.class);
+  }
+
+  /**
+   * Disable Prefetching streams from S3AFileSystem in tests.
+   * @param conf Configuration to remove the prefetch property from.
+   */
+  public static void disablePrefetching(Configuration conf) {
+    removeBaseAndBucketOverrides(conf, PREFETCH_ENABLED_KEY);
+  }
+
+  /**
+   * Skip root tests if the system properties/config says so.
+   * @param conf configuration to check
+   */
+  public static void maybeSkipRootTests(Configuration conf) {
+    assume("Root tests disabled",
+        getTestPropertyBool(conf, ROOT_TESTS_ENABLED, DEFAULT_ROOT_TESTS_ENABLED));
+  }
+
+  /**
+   * Does this FS support multi object delete?
+   * @param fs filesystem
+   * @return true if multi-delete is enabled.
+   */
+
+  public static boolean isBulkDeleteEnabled(FileSystem fs) {
+    return fs.getConf().getBoolean(Constants.ENABLE_MULTI_DELETE,
+        true);
+  }
+
+  /**
+   * Does this FS have create performance enabled?
+   * @param fs filesystem
+   * @return true if create performance is enabled
+   * @throws IOException IO problems
+   */
+  public static boolean isCreatePerformanceEnabled(FileSystem fs)
+      throws IOException {
+    return fs.hasPathCapability(new Path("/"), FS_S3A_CREATE_PERFORMANCE_ENABLED);
+  }
+
+  /**
+   * Is the filesystem connector bonded to S3Express storage?
+   * @param fs filesystem.
+   * @return true if the store has the relevant path capability.
+   * @throws IOException IO failure
+   */
+  public static boolean isS3ExpressStorage(FileSystem fs) throws IOException {
+    return fs.hasPathCapability(new Path("/"), STORE_CAPABILITY_S3_EXPRESS_STORAGE);
+  }
+
+  /**
+   * Get an etag from a FileStatus which must implement
+   * the {@link EtagSource} interface -which S3AFileStatus does.
+   *
+   * @param status the status.
+   * @return the etag
+   */
+  public static String etag(FileStatus status) {
+    Preconditions.checkArgument(status instanceof EtagSource,
+        "Not an EtagSource: %s", status);
+    return ((EtagSource) status).getEtag();
+  }
+
+  /**
+   * Create an SDK client exception.
+   * @param message message
+   * @param cause nullable cause
+   * @return the exception
+   */
+  public static SdkClientException sdkClientException(
+      String message, Throwable cause) {
+    return SdkClientException.builder()
+        .message(message)
+        .cause(cause)
+        .build();
+  }
+
+  /**
+   * Create an SDK client exception using the string value of the cause
+   * as the message.
+   * @param cause nullable cause
+   * @return the exception
+   */
+  public static SdkClientException sdkClientException(
+      Throwable cause) {
+    return SdkClientException.builder()
+        .message(cause.toString())
+        .cause(cause)
+        .build();
+  }
+
+  private static final String BYTES_PREFIX = "bytes=";
+
+  /**
+   * Given a range header, split into start and end.
+   * Based on AWSRequestAnalyzer.
+   * @param rangeHeader header string
+   * @return parse range, or (-1, -1) for problems
+   */
+  public static Pair<Long, Long> requestRange(String rangeHeader) {
+    if (rangeHeader != null && rangeHeader.startsWith(BYTES_PREFIX)) {
+      String[] values = rangeHeader
+          .substring(BYTES_PREFIX.length())
+          .split("-");
+      if (values.length == 2) {
+        try {
+          long start = Long.parseUnsignedLong(values[0]);
+          long end = Long.parseUnsignedLong(values[1]);
+          return Pair.of(start, end);
+        } catch (NumberFormatException e) {
+          LOG.warn("Failed to parse range header {}", rangeHeader, e);
+        }
+      }
+    }
+    // error case
+    return Pair.of(-1L, -1L);
   }
 }

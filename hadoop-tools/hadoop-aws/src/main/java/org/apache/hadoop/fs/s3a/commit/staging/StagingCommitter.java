@@ -26,7 +26,6 @@ import java.util.Locale;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
-import com.google.common.base.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,25 +39,25 @@ import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.s3a.S3AFileSystem;
 import org.apache.hadoop.fs.s3a.commit.AbstractS3ACommitter;
 import org.apache.hadoop.fs.s3a.commit.CommitConstants;
-import org.apache.hadoop.fs.s3a.commit.CommitOperations;
 import org.apache.hadoop.fs.s3a.commit.InternalCommitterConstants;
-import org.apache.hadoop.fs.s3a.commit.Tasks;
 import org.apache.hadoop.fs.s3a.commit.files.PendingSet;
 import org.apache.hadoop.fs.s3a.commit.files.SinglePendingCommit;
+import org.apache.hadoop.fs.s3a.commit.impl.CommitContext;
 import org.apache.hadoop.mapreduce.JobContext;
-import org.apache.hadoop.mapreduce.JobID;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputCommitter;
 import org.apache.hadoop.util.DurationInfo;
+import org.apache.hadoop.util.functional.TaskPool;
 
-import static com.google.common.base.Preconditions.*;
+import static java.util.Objects.requireNonNull;
 import static org.apache.hadoop.fs.s3a.Constants.*;
 import static org.apache.hadoop.fs.s3a.S3AUtils.*;
 import static org.apache.hadoop.fs.s3a.Invoker.*;
-import static org.apache.hadoop.fs.s3a.commit.staging.StagingCommitterConstants.*;
 import static org.apache.hadoop.fs.s3a.commit.CommitConstants.*;
 import static org.apache.hadoop.fs.s3a.commit.CommitUtils.*;
-import static org.apache.hadoop.fs.s3a.commit.CommitUtilsWithMR.*;
+import static org.apache.hadoop.fs.s3a.commit.impl.CommitUtilsWithMR.*;
+import static org.apache.hadoop.util.functional.RemoteIterators.cleanupRemoteIterator;
+import static org.apache.hadoop.util.functional.RemoteIterators.toList;
 
 /**
  * Committer based on the contributed work of the
@@ -95,7 +94,6 @@ public class StagingCommitter extends AbstractS3ACommitter {
   public static final String NAME = "staging";
   private final Path constructorOutputPath;
   private final long uploadPartSize;
-  private final String uuid;
   private final boolean uniqueFilenames;
   private final FileOutputCommitter wrappedCommitter;
 
@@ -114,19 +112,18 @@ public class StagingCommitter extends AbstractS3ACommitter {
   public StagingCommitter(Path outputPath,
       TaskAttemptContext context) throws IOException {
     super(outputPath, context);
-    this.constructorOutputPath = checkNotNull(getOutputPath(), "output path");
+    this.constructorOutputPath = requireNonNull(getOutputPath(), "output path");
     Configuration conf = getConf();
     this.uploadPartSize = conf.getLongBytes(
         MULTIPART_SIZE, DEFAULT_MULTIPART_SIZE);
-    this.uuid = getUploadUUID(conf, context.getJobID());
     this.uniqueFilenames = conf.getBoolean(
         FS_S3A_COMMITTER_STAGING_UNIQUE_FILENAMES,
         DEFAULT_STAGING_COMMITTER_UNIQUE_FILENAMES);
-    setWorkPath(buildWorkPath(context, uuid));
+    setWorkPath(buildWorkPath(context, getUUID()));
     this.wrappedCommitter = createWrappedCommitter(context, conf);
     setOutputPath(constructorOutputPath);
-    Path finalOutputPath = getOutputPath();
-    Preconditions.checkNotNull(finalOutputPath, "Output path cannot be null");
+    Path finalOutputPath = requireNonNull(getOutputPath(),
+        "Output path cannot be null");
     S3AFileSystem fs = getS3AFileSystem(finalOutputPath,
         context.getConfiguration(), false);
     s3KeyPrefix = fs.pathToKey(finalOutputPath);
@@ -156,7 +153,8 @@ public class StagingCommitter extends AbstractS3ACommitter {
 
     // explicitly choose commit algorithm
     initFileOutputCommitterOptions(context);
-    commitsDirectory = Paths.getMultipartUploadCommitsDirectory(conf, uuid);
+    commitsDirectory = Paths.getMultipartUploadCommitsDirectory(conf,
+        getUUID());
     return new FileOutputCommitter(commitsDirectory, context);
   }
 
@@ -175,46 +173,15 @@ public class StagingCommitter extends AbstractS3ACommitter {
   public String toString() {
     final StringBuilder sb = new StringBuilder("StagingCommitter{");
     sb.append(super.toString());
+    sb.append(", commitsDirectory=").append(commitsDirectory);
+    sb.append(", uniqueFilenames=").append(uniqueFilenames);
     sb.append(", conflictResolution=").append(conflictResolution);
+    sb.append(", uploadPartSize=").append(uploadPartSize);
     if (wrappedCommitter != null) {
       sb.append(", wrappedCommitter=").append(wrappedCommitter);
     }
     sb.append('}');
     return sb.toString();
-  }
-
-  /**
-   * Get the UUID of an upload; may be the job ID.
-   * Spark will use a fake app ID based on the current minute and job ID 0.
-   * To avoid collisions, the key policy is:
-   * <ol>
-   *   <li>Value of {@link InternalCommitterConstants#FS_S3A_COMMITTER_STAGING_UUID}.</li>
-   *   <li>Value of {@code "spark.sql.sources.writeJobUUID"}.</li>
-   *   <li>Value of {@code "spark.app.id"}.</li>
-   *   <li>JobId passed in.</li>
-   * </ol>
-   * The staging UUID is set in in {@link #setupJob(JobContext)} and so will
-   * be valid in all sequences where the job has been set up for the
-   * configuration passed in.
-   * @param conf job/task configuration
-   * @param jobId Job ID
-   * @return an ID for use in paths.
-   */
-  public static String getUploadUUID(Configuration conf, String jobId) {
-    return conf.getTrimmed(
-        InternalCommitterConstants.FS_S3A_COMMITTER_STAGING_UUID,
-        conf.getTrimmed(SPARK_WRITE_UUID,
-            conf.getTrimmed(SPARK_APP_ID, jobId)));
-  }
-
-  /**
-   * Get the UUID of a Job.
-   * @param conf job/task configuration
-   * @param jobId Job ID
-   * @return an ID for use in paths.
-   */
-  public static String getUploadUUID(Configuration conf, JobID jobId) {
-    return getUploadUUID(conf, jobId.toString());
   }
 
   /**
@@ -277,8 +244,16 @@ public class StagingCommitter extends AbstractS3ACommitter {
 
   @Override
   protected Path getJobAttemptPath(int appAttemptId) {
-    return new Path(getPendingJobAttemptsPath(commitsDirectory),
+    return new Path(getJobPath(),
         String.valueOf(appAttemptId));
+  }
+
+  /**
+   * Compute the path under which all job attempts will be placed.
+   * @return the path to store job attempt data.
+   */
+  protected Path getJobPath() {
+    return getPendingJobAttemptsPath(commitsDirectory);
   }
 
   /**
@@ -309,7 +284,7 @@ public class StagingCommitter extends AbstractS3ACommitter {
    * @return the location of pending job attempts.
    */
   private static Path getPendingJobAttemptsPath(Path out) {
-    Preconditions.checkNotNull(out, "Null 'out' path");
+    requireNonNull(out, "Null 'out' path");
     return new Path(out, TEMPORARY);
   }
 
@@ -330,12 +305,12 @@ public class StagingCommitter extends AbstractS3ACommitter {
    * @param context task context
    */
   private static void validateContext(TaskAttemptContext context) {
-    Preconditions.checkNotNull(context, "null context");
-    Preconditions.checkNotNull(context.getTaskAttemptID(),
+    requireNonNull(context, "null context");
+    requireNonNull(context.getTaskAttemptID(),
         "null task attempt ID");
-    Preconditions.checkNotNull(context.getTaskAttemptID().getTaskID(),
+    requireNonNull(context.getTaskAttemptID().getTaskID(),
         "null task ID");
-    Preconditions.checkNotNull(context.getTaskAttemptID().getJobID(),
+    requireNonNull(context.getTaskAttemptID().getJobID(),
         "null job ID");
   }
 
@@ -376,14 +351,13 @@ public class StagingCommitter extends AbstractS3ACommitter {
       throws IOException {
 
     // get files on the local FS in the attempt path
-    Path attemptPath = getTaskAttemptPath(context);
-    Preconditions.checkNotNull(attemptPath,
-        "No attemptPath path in {}", this);
+    Path attemptPath = requireNonNull(getTaskAttemptPath(context),
+        "No attemptPath path");
 
     LOG.debug("Scanning {} for files to commit", attemptPath);
 
-    return listAndFilter(getTaskAttemptFilesystem(context),
-        attemptPath, true, HIDDEN_FILE_FILTER);
+    return toList(listAndFilter(getTaskAttemptFilesystem(context),
+        attemptPath, true, HIDDEN_FILE_FILTER));
   }
 
   /**
@@ -401,7 +375,8 @@ public class StagingCommitter extends AbstractS3ACommitter {
    */
   protected String getFinalKey(String relative, JobContext context) {
     if (uniqueFilenames) {
-      return getS3KeyPrefix(context) + "/" + Paths.addUUID(relative, uuid);
+      return getS3KeyPrefix(context) + "/"
+          + Paths.addUUID(relative, getUUID());
     } else {
       return getS3KeyPrefix(context) + "/" + relative;
     }
@@ -452,55 +427,52 @@ public class StagingCommitter extends AbstractS3ACommitter {
    */
   @Override
   public void setupJob(JobContext context) throws IOException {
-    LOG.debug("{}, Setting up job {}", getRole(), jobIdString(context));
-    context.getConfiguration().set(
-        InternalCommitterConstants.FS_S3A_COMMITTER_STAGING_UUID, uuid);
-    wrappedCommitter.setupJob(context);
     super.setupJob(context);
+    wrappedCommitter.setupJob(context);
   }
 
   /**
    * Get the list of pending uploads for this job attempt.
-   * @param context job context
+   * @param commitContext job context
    * @return a list of pending uploads.
    * @throws IOException Any IO failure
    */
   @Override
   protected ActiveCommit listPendingUploadsToCommit(
-      JobContext context)
+      CommitContext commitContext)
       throws IOException {
-    return listPendingUploads(context, false);
+    return listPendingUploads(commitContext, false);
   }
 
   /**
    * Get the list of pending uploads for this job attempt, swallowing
    * exceptions.
-   * @param context job context
+   * @param commitContext commit context
    * @return a list of pending uploads. If an exception was swallowed,
    * then this may not match the actual set of pending operations
    * @throws IOException shouldn't be raised, but retained for the compiler
    */
   protected ActiveCommit listPendingUploadsToAbort(
-      JobContext context) throws IOException {
-    return listPendingUploads(context, true);
+      CommitContext commitContext) throws IOException {
+    return listPendingUploads(commitContext, true);
   }
 
   /**
    * Get the list of pending uploads for this job attempt.
-   * @param context job context
+   * @param commitContext commit context
    * @param suppressExceptions should exceptions be swallowed?
    * @return a list of pending uploads. If exceptions are being swallowed,
    * then this may not match the actual set of pending operations
    * @throws IOException Any IO failure which wasn't swallowed.
    */
   protected ActiveCommit listPendingUploads(
-      JobContext context, boolean suppressExceptions) throws IOException {
+      CommitContext commitContext, boolean suppressExceptions) throws IOException {
     try (DurationInfo ignored = new DurationInfo(LOG,
         "Listing pending uploads")) {
-      Path wrappedJobAttemptPath = getJobAttemptPath(context);
+      Path wrappedJobAttemptPath = getJobAttemptPath(commitContext.getJobContext());
       final FileSystem attemptFS = wrappedJobAttemptPath.getFileSystem(
-          context.getConfiguration());
-      return ActiveCommit.fromStatusList(attemptFS,
+          commitContext.getConf());
+      return ActiveCommit.fromStatusIterator(attemptFS,
           listAndFilter(attemptFS,
               wrappedJobAttemptPath, false,
               HIDDEN_FILE_FILTER));
@@ -527,40 +499,42 @@ public class StagingCommitter extends AbstractS3ACommitter {
     }
   }
 
+  /**
+   * Staging committer cleanup includes calling wrapped committer's
+   * cleanup method, and removing staging uploads path and all
+   * destination paths in the final filesystem.
+   * @param commitContext commit context
+   * @param suppressExceptions should exceptions be suppressed?
+   * @throws IOException IO failures if exceptions are not suppressed.
+   */
   @Override
   @SuppressWarnings("deprecation")
-  protected void cleanup(JobContext context,
+  protected void cleanup(CommitContext commitContext,
       boolean suppressExceptions)
       throws IOException {
     maybeIgnore(suppressExceptions, "Cleanup wrapped committer",
-        () -> wrappedCommitter.cleanupJob(context));
+        () -> wrappedCommitter.cleanupJob(
+            commitContext.getJobContext()));
+    maybeIgnore(suppressExceptions, "Delete staging uploads path",
+        () -> deleteStagingUploadsParentDirectory(
+            commitContext.getJobContext()));
     maybeIgnore(suppressExceptions, "Delete destination paths",
-        () -> deleteDestinationPaths(context));
-    super.cleanup(context, suppressExceptions);
+        () -> deleteDestinationPaths(
+            commitContext.getJobContext()));
+    super.cleanup(commitContext, suppressExceptions);
   }
 
   @Override
-  protected void abortPendingUploadsInCleanup(boolean suppressExceptions)
-      throws IOException {
-    if (getConf()
-        .getBoolean(FS_S3A_COMMITTER_STAGING_ABORT_PENDING_UPLOADS, true)) {
-      super.abortPendingUploadsInCleanup(suppressExceptions);
-    } else {
-      LOG.info("Not cleanup up pending uploads to {} as {} is false ",
-          getOutputPath(),
-          FS_S3A_COMMITTER_STAGING_ABORT_PENDING_UPLOADS);
-    }
-  }
-
-  @Override
-  protected void abortJobInternal(JobContext context,
+  protected void abortJobInternal(CommitContext commitContext,
       boolean suppressExceptions) throws IOException {
     String r = getRole();
+    JobContext context = commitContext.getJobContext();
     boolean failed = false;
     try (DurationInfo d = new DurationInfo(LOG,
         "%s: aborting job in state %s ", r, jobIdString(context))) {
-      ActiveCommit pending = listPendingUploadsToAbort(context);
-      abortPendingUploads(context, pending, suppressExceptions, true);
+      ActiveCommit pending = listPendingUploadsToAbort(commitContext);
+      abortPendingUploads(commitContext,
+          pending, suppressExceptions, true);
     } catch (FileNotFoundException e) {
       // nothing to list
       LOG.debug("No job directory to read uploads from");
@@ -568,15 +542,30 @@ public class StagingCommitter extends AbstractS3ACommitter {
       failed = true;
       maybeIgnore(suppressExceptions, "aborting job", e);
     } finally {
-      super.abortJobInternal(context, failed || suppressExceptions);
+      super.abortJobInternal(commitContext, failed || suppressExceptions);
     }
   }
 
+  /**
+   * Delete the multipart upload staging directory.
+   * @param context job context
+   * @throws IOException IO failure
+   */
+  protected void deleteStagingUploadsParentDirectory(JobContext context)
+          throws IOException {
+    Path stagingUploadsPath = Paths.getStagingUploadsParentDirectory(
+            context.getConfiguration(), getUUID());
+    ignoreIOExceptions(LOG,
+        "Deleting staging uploads path", stagingUploadsPath.toString(),
+        () -> deleteWithWarning(
+            stagingUploadsPath.getFileSystem(getConf()),
+            stagingUploadsPath,
+            true));
+  }
 
   /**
    * Delete the working paths of a job.
    * <ol>
-   *   <li>The job attempt path</li>
    *   <li>{@code $dest/__temporary}</li>
    *   <li>the local working directory for staged files</li>
    * </ol>
@@ -585,14 +574,6 @@ public class StagingCommitter extends AbstractS3ACommitter {
    * @throws IOException IO failure
    */
   protected void deleteDestinationPaths(JobContext context) throws IOException {
-    Path attemptPath = getJobAttemptPath(context);
-    ignoreIOExceptions(LOG,
-        "Deleting Job attempt Path", attemptPath.toString(),
-        () -> deleteWithWarning(
-            getJobAttemptFileSystem(context),
-            attemptPath,
-            true));
-
     // delete the __temporary directory. This will cause problems
     // if there is >1 task targeting the same dest dir
     deleteWithWarning(getDestFS(),
@@ -608,8 +589,7 @@ public class StagingCommitter extends AbstractS3ACommitter {
     Path taskAttemptPath = getTaskAttemptPath(context);
     try (DurationInfo d = new DurationInfo(LOG,
         "%s: setup task attempt path %s ", getRole(), taskAttemptPath)) {
-      // create the local FS
-      taskAttemptPath.getFileSystem(getConf()).mkdirs(taskAttemptPath);
+      super.setupTask(context);
       wrappedCommitter.setupTask(context);
     }
   }
@@ -640,16 +620,16 @@ public class StagingCommitter extends AbstractS3ACommitter {
   @Override
   public void commitTask(TaskAttemptContext context) throws IOException {
     try (DurationInfo d = new DurationInfo(LOG,
-        "%s: commit task %s", getRole(), context.getTaskAttemptID())) {
-      int count = commitTaskInternal(context, getTaskOutput(context));
+        "%s: commit task %s", getRole(), context.getTaskAttemptID());
+         CommitContext commitContext
+             = initiateTaskOperation(context)) {
+      int count = commitTaskInternal(context, getTaskOutput(context), commitContext);
       LOG.info("{}: upload file count: {}", getRole(), count);
     } catch (IOException e) {
       LOG.error("{}: commit of task {} failed",
           getRole(), context.getTaskAttemptID(), e);
       getCommitOperations().taskCompleted(false);
       throw e;
-    } finally {
-      destroyThreadPool();
     }
     getCommitOperations().taskCompleted(true);
   }
@@ -659,11 +639,13 @@ public class StagingCommitter extends AbstractS3ACommitter {
    * writing a pending entry for them.
    * @param context task context
    * @param taskOutput list of files from the output
+   * @param commitContext commit context
    * @return number of uploads committed.
    * @throws IOException IO Failures.
    */
   protected int commitTaskInternal(final TaskAttemptContext context,
-      List<? extends FileStatus> taskOutput)
+      List<? extends FileStatus> taskOutput,
+      CommitContext commitContext)
       throws IOException {
     LOG.debug("{}: commitTaskInternal", getRole());
     Configuration conf = context.getConfiguration();
@@ -695,11 +677,13 @@ public class StagingCommitter extends AbstractS3ACommitter {
       context.progress();
 
       PendingSet pendingCommits = new PendingSet(commitCount);
+      pendingCommits.putExtraData(TASK_ATTEMPT_ID,
+          context.getTaskAttemptID().toString());
       try {
-        Tasks.foreach(taskOutput)
+        TaskPool.foreach(taskOutput)
             .stopOnFailure()
             .suppressExceptions(false)
-            .executeWith(buildThreadPool(context))
+            .executeWith(commitContext.getOuterSubmitter())
             .run(stat -> {
               Path path = stat.getPath();
               File localFile = new File(path.toUri().getPath());
@@ -722,14 +706,22 @@ public class StagingCommitter extends AbstractS3ACommitter {
           pendingCommits.add(commit);
         }
 
+        // maybe add in the IOStatistics the thread
+        if (commitContext.isCollectIOStatistics()) {
+          pendingCommits.getIOStatistics().aggregate(
+              commitContext.getIOStatisticsContext()
+              .getIOStatistics());
+        }
+
         // save the data
-        // although overwrite=false, there's still a risk of > 1 entry being
-        // committed if the FS doesn't have create-no-overwrite consistency.
+        // overwrite any existing file, so whichever task attempt
+        // committed last wins.
 
         LOG.debug("Saving {} pending commit(s)) to file {}",
             pendingCommits.size(),
             commitsAttemptPath);
-        pendingCommits.save(commitsFS, commitsAttemptPath, false);
+        pendingCommits.save(commitsFS, commitsAttemptPath,
+            commitContext.getPendingSetSerializer());
         threw = false;
 
       } finally {
@@ -737,12 +729,11 @@ public class StagingCommitter extends AbstractS3ACommitter {
           LOG.error(
               "{}: Exception during commit process, aborting {} commit(s)",
               getRole(), commits.size());
-          try(CommitOperations.CommitContext commitContext
-                  = initiateCommitOperation();
-              DurationInfo ignored = new DurationInfo(LOG,
+          try(DurationInfo ignored = new DurationInfo(LOG,
                   "Aborting %s uploads", commits.size())) {
-            Tasks.foreach(commits)
+            TaskPool.foreach(commits)
                 .suppressExceptions()
+                .executeWith(commitContext.getOuterSubmitter())
                 .run(commitContext::abortSingleCommit);
           }
           deleteTaskAttemptPathQuietly(context);
@@ -785,8 +776,6 @@ public class StagingCommitter extends AbstractS3ACommitter {
       LOG.error("{}: exception when aborting task {}",
           getRole(), context.getTaskAttemptID(), e);
       throw e;
-    } finally {
-      destroyThreadPool();
     }
   }
 
@@ -828,15 +817,6 @@ public class StagingCommitter extends AbstractS3ACommitter {
    */
   private String getS3KeyPrefix(JobContext context) {
     return s3KeyPrefix;
-  }
-
-  /**
-   * A UUID for this upload, as calculated with.
-   * {@link #getUploadUUID(Configuration, String)}
-   * @return the UUID for files
-   */
-  protected String getUUID() {
-    return uuid;
   }
 
   /**
@@ -886,6 +866,7 @@ public class StagingCommitter extends AbstractS3ACommitter {
                 ? " dir"
                 : ("file size " + status.getLen() + " bytes"));
       }
+      cleanupRemoteIterator(lf);
     } catch (IOException e) {
       LOG.info("Discarding exception raised when listing {}: " + e, path);
       LOG.debug("stack trace ", e);
@@ -913,16 +894,16 @@ public class StagingCommitter extends AbstractS3ACommitter {
    * Pre-commit actions for a job.
    * Loads all the pending files to verify they can be loaded
    * and parsed.
-   * @param context job context
+   * @param commitContext commit context
    * @param pending pending commits
    * @throws IOException any failure
    */
   @Override
   public void preCommitJob(
-      final JobContext context,
+      CommitContext commitContext,
       final ActiveCommit pending) throws IOException {
 
     // see if the files can be loaded.
-    precommitCheckPendingFiles(context, pending);
+    precommitCheckPendingFiles(commitContext, pending);
   }
 }

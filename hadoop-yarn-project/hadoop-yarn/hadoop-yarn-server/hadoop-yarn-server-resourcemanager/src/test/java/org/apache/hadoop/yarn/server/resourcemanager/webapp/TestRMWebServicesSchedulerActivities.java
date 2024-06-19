@@ -18,14 +18,22 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.webapp;
 
+import com.google.inject.Guice;
 import com.sun.jersey.api.client.ClientResponse;
 import com.sun.jersey.api.client.WebResource;
 import com.sun.jersey.core.util.MultivaluedMapImpl;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateRequest;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.activities.ActivityDiagnosticConstant;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.activities.ActivityState;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration;
+import org.apache.hadoop.yarn.webapp.GuiceServletConfig;
+import org.apache.hadoop.yarn.webapp.JerseyTestBase;
+import org.junit.Before;
 import org.apache.hadoop.http.JettyUtils;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerState;
@@ -72,6 +80,7 @@ import static org.apache.hadoop.yarn.server.resourcemanager.webapp.ActivitiesTes
 import static org.apache.hadoop.yarn.server.resourcemanager.webapp.ActivitiesTestUtils.FN_SCHEDULER_ACT_NAME;
 import static org.apache.hadoop.yarn.server.resourcemanager.webapp.ActivitiesTestUtils.FN_SCHEDULER_ACT_ALLOCATIONS_ROOT;
 import static org.apache.hadoop.yarn.server.resourcemanager.webapp.ActivitiesTestUtils.FN_SCHEDULER_ACT_ROOT;
+import static org.apache.hadoop.yarn.server.resourcemanager.webapp.ActivitiesTestUtils.FN_SCHEDULER_BULK_ACT_ROOT;
 import static org.apache.hadoop.yarn.server.resourcemanager.webapp.ActivitiesTestUtils.TOTAL_RESOURCE_INSUFFICIENT_DIAGNOSTIC_PREFIX;
 import static org.apache.hadoop.yarn.server.resourcemanager.webapp.ActivitiesTestUtils.UNMATCHED_PARTITION_OR_PC_DIAGNOSTIC_PREFIX;
 import static org.apache.hadoop.yarn.server.resourcemanager.webapp.ActivitiesTestUtils.getFirstSubNodeFromJson;
@@ -81,6 +90,7 @@ import static org.apache.hadoop.yarn.server.resourcemanager.webapp.ActivitiesTes
 import static org.apache.hadoop.yarn.server.resourcemanager.webapp.ActivitiesTestUtils.verifyNumberOfNodes;
 import static org.apache.hadoop.yarn.server.resourcemanager.webapp.ActivitiesTestUtils.verifyQueueOrder;
 import static org.apache.hadoop.yarn.server.resourcemanager.webapp.ActivitiesTestUtils.verifyStateOfAllocations;
+import static org.apache.hadoop.yarn.server.resourcemanager.webapp.TestWebServiceUtil.createWebAppDescriptor;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -89,11 +99,65 @@ import static org.junit.Assert.assertTrue;
 /**
  * Tests for scheduler/app activities.
  */
-public class TestRMWebServicesSchedulerActivities
-    extends TestRMWebServicesCapacitySched {
+public class TestRMWebServicesSchedulerActivities extends JerseyTestBase {
 
-  private static final Logger LOG = LoggerFactory.getLogger(
-      TestRMWebServicesSchedulerActivities.class);
+  private MockRM rm;
+
+  public TestRMWebServicesSchedulerActivities() {
+    super(createWebAppDescriptor());
+  }
+
+  @Before
+  @Override
+  public void setUp() throws Exception {
+    super.setUp();
+    CapacitySchedulerConfiguration config =
+        createConfig(new CapacitySchedulerConfiguration(new Configuration(false)));
+    rm = createMockRM(config);
+    GuiceServletConfig.setInjector(
+        Guice.createInjector(new TestWebServiceUtil.WebServletModule(rm, false)));
+  }
+
+  public static MockRM createMockRM(CapacitySchedulerConfiguration csConf) {
+    setupQueueConfiguration(csConf);
+    YarnConfiguration conf = new YarnConfiguration(csConf);
+    conf.setClass(YarnConfiguration.RM_SCHEDULER, CapacityScheduler.class,
+        ResourceScheduler.class);
+    conf.set(YarnConfiguration.RM_PLACEMENT_CONSTRAINTS_HANDLER,
+        YarnConfiguration.SCHEDULER_RM_PLACEMENT_CONSTRAINTS_HANDLER);
+    return new MockRM(conf);
+  }
+
+  public static void setupQueueConfiguration(
+      CapacitySchedulerConfiguration config) {
+    config.set("yarn.scheduler.capacity.root.queues", "a, b, c");
+    config.set("yarn.scheduler.capacity.root.a.queues", "a1, a2");
+    config.set("yarn.scheduler.capacity.root.b.queues", "b1, b2, b3");
+    config.set("yarn.scheduler.capacity.root.a.a1.queues", "a1a, a1b, a1c");
+    config.set("yarn.scheduler.capacity.root.a.capacity", "10.5");
+    config.set("yarn.scheduler.capacity.root.a.maximum-capacity", "50");
+    config.set("yarn.scheduler.capacity.root.a.max-parallel-app", "42");
+    config.set("yarn.scheduler.capacity.root.b.capacity", "79.5");
+    config.set("yarn.scheduler.capacity.root.c.capacity", "10");
+    config.set("yarn.scheduler.capacity.root.a.a1.capacity", "30");
+    config.set("yarn.scheduler.capacity.root.a.a1.maximum-capacity", "50");
+    config.set("yarn.scheduler.capacity.root.a.a1.user-limit-factor", "100");
+    config.set("yarn.scheduler.capacity.root.a.a2.capacity", "70");
+    config.set("yarn.scheduler.capacity.root.a.a2.maximum-application-lifetime", "100");
+    config.set("yarn.scheduler.capacity.root.a.a2.default-application-lifetime", "50");
+    config.set("yarn.scheduler.capacity.root.a.a2.user-limit-factor", "100");
+    config.set("yarn.scheduler.capacity.root.b.b1.capacity", "60");
+    config.set("yarn.scheduler.capacity.root.b.b2.capacity", "39.5");
+    config.set("yarn.scheduler.capacity.root.b.b3.capacity", "0.5");
+    config.set("yarn.scheduler.capacity.root.b.b1.user-limit-factor", "100");
+    config.set("yarn.scheduler.capacity.root.b.b2.user-limit-factor", "100");
+    config.set("yarn.scheduler.capacity.root.b.b3.user-limit-factor", "100");
+    config.set("yarn.scheduler.capacity.root.a.a1.a1a.capacity", "65");
+    config.set("yarn.scheduler.capacity.root.a.a1.a1b.capacity", "15");
+    config.set("yarn.scheduler.capacity.root.a.a1.a1c.capacity", "20");
+    config.set("yarn.scheduler.capacity.root.a.a1.a1c.auto-create-child-queue.enabled", "true");
+    config.set("yarn.scheduler.capacity.root.a.a1.a1c.leaf-queue-template.capacity", "50");
+  }
 
   @Test
   public void testAssignMultipleContainersPerNodeHeartbeat()
@@ -154,7 +218,7 @@ public class TestRMWebServicesSchedulerActivities
       verifyStateOfAllocations(allocation,
           FN_ACT_FINAL_ALLOCATION_STATE, "ALLOCATED");
       verifyQueueOrder(allocation,
-          "root-a-b-b2-b3-b1");
+          "root-root.a-root.c-root.b-root.b.b2-root.b.b3-root.b.b1");
     } finally {
       rm.stop();
     }
@@ -378,7 +442,7 @@ public class TestRMWebServicesSchedulerActivities
       JSONObject allocations = getFirstSubNodeFromJson(json,
           FN_SCHEDULER_ACT_ROOT, FN_ACT_ALLOCATIONS);
       verifyQueueOrder(allocations,
-          "root-a-b-b3-b1");
+          "root-root.a-root.c-root.b-root.b.b3-root.b.b1");
       verifyStateOfAllocations(allocations, FN_ACT_FINAL_ALLOCATION_STATE,
           "RESERVED");
 
@@ -407,7 +471,7 @@ public class TestRMWebServicesSchedulerActivities
 
       JSONObject allocation = getFirstSubNodeFromJson(json,
           FN_SCHEDULER_ACT_ROOT, FN_ACT_ALLOCATIONS);
-      verifyQueueOrder(allocation, "b1");
+      verifyQueueOrder(allocation, "root.b.b1");
       verifyStateOfAllocations(allocation, FN_ACT_FINAL_ALLOCATION_STATE,
           "RESERVED");
 
@@ -444,7 +508,7 @@ public class TestRMWebServicesSchedulerActivities
 
       allocations = getFirstSubNodeFromJson(json,
           FN_SCHEDULER_ACT_ROOT, FN_ACT_ALLOCATIONS);
-      verifyQueueOrder(allocations, "b1");
+      verifyQueueOrder(allocations, "root.b.b1");
       verifyStateOfAllocations(allocations, FN_ACT_FINAL_ALLOCATION_STATE,
           "ALLOCATED_FROM_RESERVED");
     } finally {
@@ -504,7 +568,7 @@ public class TestRMWebServicesSchedulerActivities
       // Increase number of nodes to 6 since request node has been added
       verifyNumberOfNodes(allocation, 6);
 
-      verifyQueueOrder(allocation, "root-b-b1");
+      verifyQueueOrder(allocation, "root-root.b-root.b.b1");
     } finally {
       rm.stop();
     }
@@ -1562,7 +1626,7 @@ public class TestRMWebServicesSchedulerActivities
       verifyNumberOfAllocations(schedulerActivitiesJson, 1);
       // verify at queue level
       Predicate<JSONObject> findA1AQueuePred =
-          (obj) -> obj.optString(FN_SCHEDULER_ACT_NAME).equals("a1a");
+          (obj) -> obj.optString(FN_SCHEDULER_ACT_NAME).equals("root.a.a1.a1a");
       List<JSONObject> a1aQueueObj = ActivitiesTestUtils.findInAllocations(
           getFirstSubNodeFromJson(schedulerActivitiesJson,
               FN_SCHEDULER_ACT_ROOT, FN_ACT_ALLOCATIONS), findA1AQueuePred);
@@ -1585,5 +1649,134 @@ public class TestRMWebServicesSchedulerActivities
     } finally {
       rm.stop();
     }
+  }
+
+  @Test(timeout=30000)
+  public void testSchedulerBulkActivities() throws Exception {
+    rm.start();
+
+    MockNM nm1 = new MockNM("127.0.0.1:1234", 4 * 1024,
+        rm.getResourceTrackerService());
+    MockNM nm2 = new MockNM("127.0.0.2:1234", 4 * 1024,
+        rm.getResourceTrackerService());
+
+    nm1.registerNode();
+    nm2.registerNode();
+
+    MockNM[] nms = new MockNM[] {nm1, nm2};
+
+    try {
+
+      // Validate if response has 5 node activities
+      int expectedCount = 5;
+      RESTClient restClient = new RESTClient(5);
+      restClient.start();
+
+      sendHeartbeat(restClient, nms);
+
+      JSONObject activitiesJson = restClient.getOutput().getJSONObject(
+          FN_SCHEDULER_BULK_ACT_ROOT);
+      Object activities = activitiesJson.get(FN_SCHEDULER_ACT_ROOT);
+      assertEquals("Number of activities is wrong", expectedCount,
+          ((JSONArray) activities).length());
+
+
+      // Validate if response does not exceed max 500
+      expectedCount = 1000;
+      restClient = new RESTClient(expectedCount);
+      restClient.start();
+
+      sendHeartbeat(restClient, nms);
+
+      activitiesJson = restClient.getOutput().getJSONObject(
+          FN_SCHEDULER_BULK_ACT_ROOT);
+      activities = activitiesJson.get(FN_SCHEDULER_ACT_ROOT);
+      assertEquals("Max Activities Limit does not work",
+          RMWebServices.MAX_ACTIVITIES_COUNT,
+          ((JSONArray) activities).length());
+
+    } finally {
+      rm.stop();
+    }
+  }
+
+  private class RESTClient extends Thread {
+
+    private int expectedCount;
+    private boolean done = false;
+    private JSONObject json;
+
+    RESTClient(int expectedCount) {
+      this.expectedCount = expectedCount;
+    }
+
+    boolean isDone() {
+      return done;
+    }
+
+    JSONObject getOutput() {
+      return json;
+    }
+
+    @Override
+    public void run() {
+      WebResource r = resource();
+      MultivaluedMapImpl params = new MultivaluedMapImpl();
+      params.add(RMWSConsts.ACTIVITIES_COUNT, expectedCount);
+
+      ClientResponse response = r.path("ws").path("v1").path("cluster")
+          .path(RMWSConsts.SCHEDULER_BULK_ACTIVITIES).queryParams(params)
+          .accept(MediaType.APPLICATION_JSON).get(ClientResponse.class);
+
+      assertEquals(MediaType.APPLICATION_JSON_TYPE + "; "
+          + JettyUtils.UTF_8, response.getType().toString());
+      json = response.getEntity(JSONObject.class);
+      done = true;
+    }
+  }
+
+  private void sendHeartbeat(RESTClient restClient, MockNM[] nms)
+      throws Exception {
+    GenericTestUtils.waitFor(() -> {
+      try {
+        for (MockNM nm : nms) {
+          nm.nodeHeartbeat(true);
+        }
+      } catch (Exception e) {
+        return false;
+      }
+      return restClient.isDone();
+    }, 10, 20000);
+  }
+
+  private CapacitySchedulerConfiguration createConfig(CapacitySchedulerConfiguration config) {
+    config.set("yarn.scheduler.capacity.root.queues", "a, b, c");
+    config.set("yarn.scheduler.capacity.root.a.queues", "a1, a2");
+    config.set("yarn.scheduler.capacity.root.b.queues", "b1, b2, b3");
+    config.set("yarn.scheduler.capacity.root.a.a1.queues", "a1a, a1b, a1c");
+    config.set("yarn.scheduler.capacity.root.a.capacity", "10.5");
+    config.set("yarn.scheduler.capacity.root.a.maximum-capacity", "50");
+    config.set("yarn.scheduler.capacity.root.a.max-parallel-app", "42");
+    config.set("yarn.scheduler.capacity.root.b.capacity", "79.5");
+    config.set("yarn.scheduler.capacity.root.c.capacity", "10");
+    config.set("yarn.scheduler.capacity.root.a.a1.capacity", "30");
+    config.set("yarn.scheduler.capacity.root.a.a1.maximum-capacity", "50");
+    config.set("yarn.scheduler.capacity.root.a.a1.user-limit-factor", "100");
+    config.set("yarn.scheduler.capacity.root.a.a2.capacity", "70");
+    config.set("yarn.scheduler.capacity.root.a.a2.maximum-application-lifetime", "100");
+    config.set("yarn.scheduler.capacity.root.a.a2.default-application-lifetime", "50");
+    config.set("yarn.scheduler.capacity.root.a.a2.user-limit-factor", "100");
+    config.set("yarn.scheduler.capacity.root.b.b1.capacity", "60");
+    config.set("yarn.scheduler.capacity.root.b.b2.capacity", "39.5");
+    config.set("yarn.scheduler.capacity.root.b.b3.capacity", "0.5");
+    config.set("yarn.scheduler.capacity.root.b.b1.user-limit-factor", "100");
+    config.set("yarn.scheduler.capacity.root.b.b2.user-limit-factor", "100");
+    config.set("yarn.scheduler.capacity.root.b.b3.user-limit-factor", "100");
+    config.set("yarn.scheduler.capacity.root.a.a1.a1a.capacity", "65");
+    config.set("yarn.scheduler.capacity.root.a.a1.a1b.capacity", "15");
+    config.set("yarn.scheduler.capacity.root.a.a1.a1c.capacity", "20");
+    config.set("yarn.scheduler.capacity.root.a.a1.a1c.auto-create-child-queue.enabled", "true");
+    config.set("yarn.scheduler.capacity.root.a.a1.a1c.leaf-queue-template.capacity", "50");
+    return config;
   }
 }

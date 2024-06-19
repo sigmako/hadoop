@@ -70,8 +70,8 @@ public class RouterQuotaUpdateService extends PeriodicService {
   @Override
   protected void serviceInit(Configuration conf) throws Exception {
     this.setIntervalMs(conf.getTimeDuration(
-        RBFConfigKeys.DFS_ROUTER_QUOTA_CACHE_UPATE_INTERVAL,
-        RBFConfigKeys.DFS_ROUTER_QUOTA_CACHE_UPATE_INTERVAL_DEFAULT,
+        RBFConfigKeys.DFS_ROUTER_QUOTA_CACHE_UPDATE_INTERVAL,
+        RBFConfigKeys.DFS_ROUTER_QUOTA_CACHE_UPDATE_INTERVAL_DEFAULT,
         TimeUnit.MILLISECONDS));
 
     super.serviceInit(conf);
@@ -200,7 +200,7 @@ public class RouterQuotaUpdateService extends PeriodicService {
    * During this time, the quota usage cache will also be updated by
    * quota manager:
    * 1. Stale paths (entries) will be removed.
-   * 2. Existing entries will be override and updated.
+   * 2. Existing entries will be overridden and updated.
    * @return List of mount tables which quota was set.
    * @throws IOException
    */

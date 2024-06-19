@@ -77,7 +77,7 @@ import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.Mockito;
 
-import com.google.common.collect.ImmutableList;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ImmutableList;
 
 public class TestINodeFile {
   // Re-enable symlinks for tests, see HADOOP-10020 and HADOOP-10052
@@ -1163,7 +1163,7 @@ public class TestINodeFile {
           HdfsFileStatus.EMPTY_NAME, false);
       assertTrue(dl.getPartialListing().length == 3);
 
-      String f2 = new String("f2");
+      String f2 = "f2";
       dl = cluster.getNameNodeRpc().getListing("/tmp", f2.getBytes(), false);
       assertTrue(dl.getPartialListing().length == 1);
 

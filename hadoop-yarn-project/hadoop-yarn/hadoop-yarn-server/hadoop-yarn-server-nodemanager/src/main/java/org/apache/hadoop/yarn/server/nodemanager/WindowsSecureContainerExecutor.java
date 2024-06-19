@@ -29,7 +29,7 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.net.InetSocketAddress;
 import java.net.URISyntaxException;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -374,7 +374,7 @@ public class WindowsSecureContainerExecutor extends DefaultContainerExecutor {
           return os;
         } finally {
           if (!success) {
-            IOUtils.cleanup(LOG, os);
+            IOUtils.cleanupWithLogger(LOG, os);
           }
         }
       }
@@ -449,7 +449,7 @@ public class WindowsSecureContainerExecutor extends DefaultContainerExecutor {
       COMPLETE
     };
     
-    private State state;;
+    private State state;
     
     private final String cwd;
     private final String jobName;
@@ -502,7 +502,7 @@ public class WindowsSecureContainerExecutor extends DefaultContainerExecutor {
         @Override
         public void run() {
           try (BufferedReader lines = new BufferedReader(
-                   new InputStreamReader(stream, Charset.forName("UTF-8")))) {
+                   new InputStreamReader(stream, StandardCharsets.UTF_8))) {
             char[] buf = new char[512];
             int nRead;
             while ((nRead = lines.read(buf, 0, buf.length)) > 0) {
@@ -718,10 +718,10 @@ public class WindowsSecureContainerExecutor extends DefaultContainerExecutor {
   @Override
   protected CommandExecutor buildCommandExecutor(String wrapperScriptPath,
       String containerIdStr, String userName, Path pidFile, Resource resource,
-      File wordDir, Map<String, String> environment) {
+      File wordDir, Map<String, String> environment, String[] numaCommands) {
      return new WintuilsProcessStubExecutor(
          wordDir.toString(),
-         containerIdStr, userName, pidFile.toString(), 
+         containerIdStr, userName, pidFile.toString(),
          "cmd /c " + wrapperScriptPath);
    }
    

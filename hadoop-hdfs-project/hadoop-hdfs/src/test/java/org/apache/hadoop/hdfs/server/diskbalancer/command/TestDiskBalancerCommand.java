@@ -63,6 +63,7 @@ import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.LambdaTestUtils;
 import org.apache.hadoop.test.PathUtils;
+import org.apache.hadoop.util.Lists;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.junit.After;
@@ -70,8 +71,6 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
-
-import com.google.common.collect.Lists;
 
 /**
  * Tests various CLI commands of DiskBalancer.
@@ -159,7 +158,7 @@ public class TestDiskBalancerCommand {
    * Tests running multiple commands under on setup. This mainly covers
    * {@link org.apache.hadoop.hdfs.server.diskbalancer.command.Command#close}
    */
-  @Test(timeout = 60000)
+  @Test(timeout = 120000)
   public void testRunMultipleCommandsUnderOneSetup() throws Exception {
 
     final int numDatanodes = 1;
@@ -816,16 +815,48 @@ public class TestDiskBalancerCommand {
   }
 
   /**
+   * Making sure that we can query the multiple nodes without having done a submit.
+   * @throws Exception
+   */
+  @Test
+  public void testDiskBalancerQueryWithoutSubmitAndMultipleNodes() throws Exception {
+    Configuration hdfsConf = new HdfsConfiguration();
+    hdfsConf.setBoolean(DFSConfigKeys.DFS_DISK_BALANCER_ENABLED, true);
+    final int numDatanodes = 2;
+    File basedir = new File(GenericTestUtils.getRandomizedTempPath());
+    MiniDFSCluster miniDFSCluster = new MiniDFSCluster.Builder(hdfsConf, basedir)
+        .numDataNodes(numDatanodes).build();
+    try {
+      miniDFSCluster.waitActive();
+      DataNode dataNode1 = miniDFSCluster.getDataNodes().get(0);
+      DataNode dataNode2 = miniDFSCluster.getDataNodes().get(1);
+      final String queryArg = String.format("-query localhost:%d,localhost:%d", dataNode1
+          .getIpcPort(), dataNode2.getIpcPort());
+      final String cmdLine = String.format("hdfs diskbalancer %s", queryArg);
+      List<String> outputs = runCommand(cmdLine);
+      assertEquals(12,  outputs.size());
+      assertTrue("Expected outputs: " + outputs,
+          outputs.get(1).contains("localhost:" + dataNode1.getIpcPort()) ||
+              outputs.get(6).contains("localhost:" + dataNode1.getIpcPort()));
+      assertTrue("Expected outputs: " + outputs,
+          outputs.get(1).contains("localhost:" + dataNode2.getIpcPort()) ||
+              outputs.get(6).contains("localhost:" + dataNode2.getIpcPort()));
+    } finally {
+      miniDFSCluster.shutdown();
+    }
+  }
+
+  /**
    * Making sure that we can query the node without having done a submit.
    * @throws Exception
    */
   @Test
   public void testDiskBalancerQueryWithoutSubmit() throws Exception {
-    Configuration conf = new HdfsConfiguration();
-    conf.setBoolean(DFSConfigKeys.DFS_DISK_BALANCER_ENABLED, true);
+    Configuration hdfsConf = new HdfsConfiguration();
+    hdfsConf.setBoolean(DFSConfigKeys.DFS_DISK_BALANCER_ENABLED, true);
     final int numDatanodes = 2;
     File basedir = new File(GenericTestUtils.getRandomizedTempPath());
-    MiniDFSCluster miniDFSCluster = new MiniDFSCluster.Builder(conf, basedir)
+    MiniDFSCluster miniDFSCluster = new MiniDFSCluster.Builder(hdfsConf, basedir)
         .numDataNodes(numDatanodes).build();
     try {
       miniDFSCluster.waitActive();

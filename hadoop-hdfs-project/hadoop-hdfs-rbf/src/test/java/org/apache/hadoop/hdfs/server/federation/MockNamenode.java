@@ -46,6 +46,7 @@ import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.fs.FsServerDefaults;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
 import org.apache.hadoop.ha.HAServiceStatus;
@@ -58,6 +59,7 @@ import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfoWithStorage;
 import org.apache.hadoop.hdfs.protocol.DirectoryListing;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
@@ -88,7 +90,7 @@ import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
 import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.io.Text;
-import org.apache.hadoop.ipc.ProtobufRpcEngine;
+import org.apache.hadoop.ipc.ProtobufRpcEngine2;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.RPC.Server;
 import org.apache.hadoop.ipc.RemoteException;
@@ -154,15 +156,12 @@ public class MockNamenode {
     NamespaceInfo nsInfo = new NamespaceInfo(1, this.nsId, this.nsId, 1);
     when(mockNn.versionRequest()).thenReturn(nsInfo);
 
-    when(mockNn.getServiceStatus()).thenAnswer(new Answer<HAServiceStatus>() {
-      @Override
-      public HAServiceStatus answer(InvocationOnMock invocation)
-          throws Throwable {
-        HAServiceStatus haStatus = new HAServiceStatus(getHAServiceState());
-        haStatus.setNotReadyToBecomeActive("");
-        return haStatus;
-      }
-    });
+    when(mockNn.getServiceStatus()).
+        thenAnswer((Answer<HAServiceStatus>) invocation -> {
+          HAServiceStatus haStatus = new HAServiceStatus(getHAServiceState());
+          haStatus.setNotReadyToBecomeActive("");
+          return haStatus;
+        });
   }
 
   /**
@@ -172,7 +171,7 @@ public class MockNamenode {
    */
   private void setupRPCServer(final Configuration conf) throws IOException {
     RPC.setProtocolEngine(
-        conf, ClientNamenodeProtocolPB.class, ProtobufRpcEngine.class);
+        conf, ClientNamenodeProtocolPB.class, ProtobufRpcEngine2.class);
     ClientNamenodeProtocolServerSideTranslatorPB
         clientNNProtoXlator =
             new ClientNamenodeProtocolServerSideTranslatorPB(mockNn);
@@ -197,7 +196,7 @@ public class MockNamenode {
     BlockingService nnProtoPbService =
         NamenodeProtocolService.newReflectiveBlockingService(
             nnProtoXlator);
-    DFSUtil.addPBProtocol(
+    DFSUtil.addInternalPBProtocol(
         conf, NamenodeProtocolPB.class, nnProtoPbService, rpcServer);
 
     DatanodeProtocolServerSideTranslatorPB dnProtoPbXlator =
@@ -205,7 +204,7 @@ public class MockNamenode {
     BlockingService dnProtoPbService =
         DatanodeProtocolService.newReflectiveBlockingService(
             dnProtoPbXlator);
-    DFSUtil.addPBProtocol(
+    DFSUtil.addInternalPBProtocol(
         conf, DatanodeProtocolPB.class, dnProtoPbService, rpcServer);
 
     HAServiceProtocolServerSideTranslatorPB haServiceProtoXlator =
@@ -213,7 +212,7 @@ public class MockNamenode {
     BlockingService haProtoPbService =
         HAServiceProtocolService.newReflectiveBlockingService(
             haServiceProtoXlator);
-    DFSUtil.addPBProtocol(
+    DFSUtil.addInternalPBProtocol(
         conf, HAServiceProtocolPB.class, haProtoPbService, rpcServer);
 
     this.rpcServer.addTerseExceptions(
@@ -533,11 +532,14 @@ public class MockNamenode {
    */
   private static LocatedBlock getMockLocatedBlock(final String nsId) {
     LocatedBlock lb = mock(LocatedBlock.class);
-    when(lb.getCachedLocations()).thenReturn(new DatanodeInfo[0]);
+    when(lb.getCachedLocations()).thenReturn(DatanodeInfo.EMPTY_ARRAY);
     DatanodeID nodeId = new DatanodeID("localhost", "localhost", "dn0",
         1111, 1112, 1113, 1114);
     DatanodeInfo dnInfo = new DatanodeDescriptor(nodeId);
-    when(lb.getLocations()).thenReturn(new DatanodeInfo[] {dnInfo});
+    DatanodeInfoWithStorage datanodeInfoWithStorage =
+        new DatanodeInfoWithStorage(dnInfo, "storageID", StorageType.DEFAULT);
+    when(lb.getLocations())
+        .thenReturn(new DatanodeInfoWithStorage[] {datanodeInfoWithStorage});
     ExtendedBlock eb = mock(ExtendedBlock.class);
     when(eb.getBlockPoolId()).thenReturn(nsId);
     when(lb.getBlock()).thenReturn(eb);

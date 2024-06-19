@@ -18,7 +18,7 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity;
 
-import com.google.common.collect.Sets;
+import org.apache.hadoop.util.Sets;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
@@ -156,7 +156,8 @@ public class TestCapacitySchedulerLazyPreemption
 
     PreemptionManager pm = cs.getPreemptionManager();
     Map<ContainerId, RMContainer> killableContainers =
-        waitKillableContainersSize(pm, "a", RMNodeLabelsManager.NO_LABEL, 1);
+        waitKillableContainersSize(
+            pm, "root.a", RMNodeLabelsManager.NO_LABEL, 1);
     Assert.assertEquals(1, killableContainers.size());
     Assert.assertEquals(killableContainers.entrySet().iterator().next().getKey()
         .getApplicationAttemptId(), am1.getApplicationAttemptId());
@@ -267,7 +268,8 @@ public class TestCapacitySchedulerLazyPreemption
 
     PreemptionManager pm = cs.getPreemptionManager();
     Map<ContainerId, RMContainer> killableContainers =
-        waitKillableContainersSize(pm, "a", RMNodeLabelsManager.NO_LABEL, 1);
+        waitKillableContainersSize(
+            pm, "root.a", RMNodeLabelsManager.NO_LABEL, 1);
     Assert.assertEquals(killableContainers.entrySet().iterator().next().getKey()
         .getApplicationAttemptId(), am1.getApplicationAttemptId());
 
@@ -379,7 +381,8 @@ public class TestCapacitySchedulerLazyPreemption
 
     PreemptionManager pm = cs.getPreemptionManager();
     Map<ContainerId, RMContainer> killableContainers =
-        waitKillableContainersSize(pm, "a", RMNodeLabelsManager.NO_LABEL, 1);
+        waitKillableContainersSize(
+            pm, "root.a", RMNodeLabelsManager.NO_LABEL, 1);
     Assert.assertEquals(killableContainers.entrySet().iterator().next().getKey()
         .getApplicationAttemptId(), am1.getApplicationAttemptId());
 
@@ -484,7 +487,7 @@ public class TestCapacitySchedulerLazyPreemption
     editPolicy.editSchedule();
 
     PreemptionManager pm = cs.getPreemptionManager();
-    waitKillableContainersSize(pm, "a", RMNodeLabelsManager.NO_LABEL, 1);
+    waitKillableContainersSize(pm, "root.a", RMNodeLabelsManager.NO_LABEL, 1);
 
     // Check killable containers and to-be-preempted containers in edit policy
     Assert.assertEquals(0, editPolicy.getToPreemptContainers().size());
@@ -513,7 +516,8 @@ public class TestCapacitySchedulerLazyPreemption
 
     // Check if previous killable containers included by new killable containers
     Map<ContainerId, RMContainer> killableContainers =
-        waitKillableContainersSize(pm, "a", RMNodeLabelsManager.NO_LABEL, 2);
+        waitKillableContainersSize(
+            pm, "root.a", RMNodeLabelsManager.NO_LABEL, 2);
     Assert.assertTrue(
         Sets.difference(previousKillableContainers, killableContainers.keySet())
             .isEmpty());
@@ -615,6 +619,7 @@ public class TestCapacitySchedulerLazyPreemption
     editPolicy.editSchedule();
     Assert.assertEquals(0, editPolicy.getToPreemptContainers().size());
     waitKillableContainersSize(pm, "a", RMNodeLabelsManager.NO_LABEL, 2);
+    rm1.stop();
   }
 
   @Test (timeout = 60000)
@@ -646,7 +651,8 @@ public class TestCapacitySchedulerLazyPreemption
      * from app1, and app2 will receive the preempted container
      */
     CapacitySchedulerConfiguration csConf = new CapacitySchedulerConfiguration(conf);
-    csConf.setUserLimitFactor(CapacitySchedulerConfiguration.ROOT + ".c", 0.1f);
+    QueuePath cQueuePath = new QueuePath(CapacitySchedulerConfiguration.ROOT + ".c");
+    csConf.setUserLimitFactor(cQueuePath, 0.1f);
     MockRM rm1 = new MockRM(csConf);
     rm1.getRMContext().setNodeLabelManager(mgr);
     rm1.start();

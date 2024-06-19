@@ -30,6 +30,7 @@ import org.apache.hadoop.fs.s3a.commit.ITestCommitOperations;
 
 import static org.apache.hadoop.fs.s3a.Constants.ASSUMED_ROLE_ARN;
 import static org.apache.hadoop.fs.s3a.S3ATestUtils.assume;
+import static org.apache.hadoop.fs.s3a.S3ATestUtils.disableCreateSession;
 import static org.apache.hadoop.fs.s3a.auth.RoleModel.*;
 import static org.apache.hadoop.fs.s3a.auth.RolePolicies.*;
 import static org.apache.hadoop.fs.s3a.auth.RoleTestUtils.*;
@@ -37,11 +38,6 @@ import static org.apache.hadoop.io.IOUtils.cleanupWithLogger;
 
 /**
  * Verify that the commit operations work with a restricted set of operations.
- * The superclass, {@link ITestCommitOperations} turns on an inconsistent client
- * to see how things work in the presence of inconsistency.
- * These tests disable it, to remove that as a factor in these tests, which are
- * verifying that the policy settings to enabled MPU list/commit/abort are all
- * enabled properly.
  */
 public class ITestAssumedRoleCommitOperations extends ITestCommitOperations {
 
@@ -59,8 +55,8 @@ public class ITestAssumedRoleCommitOperations extends ITestCommitOperations {
   private S3AFileSystem roleFS;
 
   @Override
-  public boolean useInconsistentClient() {
-    return false;
+  protected Configuration createConfiguration() {
+    return disableCreateSession(super.createConfiguration());
   }
 
   @Override
@@ -71,9 +67,7 @@ public class ITestAssumedRoleCommitOperations extends ITestCommitOperations {
     restrictedDir = super.path("restricted");
     Configuration conf = newAssumedRoleConfig(getConfiguration(),
         getAssumedRoleARN());
-    bindRolePolicyStatements(conf,
-        STATEMENT_S3GUARD_CLIENT,
-        STATEMENT_ALLOW_SSE_KMS_RW,
+    bindRolePolicyStatements(conf, STATEMENT_ALLOW_KMS_RW,
         statement(true, S3_ALL_BUCKETS, S3_BUCKET_READ_OPERATIONS),
         new RoleModel.Statement(RoleModel.Effects.Allow)
             .addActions(S3_PATH_RW_OPERATIONS)
@@ -114,7 +108,7 @@ public class ITestAssumedRoleCommitOperations extends ITestCommitOperations {
   }
 
   /**
-   * switch to an inconsistent path if in inconsistent mode.
+   * switch to an restricted path.
    * {@inheritDoc}
    */
   @Override

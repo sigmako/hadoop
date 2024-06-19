@@ -26,18 +26,20 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.EnumSet;
 import java.util.TimeZone;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.Stack;
 import java.util.HashMap;
 
@@ -61,6 +63,7 @@ import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.PositionedReadable;
 import org.apache.hadoop.fs.Seekable;
 import org.apache.hadoop.fs.StreamCapabilities;
 import org.apache.hadoop.fs.Syncable;
@@ -70,6 +73,9 @@ import org.apache.hadoop.fs.azure.metrics.AzureFileSystemMetricsSystem;
 import org.apache.hadoop.fs.azure.security.Constants;
 import org.apache.hadoop.fs.azure.security.RemoteWasbDelegationTokenManager;
 import org.apache.hadoop.fs.azure.security.WasbDelegationTokenManager;
+import org.apache.hadoop.fs.impl.AbstractFSBuilderImpl;
+import org.apache.hadoop.fs.impl.OpenFileParameters;
+import org.apache.hadoop.fs.impl.StoreImplementationUtils;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
@@ -78,18 +84,20 @@ import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.delegation.web.DelegationTokenAuthenticatedURL;
+import org.apache.hadoop.util.LambdaUtils;
 import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.Time;
 
-import com.google.common.base.Preconditions;
+import org.apache.hadoop.util.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.hadoop.fs.Options.OpenFileOptions.FS_OPTION_OPENFILE_STANDARD_OPTIONS;
 import static org.apache.hadoop.fs.azure.NativeAzureFileSystemHelper.*;
 import static org.apache.hadoop.fs.impl.PathCapabilitiesSupport.validatePathCapabilityArgs;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 import com.microsoft.azure.storage.StorageException;
 
 /**
@@ -152,9 +160,12 @@ public class NativeAzureFileSystem extends FileSystem {
 
       // open redo file
       Path f = redoFile;
-      FSDataInputStream input = fs.open(f);
-      byte[] bytes = new byte[MAX_RENAME_PENDING_FILE_SIZE];
-      int l = input.read(bytes);
+      int l;
+      byte[] bytes;
+      try (FSDataInputStream input = fs.open(f)) {
+        bytes = new byte[MAX_RENAME_PENDING_FILE_SIZE];
+        l = input.read(bytes);
+      }
       if (l <= 0) {
         // Jira HADOOP-12678 -Handle empty rename pending metadata file during
         // atomic rename in redo path. If during renamepending file is created
@@ -170,7 +181,7 @@ public class NativeAzureFileSystem extends FileSystem {
             "Error reading pending rename file contents -- "
                 + "maximum file size exceeded");
       }
-      String contents = new String(bytes, 0, l, Charset.forName("UTF-8"));
+      String contents = new String(bytes, 0, l, StandardCharsets.UTF_8);
 
       // parse the JSON
       JsonNode json = null;
@@ -293,7 +304,7 @@ public class NativeAzureFileSystem extends FileSystem {
       // Write file.
       try {
         output = fs.createInternal(path, FsPermission.getFileDefault(), false, null);
-        output.write(contents.getBytes(Charset.forName("UTF-8")));
+        output.write(contents.getBytes(StandardCharsets.UTF_8));
       } catch (IOException e) {
         throw new IOException("Unable to write RenamePending file for folder rename from "
             + srcKey + " to " + dstKey, e);
@@ -915,6 +926,43 @@ public class NativeAzureFileSystem extends FileSystem {
     }
 
     @Override
+    public int read(long position, byte[] buffer, int offset, int length)
+        throws IOException {
+      // SpotBugs reports bug type IS2_INCONSISTENT_SYNC here.
+      // This report is not valid here.
+      // 'this.in' is instance of BlockBlobInputStream and read(long, byte[], int, int)
+      // calls it's Super class method when 'fs.azure.block.blob.buffered.pread.disable'
+      // is configured false. Super class FSInputStream's implementation is having
+      // proper synchronization.
+      // When 'fs.azure.block.blob.buffered.pread.disable' is true, we want a lock free
+      // implementation of blob read. Here we don't use any of the InputStream's
+      // shared resource (buffer) and also don't change any cursor position etc.
+      // So its safe to go with unsynchronized way of read.
+      if (in instanceof PositionedReadable) {
+        try {
+          int result = ((PositionedReadable) this.in).read(position, buffer,
+              offset, length);
+          if (null != statistics && result > 0) {
+            statistics.incrementBytesRead(result);
+          }
+          return result;
+        } catch (IOException e) {
+          Throwable innerException = NativeAzureFileSystemHelper.checkForAzureStorageException(e);
+          if (innerException instanceof StorageException) {
+            LOG.error("Encountered Storage Exception for read on Blob : {}"
+                + " Exception details: {} Error Code : {}",
+                key, e, ((StorageException) innerException).getErrorCode());
+            if (NativeAzureFileSystemHelper.isFileNotFoundException((StorageException) innerException)) {
+              throw new FileNotFoundException(String.format("%s is not found", key));
+            }
+          }
+          throw e;
+        }
+      }
+      return super.read(position, buffer, offset, length);
+    }
+
+    @Override
     public synchronized void close() throws IOException {
       if (!closed) {
         closed = true;
@@ -1052,10 +1100,7 @@ public class NativeAzureFileSystem extends FileSystem {
      */
     @Override // StreamCapability
     public boolean hasCapability(String capability) {
-      if (out instanceof StreamCapabilities) {
-        return ((StreamCapabilities) out).hasCapability(capability);
-      }
-      return false;
+      return StoreImplementationUtils.hasCapability(out, capability);
     }
 
     @Override
@@ -3045,6 +3090,12 @@ public class NativeAzureFileSystem extends FileSystem {
 
   @Override
   public FSDataInputStream open(Path f, int bufferSize) throws FileNotFoundException, IOException {
+    return open(f, bufferSize, Optional.empty());
+  }
+
+  private FSDataInputStream open(Path f, int bufferSize,
+      Optional<Configuration> options)
+      throws FileNotFoundException, IOException {
 
     LOG.debug("Opening file: {}", f.toString());
 
@@ -3079,7 +3130,7 @@ public class NativeAzureFileSystem extends FileSystem {
 
     InputStream inputStream;
     try {
-      inputStream = store.retrieve(key);
+      inputStream = store.retrieve(key, 0, options);
     } catch(Exception ex) {
       Throwable innerException = NativeAzureFileSystemHelper.checkForAzureStorageException(ex);
 
@@ -3094,6 +3145,18 @@ public class NativeAzureFileSystem extends FileSystem {
 
     return new FSDataInputStream(new BufferedFSInputStream(
         new NativeAzureFsInputStream(inputStream, key, meta.getLen()), bufferSize));
+  }
+
+  @Override
+  protected CompletableFuture<FSDataInputStream> openFileWithOptions(Path path,
+      OpenFileParameters parameters) throws IOException {
+    AbstractFSBuilderImpl.rejectUnknownMandatoryKeys(
+        parameters.getMandatoryKeys(),
+        FS_OPTION_OPENFILE_STANDARD_OPTIONS,
+        "for " + path);
+    return LambdaUtils.eval(
+        new CompletableFuture<>(), () ->
+            open(path, parameters.getBufferSize(), Optional.of(parameters.getOptions())));
   }
 
   @Override

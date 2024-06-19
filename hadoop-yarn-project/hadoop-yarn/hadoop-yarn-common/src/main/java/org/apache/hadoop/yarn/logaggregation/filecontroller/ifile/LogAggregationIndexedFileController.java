@@ -18,17 +18,15 @@
 
 package org.apache.hadoop.yarn.logaggregation.filecontroller.ifile;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Predicate;
-import com.google.common.collect.Iterables;
-import com.google.common.collect.Sets;
+import org.apache.hadoop.classification.VisibleForTesting;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.Serializable;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivilegedExceptionAction;
@@ -43,6 +41,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
+import java.util.stream.Collectors;
 import org.apache.commons.lang3.SerializationUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
@@ -75,12 +74,14 @@ import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.logaggregation.ContainerLogAggregationType;
+import org.apache.hadoop.yarn.logaggregation.ContainerLogFileInfo;
 import org.apache.hadoop.yarn.logaggregation.ContainerLogMeta;
 import org.apache.hadoop.yarn.logaggregation.ContainerLogsRequest;
 import org.apache.hadoop.yarn.logaggregation.LogAggregationUtils;
 import org.apache.hadoop.yarn.logaggregation.LogToolUtils;
 import org.apache.hadoop.yarn.logaggregation.AggregatedLogFormat.LogKey;
 import org.apache.hadoop.yarn.logaggregation.AggregatedLogFormat.LogValue;
+import org.apache.hadoop.yarn.logaggregation.ExtendedLogMetaRequest;
 import org.apache.hadoop.yarn.logaggregation.filecontroller.LogAggregationFileController;
 import org.apache.hadoop.yarn.logaggregation.filecontroller.LogAggregationFileControllerContext;
 import org.apache.hadoop.yarn.util.Clock;
@@ -218,7 +219,7 @@ public class LogAggregationIndexedFileController
             // append a simple character("\n") to move the writer cursor, so
             // we could get the correct position when we call
             // fsOutputStream.getStartPos()
-            final byte[] dummyBytes = "\n".getBytes(Charset.forName("UTF-8"));
+            final byte[] dummyBytes = "\n".getBytes(StandardCharsets.UTF_8);
             fsDataOStream.write(dummyBytes);
             fsDataOStream.flush();
 
@@ -280,10 +281,11 @@ public class LogAggregationIndexedFileController
           checksumFileInputStream = fc.open(remoteLogCheckSumFile);
           int nameLength = checksumFileInputStream.readInt();
           byte[] b = new byte[nameLength];
-          int actualLength = checksumFileInputStream.read(b);
+          checksumFileInputStream.readFully(b);
+          int actualLength = b.length;
           if (actualLength == nameLength) {
             String recoveredLogFile = new String(
-                b, Charset.forName("UTF-8"));
+                b, StandardCharsets.UTF_8);
             if (recoveredLogFile.equals(
                 currentRemoteLogFile.getName())) {
               overwriteCheckSum = false;
@@ -337,7 +339,7 @@ public class LogAggregationIndexedFileController
         String fileName = aggregatedLogFile.getName();
         checksumFileOutputStream.writeInt(fileName.length());
         checksumFileOutputStream.write(fileName.getBytes(
-            Charset.forName("UTF-8")));
+            StandardCharsets.UTF_8));
         checksumFileOutputStream.writeLong(
             currentAggregatedLogFileLength);
         checksumFileOutputStream.flush();
@@ -400,7 +402,7 @@ public class LogAggregationIndexedFileController
         if (outputStreamState != null &&
             outputStreamState.getOutputStream() != null) {
           outputStreamState.getOutputStream().write(
-              message.getBytes(Charset.forName("UTF-8")));
+              message.getBytes(StandardCharsets.UTF_8));
         }
       } finally {
         IOUtils.cleanupWithLogger(LOG, in);
@@ -595,7 +597,7 @@ public class LogAggregationIndexedFileController
               Times.format(candidate.getLastModifiedTime()),
               in, os, buf, ContainerLogAggregationType.AGGREGATED);
           byte[] b = aggregatedLogSuffix(candidate.getFileName())
-              .getBytes(Charset.forName("UTF-8"));
+              .getBytes(StandardCharsets.UTF_8);
           os.write(b, 0, b.length);
           findLogs = true;
         } catch (IOException e) {
@@ -609,6 +611,45 @@ public class LogAggregationIndexedFileController
       }
     }
     return findLogs;
+  }
+
+  @Override
+  public Map<String, List<ContainerLogFileInfo>> getLogMetaFilesOfNode(
+      ExtendedLogMetaRequest logRequest, FileStatus currentNodeFile,
+      ApplicationId appId) throws IOException {
+    Map<String, List<ContainerLogFileInfo>> logMetaFiles = new HashMap<>();
+
+    Long checkSumIndex = parseChecksum(currentNodeFile);
+    long endIndex = -1;
+    if (checkSumIndex != null) {
+      endIndex = checkSumIndex;
+    }
+    IndexedLogsMeta current = loadIndexedLogsMeta(
+        currentNodeFile.getPath(), endIndex, appId);
+    if (current != null) {
+      for (IndexedPerAggregationLogMeta logMeta :
+          current.getLogMetas()) {
+        for (Entry<String, List<IndexedFileLogMeta>> log : logMeta
+            .getLogMetas().entrySet()) {
+          String currentContainerId = log.getKey();
+          if (!(logRequest.getContainerId() == null ||
+              logRequest.getContainerId().equals(currentContainerId))) {
+            continue;
+          }
+          logMetaFiles.put(currentContainerId, new ArrayList<>());
+          for (IndexedFileLogMeta aMeta : log.getValue()) {
+            ContainerLogFileInfo file = new ContainerLogFileInfo();
+            file.setFileName(aMeta.getFileName());
+            file.setFileSize(Long.toString(aMeta.getFileSize()));
+            file.setLastModifiedTime(
+                Long.toString(aMeta.getLastModifiedTime()));
+            logMetaFiles.get(currentContainerId).add(file);
+          }
+        }
+      }
+    }
+
+    return logMetaFiles;
   }
 
   @Override
@@ -706,16 +747,12 @@ public class LogAggregationIndexedFileController
   public Map<String, Long> parseCheckSumFiles(
       List<FileStatus> fileList) throws IOException {
     Map<String, Long> checkSumFiles = new HashMap<>();
-    Set<FileStatus> status = new HashSet<FileStatus>(fileList);
-    Iterable<FileStatus> mask =
-        Iterables.filter(status, new Predicate<FileStatus>() {
-          @Override
-          public boolean apply(FileStatus next) {
-            return next.getPath().getName().endsWith(
-                CHECK_SUM_FILE_SUFFIX);
-          }
-        });
-    status = Sets.newHashSet(mask);
+    Set<FileStatus> status =
+        new HashSet<>(fileList).stream().filter(
+            next -> next.getPath().getName().endsWith(
+                CHECK_SUM_FILE_SUFFIX)).collect(
+            Collectors.toSet());
+
     FileContext fc = null;
     for (FileStatus file : status) {
       FSDataInputStream checksumFileInputStream = null;
@@ -728,9 +765,10 @@ public class LogAggregationIndexedFileController
         checksumFileInputStream = fc.open(file.getPath());
         int nameLength = checksumFileInputStream.readInt();
         byte[] b = new byte[nameLength];
-        int actualLength = checksumFileInputStream.read(b);
+        checksumFileInputStream.readFully(b);
+        int actualLength = b.length;
         if (actualLength == nameLength) {
-          nodeName = new String(b, Charset.forName("UTF-8"));
+          nodeName = new String(b, StandardCharsets.UTF_8);
           index = checksumFileInputStream.readLong();
         } else {
           continue;
@@ -746,6 +784,41 @@ public class LogAggregationIndexedFileController
       }
     }
     return checkSumFiles;
+  }
+
+  private Long parseChecksum(FileStatus file) {
+    if (!file.getPath().getName().endsWith(CHECK_SUM_FILE_SUFFIX)) {
+      return null;
+    }
+
+    FSDataInputStream checksumFileInputStream = null;
+    try {
+      FileContext fileContext = FileContext
+          .getFileContext(file.getPath().toUri(), conf);
+      String nodeName = null;
+      long index = 0L;
+      checksumFileInputStream = fileContext.open(file.getPath());
+      int nameLength = checksumFileInputStream.readInt();
+      byte[] b = new byte[nameLength];
+      checksumFileInputStream.readFully(b);
+      int actualLength = b.length;
+      if (actualLength == nameLength) {
+        nodeName = new String(b, StandardCharsets.UTF_8);
+        index = checksumFileInputStream.readLong();
+      } else {
+        return null;
+      }
+      if (!nodeName.isEmpty()) {
+        return index;
+      }
+    } catch (IOException ex) {
+      LOG.warn(ex.getMessage());
+      return null;
+    } finally {
+      IOUtils.cleanupWithLogger(LOG, checksumFileInputStream);
+    }
+
+    return null;
   }
 
   @Private
@@ -867,7 +940,8 @@ public class LogAggregationIndexedFileController
 
       // Load UUID and make sure the UUID is correct.
       byte[] uuidRead = new byte[UUID_LENGTH];
-      int uuidReadLen = fsDataIStream.read(uuidRead);
+      fsDataIStream.readFully(uuidRead);
+      int uuidReadLen = uuidRead.length;
       if (this.uuid == null) {
         this.uuid = createUUID(appId);
       }
@@ -875,9 +949,9 @@ public class LogAggregationIndexedFileController
         if (LOG.isDebugEnabled()) {
           LOG.debug("the length of loaded UUID:{}", uuidReadLen);
           LOG.debug("the loaded UUID:{}", new String(uuidRead,
-              Charset.forName("UTF-8")));
+              StandardCharsets.UTF_8));
           LOG.debug("the expected UUID:{}", new String(this.uuid,
-              Charset.forName("UTF-8")));
+              StandardCharsets.UTF_8));
         }
         throw new IOException("The UUID from "
             + remoteLogPath + " is not correct. The offset of loaded UUID is "
@@ -1251,7 +1325,8 @@ public class LogAggregationIndexedFileController
                 .endsWith(CHECK_SUM_FILE_SUFFIX)) {
           fsDataInputStream = fc.open(checkPath);
           byte[] b = new byte[uuid.length];
-          int actual = fsDataInputStream.read(b);
+          fsDataInputStream.readFully(b);
+          int actual = b.length;
           if (actual != uuid.length || Arrays.equals(b, uuid)) {
             deleteFileWithRetries(fc, checkPath);
           } else if (id == null){
@@ -1283,7 +1358,7 @@ public class LogAggregationIndexedFileController
     try {
       MessageDigest digest = MessageDigest.getInstance("SHA-256");
       return digest.digest(appId.toString().getBytes(
-          Charset.forName("UTF-8")));
+          StandardCharsets.UTF_8));
     } catch (NoSuchAlgorithmException ex) {
       throw new IOException(ex);
     }

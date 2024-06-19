@@ -29,6 +29,7 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSTestUtil;
@@ -56,7 +57,7 @@ public class TestNetworkTopology {
   private DatanodeDescriptor dataNodes[];
 
   @Rule
-  public Timeout testTimeout = new Timeout(30000);
+  public Timeout testTimeout = new Timeout(30000, TimeUnit.MILLISECONDS);
 
   @Before
   public void setupDatanodes() {
@@ -631,5 +632,21 @@ public class TestNetworkTopology {
     excludedNodes.add(d4r1);
     numNodes = cluster.countNumOfAvailableNodes(NodeBase.ROOT, excludedNodes);
     assertEquals(12, numNodes);
+  }
+
+  @Test
+  public void testAddAndRemoveNodeWithEmptyRack() {
+    DatanodeDescriptor n1 = DFSTestUtil.getDatanodeDescriptor("6.6.6.6", "/d2/r3");
+    DatanodeDescriptor n2 = DFSTestUtil.getDatanodeDescriptor("7.7.7.7", "/d2/r3");
+    DatanodeDescriptor n3 = DFSTestUtil.getDatanodeDescriptor("8.8.8.8", "/d2/r3");
+
+    cluster.decommissionNode(n1);
+    assertEquals(6, cluster.getNumOfNonEmptyRacks());
+    cluster.decommissionNode(n2);
+    cluster.decommissionNode(n3);
+    assertEquals(5, cluster.getNumOfNonEmptyRacks());
+
+    cluster.recommissionNode(n1);
+    assertEquals(6, cluster.getNumOfNonEmptyRacks());
   }
 }

@@ -18,6 +18,8 @@
 package org.apache.hadoop.yarn.server.timelineservice.storage;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.http.HttpServer2;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.service.Service;
 import org.apache.hadoop.test.GenericTestUtils;
@@ -181,14 +183,13 @@ public class TestTimelineReaderHBaseDown {
     }
   }
 
-  private static void checkQuery(HBaseTimelineReaderImpl htr) throws
-      IOException {
+  private static Set<TimelineEntity> checkQuery(HBaseTimelineReaderImpl htr)
+      throws IOException {
     TimelineReaderContext context =
         new TimelineReaderContext(YarnConfiguration.DEFAULT_RM_CLUSTER_ID,
             null, null, null, null, TimelineEntityType
             .YARN_FLOW_ACTIVITY.toString(), null, null);
-    Set<TimelineEntity> entities = htr.getEntities(context, MONITOR_FILTERS,
-        DATA_TO_RETRIEVE);
+    return htr.getEntities(context, MONITOR_FILTERS, DATA_TO_RETRIEVE);
   }
 
   private static void configure(HBaseTestingUtility util) {
@@ -203,6 +204,8 @@ public class TestTimelineReaderHBaseDown {
             + "HBaseTimelineReaderImpl");
     config.setInt("hfile.format.version", 3);
     config.setLong(TIMELINE_SERVICE_READER_STORAGE_MONITOR_INTERVAL_MS, 5000);
+    Path tmpDir = new Path(config.get("hadoop.tmp.dir", "target/build/test"), "httpfs");
+    config.set(HttpServer2.HTTP_TEMP_DIR_KEY, tmpDir.toString());
   }
 
   private static TimelineReaderServer getTimelineReaderServer() {

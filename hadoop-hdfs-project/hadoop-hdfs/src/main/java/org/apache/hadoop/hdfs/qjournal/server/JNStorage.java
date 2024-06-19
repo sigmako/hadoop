@@ -38,7 +38,7 @@ import org.apache.hadoop.hdfs.server.namenode.FileJournalManager;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 
-import com.google.common.collect.ImmutableList;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ImmutableList;
 
 /**
  * A {@link Storage} implementation for the {@link JournalNode}.
@@ -121,10 +121,6 @@ class JNStorage extends Storage {
     String name = NNStorage.getInProgressEditsFileName(segmentTxId) +
         ".epoch=" + epoch; 
     return new File(sd.getCurrentDir(), name);
-  }
-
-  File getCurrentDir() {
-    return sd.getCurrentDir();
   }
 
   /**
@@ -236,6 +232,10 @@ class JNStorage extends Storage {
   
   void analyzeStorage() throws IOException {
     this.state = sd.analyzeStorage(StartupOption.REGULAR, this);
+    refreshStorage();
+  }
+
+  void refreshStorage() throws IOException {
     if (state == StorageState.NORMAL) {
       readProperties(sd);
     }

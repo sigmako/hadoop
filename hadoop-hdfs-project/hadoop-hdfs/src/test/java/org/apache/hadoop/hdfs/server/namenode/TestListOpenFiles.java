@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
+import static org.apache.hadoop.test.LambdaTestUtils.intercept;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -53,9 +54,11 @@ import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.tools.DFSAdmin;
 import org.apache.hadoop.util.ToolRunner;
+import org.apache.hadoop.util.ChunkedArrayList;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.Assert;
 
 /**
  * Verify open files listing.
@@ -293,6 +296,60 @@ public class TestListOpenFiles {
     while (openFiles.size() > 0) {
       DFSTestUtil.closeOpenFiles(openFiles, 1);
       verifyOpenFiles(openFiles, OpenFilesIterator.FILTER_PATH_DEFAULT);
+    }
+  }
+
+  @Test
+  public void testListOpenFilesWithInvalidPathServerSide() throws Exception {
+    HashMap<Path, FSDataOutputStream> openFiles = new HashMap<>();
+    openFiles.putAll(
+        DFSTestUtil.createOpenFiles(fs, new Path("/base"), "open-1", 1));
+    verifyOpenFiles(openFiles, EnumSet.of(OpenFilesType.ALL_OPEN_FILES),
+        "/base");
+    intercept(AssertionError.class, "Absolute path required",
+        "Expect InvalidPathException", () -> verifyOpenFiles(new HashMap<>(),
+            EnumSet.of(OpenFilesType.ALL_OPEN_FILES), "hdfs://cluster/base"));
+    while(openFiles.size() > 0) {
+      DFSTestUtil.closeOpenFiles(openFiles, 1);
+      verifyOpenFiles(openFiles);
+    }
+  }
+
+  @Test
+  public void testListOpenFilesWithInvalidPathClientSide() throws Exception {
+    intercept(IllegalArgumentException.class, "Wrong FS",
+        "Expect IllegalArgumentException", () -> fs
+            .listOpenFiles(EnumSet.of(OpenFilesType.ALL_OPEN_FILES),
+                "hdfs://non-cluster/"));
+    fs.listOpenFiles(EnumSet.of(OpenFilesType.ALL_OPEN_FILES), "/path");
+  }
+
+  @Test
+  public void testListOpenFilesWithDeletedPath() throws Exception {
+    HashMap<Path, FSDataOutputStream> openFiles = new HashMap<>();
+    openFiles.putAll(
+        DFSTestUtil.createOpenFiles(fs, new Path("/"), "open-1", 1));
+    BatchedEntries<OpenFileEntry> openFileEntryBatchedEntries = nnRpc
+        .listOpenFiles(0, EnumSet.of(OpenFilesType.ALL_OPEN_FILES),
+        OpenFilesIterator.FILTER_PATH_DEFAULT);
+    assertEquals(1, openFileEntryBatchedEntries.size());
+    String path = openFileEntryBatchedEntries.get(0).getFilePath();
+    FSNamesystem fsNamesystem = cluster.getNamesystem();
+    FSDirectory dir = fsNamesystem.getFSDirectory();
+    List<INode> removedINodes = new ChunkedArrayList<>();
+    removedINodes.add(dir.getINode(path));
+    fsNamesystem.writeLock();
+    try {
+      dir.removeFromInodeMap(removedINodes);
+      openFileEntryBatchedEntries = nnRpc
+          .listOpenFiles(0, EnumSet.of(OpenFilesType.ALL_OPEN_FILES),
+          OpenFilesIterator.FILTER_PATH_DEFAULT);
+      assertEquals(0, openFileEntryBatchedEntries.size());
+      fsNamesystem.leaseManager.removeLease(dir.getINode(path).getId());
+    } catch (NullPointerException e) {
+      Assert.fail("Should not throw NPE when the file is deleted but has lease!");
+    } finally {
+      fsNamesystem.writeUnlock();
     }
   }
 }

@@ -31,7 +31,6 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.azurebfs.constants.ConfigurationKeys;
 import org.apache.hadoop.fs.azurebfs.constants.TestConfigurationKeys;
 import org.apache.hadoop.fs.azurebfs.contracts.exceptions.SASTokenProviderException;
-import org.apache.hadoop.fs.azurebfs.contracts.exceptions.TokenAccessProviderException;
 import org.apache.hadoop.fs.azurebfs.extensions.MockSASTokenProvider;
 import org.apache.hadoop.fs.azurebfs.services.AuthType;
 import org.apache.hadoop.fs.permission.FsAction;
@@ -80,7 +79,7 @@ public class ITestAzureBlobFileSystemAuthorization extends AbstractAbfsIntegrati
     testConfig.set(ConfigurationKeys.FS_AZURE_SAS_TOKEN_PROVIDER_TYPE, TEST_ERR_AUTHZ_CLASS);
     testConfig.set(MOCK_SASTOKENPROVIDER_FAIL_INIT, "true");
 
-    intercept(TokenAccessProviderException.class,
+    intercept(SASTokenProviderException.class,
         ()-> {
           testFs.initialize(fs.getUri(), this.getConfiguration().getRawConfiguration());
         });
@@ -99,7 +98,7 @@ public class ITestAzureBlobFileSystemAuthorization extends AbstractAbfsIntegrati
         this.getConfiguration().getRawConfiguration());
     intercept(SASTokenProviderException.class,
         () -> {
-          testFs.create(new org.apache.hadoop.fs.Path("/testFile"));
+          testFs.create(new org.apache.hadoop.fs.Path("/testFile")).close();
         });
   }
 
@@ -114,7 +113,7 @@ public class ITestAzureBlobFileSystemAuthorization extends AbstractAbfsIntegrati
     testFs.initialize(fs.getUri(), this.getConfiguration().getRawConfiguration());
     intercept(SASTokenProviderException.class,
         ()-> {
-          testFs.create(new org.apache.hadoop.fs.Path("/testFile"));
+          testFs.create(new org.apache.hadoop.fs.Path("/testFile")).close();
         });
   }
 
@@ -209,46 +208,55 @@ public class ITestAzureBlobFileSystemAuthorization extends AbstractAbfsIntegrati
 
   @Test
   public void testSetOwnerUnauthorized() throws Exception {
+    Assume.assumeTrue(getIsNamespaceEnabled(getFileSystem()));
     runTest(FileSystemOperations.SetOwner, true);
   }
 
   @Test
   public void testSetPermissionUnauthorized() throws Exception {
+    Assume.assumeTrue(getIsNamespaceEnabled(getFileSystem()));
     runTest(FileSystemOperations.SetPermissions, true);
   }
 
   @Test
   public void testModifyAclEntriesUnauthorized() throws Exception {
+    Assume.assumeTrue(getIsNamespaceEnabled(getFileSystem()));
     runTest(FileSystemOperations.ModifyAclEntries, true);
   }
 
   @Test
   public void testRemoveAclEntriesUnauthorized() throws Exception {
+    Assume.assumeTrue(getIsNamespaceEnabled(getFileSystem()));
     runTest(FileSystemOperations.RemoveAclEntries, true);
   }
 
   @Test
   public void testRemoveDefaultAclUnauthorized() throws Exception {
+    Assume.assumeTrue(getIsNamespaceEnabled(getFileSystem()));
     runTest(FileSystemOperations.RemoveDefaultAcl, true);
   }
 
   @Test
   public void testRemoveAclUnauthorized() throws Exception {
+    Assume.assumeTrue(getIsNamespaceEnabled(getFileSystem()));
     runTest(FileSystemOperations.RemoveAcl, true);
   }
 
   @Test
   public void testSetAclUnauthorized() throws Exception {
+    Assume.assumeTrue(getIsNamespaceEnabled(getFileSystem()));
     runTest(FileSystemOperations.SetAcl, true);
   }
 
   @Test
   public void testGetAclStatusAuthorized() throws Exception {
+    Assume.assumeTrue(getIsNamespaceEnabled(getFileSystem()));
     runTest(FileSystemOperations.GetAcl, false);
   }
 
   @Test
   public void testGetAclStatusUnauthorized() throws Exception {
+    Assume.assumeTrue(getIsNamespaceEnabled(getFileSystem()));
     runTest(FileSystemOperations.GetAcl, true);
   }
 
@@ -288,7 +296,7 @@ public class ITestAzureBlobFileSystemAuthorization extends AbstractAbfsIntegrati
       fs.listStatus(reqPath);
       break;
     case CreatePath:
-      fs.create(reqPath);
+      fs.create(reqPath).close();
       break;
     case RenamePath:
       fs.rename(reqPath,

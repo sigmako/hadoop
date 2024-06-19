@@ -216,7 +216,7 @@ The following properties should be set in yarn-site.xml:
       Optional. This configuration setting determines the capabilities
       assigned to docker containers when they are launched. While these may not
       be case-sensitive from a docker perspective, it is best to keep these
-      uppercase. To run without any capabilites, set this value to
+      uppercase. To run without any capabilities, set this value to
       "none" or "NONE"
     </description>
   </property>
@@ -284,7 +284,7 @@ are allowed. It contains the following properties:
 | `docker.trusted.registries` | Comma separated list of trusted docker registries for running trusted privileged docker containers.  By default, no registries are defined. |
 | `docker.inspect.max.retries` | Integer value to check docker container readiness.  Each inspection is set with 3 seconds delay.  Default value of 10 will wait 30 seconds for docker container to become ready before marked as container failed. |
 | `docker.no-new-privileges.enabled` | Enable/disable the no-new-privileges flag for docker run. Set to "true" to enable, disabled by default. |
-| `docker.allowed.runtimes` | Comma seperated runtimes that containers are allowed to use. By default no runtimes are allowed to be added.|
+| `docker.allowed.runtimes` | Comma separated runtimes that containers are allowed to use. By default no runtimes are allowed to be added.|
 | `docker.service-mode.enabled` | Set to "true" or "false" to enable or disable docker container service mode. Default value is "false". |
 
 Please note that if you wish to run Docker containers that require access to the YARN local directories, you must add them to the docker.allowed.rw-mounts list.
@@ -438,7 +438,7 @@ environment variables in the application's environment:
 | `YARN_CONTAINER_RUNTIME_DOCKER_DELAYED_REMOVAL` | Allows a user to request delayed deletion of the Docker container on a per container basis. If true, Docker containers will not be removed until the duration defined by yarn.nodemanager.delete.debug-delay-sec has elapsed. Administrators can disable this feature through the yarn-site property yarn.nodemanager.runtime.linux.docker.delayed-removal.allowed. This feature is disabled by default. When this feature is disabled or set to false, the container will be removed as soon as it exits. |
 | `YARN_CONTAINER_RUNTIME_YARN_SYSFS_ENABLE` | Enable mounting of container working directory sysfs sub-directory into Docker container /hadoop/yarn/sysfs.  This is useful for populating cluster information into container. |
 | `YARN_CONTAINER_RUNTIME_DOCKER_SERVICE_MODE` | Enable Service Mode which runs the docker container as defined by the image but does not set the user (--user and --group-add). |
-
+| `YARN_CONTAINER_RUNTIME_DOCKER_CLIENT_CONFIG` | Sets the docker client config using which docker container executor can access the remote docker image. |
 The first two are required. The remainder can be set as needed. While
 controlling the container type through environment variables is somewhat less
 than ideal, it allows applications with no awareness of YARN's Docker support
@@ -514,7 +514,7 @@ uid:gid pair will be used to launch the container's process.
 As an example of what is meant by uid:gid pair, consider the following. By
 default, in non-secure mode, YARN will launch processes as the user `nobody`
 (see the table at the bottom of
-[Using CGroups with YARN](./NodeManagerCgroups.html) for how the run as user is
+[Using Cgroups with YARN](./NodeManagerCgroups.html) for how the run as user is
 determined in non-secure mode). On CentOS based systems, the `nobody` user's uid
 is `99` and the `nobody` group is `99`. As a result, YARN will call `docker run`
 with `--user 99:99`. If the `nobody` user does not have the uid `99` in the
@@ -568,7 +568,7 @@ There are several challenges with this bind mount approach that need to be
 considered.
 
 1. Any users and groups defined in the image will be overwritten by the host's users and groups
-2. No users and groups can be added once the container is started, as /etc/passwd and /etc/group are immutible in the container. Do not mount these read-write as it can render the host inoperable.
+2. No users and groups can be added once the container is started, as /etc/passwd and /etc/group are immutable in the container. Do not mount these read-write as it can render the host inoperable.
 
 This approach is not recommended beyond testing given the inflexibility to
 modify running containers.
@@ -715,7 +715,7 @@ Fine grained access control can also be defined using `docker.privileged-contain
   docker.trusted.registries=library
 ```
 
-In development environment, local images can be tagged with a repository name prefix to enable trust.  The recommendation of choosing a repository name is using a local hostname and port number to prevent accidentially pulling docker images from Docker Hub or use reserved Docker Hub keyword: "local".  Docker run will look for docker images on Docker Hub, if the image does not exist locally.  Using a local hostname and port in image name can prevent accidental pulling of canonical images from docker hub.  Example of tagging image with localhost:5000 as trusted registry:
+In development environment, local images can be tagged with a repository name prefix to enable trust.  The recommendation of choosing a repository name is using a local hostname and port number to prevent accidentally pulling docker images from Docker Hub or use reserved Docker Hub keyword: "local".  Docker run will look for docker images on Docker Hub, if the image does not exist locally.  Using a local hostname and port in image name can prevent accidental pulling of canonical images from docker hub.  Example of tagging image with localhost:5000 as trusted registry:
 
 ```
 docker tag centos:latest localhost:5000/centos:latest
@@ -1016,6 +1016,24 @@ To run a Spark shell in Docker containers, run the following command:
 Note that the application master and executors are configured
 independently. In this example, we are using the `openjdk:8` image for both.
 
+When using remote container registry,
+the YARN_CONTAINER_RUNTIME_DOCKER_CLIENT_CONFIG must reference the config.json
+file containing the credentials used to authenticate.
+
+```
+DOCKER_IMAGE_NAME=hadoop-docker
+DOCKER_CLIENT_CONFIG=hdfs:///user/hadoop/config.json
+spark-submit --master yarn \
+--deploy-mode cluster \
+--conf spark.executorEnv.YARN_CONTAINER_RUNTIME_TYPE=docker \
+--conf spark.executorEnv.YARN_CONTAINER_RUNTIME_DOCKER_IMAGE=$DOCKER_IMAGE_NAME \
+--conf spark.executorEnv.YARN_CONTAINER_RUNTIME_DOCKER_CLIENT_CONFIG=$DOCKER_CLIENT_CONFIG \
+--conf spark.yarn.appMasterEnv.YARN_CONTAINER_RUNTIME_TYPE=docker \
+--conf spark.yarn.appMasterEnv.YARN_CONTAINER_RUNTIME_DOCKER_IMAGE=$DOCKER_IMAGE_NAME \
+--conf spark.yarn.appMasterEnv.YARN_CONTAINER_RUNTIME_DOCKER_CLIENT_CONFIG=$DOCKER_CLIENT_CONFIG \
+sparkR.R
+```
+
 Docker Container ENTRYPOINT Support
 ------------------------------------
 
@@ -1034,7 +1052,7 @@ node manager environment white list:
 ```
 <property>
         <name>yarn.nodemanager.env-whitelist</name>
-        <value>JAVA_HOME,HADOOP_COMMON_HOME,HADOOP_HDFS_HOME,HADOOP_CONF_DIR,HADOOP_YARN_HOME,HADOOP_MAPRED_HOME,YARN_CONTAINER_RUNTIME_DOCKER_RUN_OVERRIDE_DISABLE</value>
+        <value>JAVA_HOME,HADOOP_COMMON_HOME,HADOOP_HDFS_HOME,HADOOP_CONF_DIR,HADOOP_YARN_HOME,HADOOP_HOME,PATH,LANG,TZ,HADOOP_MAPRED_HOME,YARN_CONTAINER_RUNTIME_DOCKER_RUN_OVERRIDE_DISABLE</value>
 </property>
 ```
 

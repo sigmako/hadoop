@@ -18,7 +18,7 @@
 
 package org.apache.hadoop.yarn.server.timelineservice.metrics;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 import org.apache.hadoop.metrics2.MetricsInfo;
 import org.apache.hadoop.metrics2.annotation.Metric;
 import org.apache.hadoop.metrics2.annotation.Metrics;
@@ -33,7 +33,7 @@ import static org.apache.hadoop.metrics2.lib.Interns.info;
  * Metrics class for TimelineReader.
  */
 @Metrics(about = "Metrics for timeline reader", context = "timelineservice")
-public class TimelineReaderMetrics {
+final public class TimelineReaderMetrics {
 
   private final static MetricsInfo METRICS_INFO = info("TimelineReaderMetrics",
       "Metrics for TimelineReader");
@@ -50,8 +50,7 @@ public class TimelineReaderMetrics {
   @Metric(about = "GET entity types success latency", valueName = "latency")
   private MutableQuantiles getEntityTypesSuccessLatency;
 
-  @VisibleForTesting
-  protected TimelineReaderMetrics() {
+  private TimelineReaderMetrics() {
   }
 
   public static TimelineReaderMetrics getInstance() {

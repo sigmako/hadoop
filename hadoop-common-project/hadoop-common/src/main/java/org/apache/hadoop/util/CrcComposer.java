@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -46,15 +46,18 @@ public class CrcComposer {
 
   private int curCompositeCrc = 0;
   private long curPositionInStripe = 0;
-  private ByteArrayOutputStream digestOut = new ByteArrayOutputStream();
+  private final ByteArrayOutputStream digestOut = new ByteArrayOutputStream();
 
   /**
    * Returns a CrcComposer which will collapse all ingested CRCs into a single
    * value.
+   *
+   * @param type type.
+   * @param bytesPerCrcHint bytesPerCrcHint.
+   * @return a CrcComposer which will collapse all ingested CRCs into a single value.
    */
   public static CrcComposer newCrcComposer(
-      DataChecksum.Type type, long bytesPerCrcHint)
-      throws IOException {
+      DataChecksum.Type type, long bytesPerCrcHint) {
     return newStripedCrcComposer(type, bytesPerCrcHint, Long.MAX_VALUE);
   }
 
@@ -67,10 +70,15 @@ public class CrcComposer {
    * final digest, each corresponding to 10 underlying data bytes. Using
    * a stripeLength greater than the total underlying data size is equivalent
    * to using a non-striped CrcComposer.
+   *
+   * @param type type.
+   * @param bytesPerCrcHint bytesPerCrcHint.
+   * @param stripeLength stripeLength.
+   * @return a CrcComposer which will collapse CRCs for every combined.
+   * underlying data size which aligns with the specified stripe boundary.
    */
   public static CrcComposer newStripedCrcComposer(
-      DataChecksum.Type type, long bytesPerCrcHint, long stripeLength)
-      throws IOException {
+      DataChecksum.Type type, long bytesPerCrcHint, long stripeLength) {
     int polynomial = DataChecksum.getCrcPolynomialForType(type);
     return new CrcComposer(
         polynomial,
@@ -102,13 +110,14 @@ public class CrcComposer {
    * each CRC expected to correspond to exactly {@code bytesPerCrc} underlying
    * data bytes.
    *
+   * @param crcBuffer crcBuffer.
+   * @param offset offset.
    * @param length must be a multiple of the expected byte-size of a CRC.
+   * @param bytesPerCrc bytesPerCrc.
    */
-  public void update(
-      byte[] crcBuffer, int offset, int length, long bytesPerCrc)
-      throws IOException {
+  public void update(byte[] crcBuffer, int offset, int length, long bytesPerCrc) {
     if (length % CRC_SIZE_BYTES != 0) {
-      throw new IOException(String.format(
+      throw new IllegalArgumentException(String.format(
           "Trying to update CRC from byte array with length '%d' at offset "
           + "'%d' which is not a multiple of %d!",
           length, offset, CRC_SIZE_BYTES));
@@ -125,6 +134,11 @@ public class CrcComposer {
    * Composes {@code numChecksumsToRead} additional CRCs into the current digest
    * out of {@code checksumIn}, with each CRC expected to correspond to exactly
    * {@code bytesPerCrc} underlying data bytes.
+   *
+   * @param checksumIn checksumIn.
+   * @param numChecksumsToRead numChecksumsToRead.
+   * @param bytesPerCrc bytesPerCrc.
+   * @throws IOException raised on errors performing I/O.
    */
   public void update(
       DataInputStream checksumIn, long numChecksumsToRead, long bytesPerCrc)
@@ -138,8 +152,11 @@ public class CrcComposer {
   /**
    * Updates with a single additional CRC which corresponds to an underlying
    * data size of {@code bytesPerCrc}.
+   *
+   * @param crcB crcB.
+   * @param bytesPerCrc bytesPerCrc.
    */
-  public void update(int crcB, long bytesPerCrc) throws IOException {
+  public void update(int crcB, long bytesPerCrc) {
     if (curCompositeCrc == 0) {
       curCompositeCrc = crcB;
     } else if (bytesPerCrc == bytesPerCrcHint) {
@@ -153,7 +170,7 @@ public class CrcComposer {
     curPositionInStripe += bytesPerCrc;
 
     if (curPositionInStripe > stripeLength) {
-      throw new IOException(String.format(
+      throw new IllegalStateException(String.format(
           "Current position in stripe '%d' after advancing by bytesPerCrc '%d' "
           + "exceeds stripeLength '%d' without stripe alignment.",
           curPositionInStripe, bytesPerCrc, stripeLength));
@@ -173,6 +190,8 @@ public class CrcComposer {
    * total sum bytesPerCrc divided by stripeLength. If the sum of bytesPerCrc
    * is not a multiple of stripeLength, then the last CRC in the array
    * corresponds to totalLength % stripeLength underlying data bytes.
+   *
+   * @return byte representation of composed CRCs.
    */
   public byte[] digest() {
     if (curPositionInStripe > 0) {

@@ -29,6 +29,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.AdminService;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.QueuePath;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.conf.YarnConfigurationStore.LogMutation;
 import org.apache.hadoop.yarn.webapp.dao.QueueConfigInfo;
 import org.apache.hadoop.yarn.webapp.dao.SchedConfUpdateInfo;
@@ -215,6 +216,40 @@ public class TestMutableCSConfigurationProvider {
     assertNull(confProvider.loadConfiguration(conf)
         .get("yarn.scheduler.capacity.root.a.goodKey"));
 
+  }
+
+  @Test
+  public void testAddRemoveQueueWithSpacesInConfig() throws Exception {
+    CapacitySchedulerConfiguration csConf =
+        new CapacitySchedulerConfiguration();
+    QueuePath root = new QueuePath(CapacitySchedulerConfiguration.ROOT);
+    QueuePath a = root.createNewLeaf("a");
+    QueuePath b = root.createNewLeaf("b");
+    QueuePath c = root.createNewLeaf("c");
+
+    csConf.setQueues(root, new String[] {" a   , b, c" });
+
+    csConf.setCapacity(a, 0);
+    csConf.setCapacity(b, 50);
+    csConf.setCapacity(c, 50);
+
+    confProvider = new MutableCSConfigurationProvider(rmContext) {
+      @Override
+      protected Configuration getInitSchedulerConfig() {
+        return csConf;
+      }
+    };
+
+    Configuration conf = new Configuration();
+    conf.set(YarnConfiguration.SCHEDULER_CONFIGURATION_STORE_CLASS,
+        YarnConfiguration.MEMORY_CONFIGURATION_STORE);
+    confProvider.init(conf);
+
+    SchedConfUpdateInfo update = new SchedConfUpdateInfo();
+    update.getRemoveQueueInfo().add("root.a");
+
+    confProvider.logAndApplyMutation(UserGroupInformation
+        .getCurrentUser(), update);
   }
 
   private void writeConf(Configuration conf, String storePath)

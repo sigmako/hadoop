@@ -17,8 +17,8 @@
  */
 package org.apache.hadoop.hdfs;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.apache.hadoop.util.Preconditions;
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.fs.CreateFlag;
@@ -45,7 +45,7 @@ import org.apache.hadoop.io.erasurecode.rawcoder.RawErasureEncoder;
 import org.apache.hadoop.util.DataChecksum;
 import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.Time;
-import org.apache.htrace.core.TraceScope;
+import org.apache.hadoop.tracing.TraceScope;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
@@ -73,6 +73,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
+import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.Write.RECOVER_LEASE_ON_CLOSE_EXCEPTION_DEFAULT;
+import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.Write.RECOVER_LEASE_ON_CLOSE_EXCEPTION_KEY;
 
 /**
  * This class supports writing files in striped layout and erasure coded format.
@@ -283,6 +285,7 @@ public class DFSStripedOutputStream extends DFSOutputStream
   private ExecutorService flushAllExecutor;
   private CompletionService<Void> flushAllExecutorCompletionService;
   private int blockGroupIndex;
+  private long datanodeRestartTimeout;
 
   /** Construct a new output stream for creating a file. */
   DFSStripedOutputStream(DFSClient dfsClient, String src, HdfsFileStatus stat,
@@ -290,9 +293,7 @@ public class DFSStripedOutputStream extends DFSOutputStream
                          DataChecksum checksum, String[] favoredNodes)
                          throws IOException {
     super(dfsClient, src, stat, flag, progress, checksum, favoredNodes, false);
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Creating DFSStripedOutputStream for " + src);
-    }
+    LOG.debug("Creating DFSStripedOutputStream for {}", src);
 
     ecPolicy = stat.getErasureCodingPolicy();
     final int numParityBlocks = ecPolicy.getNumParityUnits();
@@ -322,6 +323,7 @@ public class DFSStripedOutputStream extends DFSOutputStream
       streamers.add(streamer);
     }
     currentPackets = new DFSPacket[streamers.size()];
+    datanodeRestartTimeout = dfsClient.getConf().getDatanodeRestartTimeout();
     setCurrentStreamer(0);
   }
 
@@ -398,17 +400,25 @@ public class DFSStripedOutputStream extends DFSOutputStream
 
     final int failCount = failedStreamers.size() + newFailed.size();
     if (LOG.isDebugEnabled()) {
-      LOG.debug("checkStreamers: " + streamers);
-      LOG.debug("healthy streamer count=" + (numAllBlocks - failCount));
-      LOG.debug("original failed streamers: " + failedStreamers);
-      LOG.debug("newly failed streamers: " + newFailed);
+      LOG.debug("checkStreamers: {}", streamers);
+      LOG.debug("healthy streamer count={}", (numAllBlocks - failCount));
+      LOG.debug("original failed streamers: {}", failedStreamers);
+      LOG.debug("newly failed streamers: {}", newFailed);
     }
     if (failCount > (numAllBlocks - numDataBlocks)) {
+      closeAllStreamers();
       throw new IOException("Failed: the number of failed blocks = "
           + failCount + " > the number of parity blocks = "
           + (numAllBlocks - numDataBlocks));
     }
     return newFailed;
+  }
+
+  private void closeAllStreamers() {
+    // The write has failed, Close all the streamers.
+    for (StripedDataStreamer streamer : streamers) {
+      streamer.close(true);
+    }
   }
 
   private void handleCurrentStreamerFailure(String err, Exception e)
@@ -493,8 +503,14 @@ public class DFSStripedOutputStream extends DFSOutputStream
 
     LOG.debug("Allocating new block group. The previous block group: "
         + prevBlockGroup);
-    final LocatedBlock lb = addBlock(excludedNodes, dfsClient, src,
-         prevBlockGroup, fileId, favoredNodes, getAddBlockFlags());
+    final LocatedBlock lb;
+    try {
+      lb = addBlock(excludedNodes, dfsClient, src,
+          prevBlockGroup, fileId, favoredNodes, getAddBlockFlags());
+    } catch (IOException ioe) {
+      closeAllStreamers();
+      throw ioe;
+    }
     assert lb.isStriped();
     // assign the new block to the current block group
     currentBlockGroup = lb.getBlock();
@@ -629,6 +645,11 @@ public class DFSStripedOutputStream extends DFSOutputStream
             "streamer: " + streamer);
         streamer.setExternalError();
         healthySet.add(streamer);
+      } else if (!streamer.streamerClosed()
+          && streamer.getErrorState().hasDatanodeError()
+          && streamer.getErrorState().doWaitForRestart()) {
+        healthySet.add(streamer);
+        failedStreamers.remove(streamer);
       }
     }
     return healthySet;
@@ -650,9 +671,9 @@ public class DFSStripedOutputStream extends DFSOutputStream
       // for healthy streamers, wait till all of them have fetched the new block
       // and flushed out all the enqueued packets.
       flushAllInternals();
+      // recheck failed streamers again after the flush
+      newFailed = checkStreamers();
     }
-    // recheck failed streamers again after the flush
-    newFailed = checkStreamers();
     while (newFailed.size() > 0) {
       failedStreamers.addAll(newFailed);
       coordinator.clearFailureStates();
@@ -670,6 +691,8 @@ public class DFSStripedOutputStream extends DFSOutputStream
       newFailed = waitCreatingStreamers(healthySet);
       if (newFailed.size() + failedStreamers.size() >
           numAllBlocks - numDataBlocks) {
+        // The write has failed, Close all the streamers.
+        closeAllStreamers();
         throw new IOException(
             "Data streamers failed while creating new block streams: "
                 + newFailed + ". There are not enough healthy streamers.");
@@ -690,6 +713,14 @@ public class DFSStripedOutputStream extends DFSOutputStream
       }
       for (int i = 0; i < numAllBlocks; i++) {
         coordinator.offerStreamerUpdateResult(i, newFailed.size() == 0);
+      }
+      //wait for get notify to failed stream
+      if (newFailed.size() != 0) {
+        try {
+          Thread.sleep(datanodeRestartTimeout);
+        } catch (InterruptedException e) {
+          // Do nothing
+        }
       }
     }
   }
@@ -1022,7 +1053,7 @@ public class DFSStripedOutputStream extends DFSOutputStream
       }
     }
 
-    dfsClient.endFileLease(fileId);
+    dfsClient.endFileLease(getUniqKey());
     final IOException ioe = b.build();
     if (ioe != null) {
       throw ioe;
@@ -1169,32 +1200,35 @@ public class DFSStripedOutputStream extends DFSOutputStream
 
   @Override
   protected synchronized void closeImpl() throws IOException {
-    if (isClosed()) {
-      exceptionLastSeen.check(true);
-
-      // Writing to at least {dataUnits} replicas can be considered as success,
-      // and the rest of data can be recovered.
-      final int minReplication = ecPolicy.getNumDataUnits();
-      int goodStreamers = 0;
-      final MultipleIOException.Builder b = new MultipleIOException.Builder();
-      for (final StripedDataStreamer si : streamers) {
-        try {
-          si.getLastException().check(true);
-          goodStreamers++;
-        } catch (IOException e) {
-          b.add(e);
-        }
-      }
-      if (goodStreamers < minReplication) {
-        final IOException ioe = b.build();
-        if (ioe != null) {
-          throw ioe;
-        }
-      }
-      return;
-    }
-
+    boolean recoverLeaseOnCloseException = dfsClient.getConfiguration()
+        .getBoolean(RECOVER_LEASE_ON_CLOSE_EXCEPTION_KEY,
+            RECOVER_LEASE_ON_CLOSE_EXCEPTION_DEFAULT);
     try {
+      if (isClosed()) {
+        exceptionLastSeen.check(true);
+
+        // Writing to at least {dataUnits} replicas can be considered as
+        //  success, and the rest of data can be recovered.
+        final int minReplication = ecPolicy.getNumDataUnits();
+        int goodStreamers = 0;
+        final MultipleIOException.Builder b = new MultipleIOException.Builder();
+        for (final StripedDataStreamer si : streamers) {
+          try {
+            si.getLastException().check(true);
+            goodStreamers++;
+          } catch (IOException e) {
+            b.add(e);
+          }
+        }
+        if (goodStreamers < minReplication) {
+          final IOException ioe = b.build();
+          if (ioe != null) {
+            throw ioe;
+          }
+        }
+        return;
+      }
+
       try {
         // flush from all upper layers
         flushBuffer();
@@ -1241,6 +1275,9 @@ public class DFSStripedOutputStream extends DFSOutputStream
       }
       logCorruptBlocks();
     } catch (ClosedChannelException ignored) {
+    } catch (IOException ioe) {
+      recoverLease(recoverLeaseOnCloseException);
+      throw ioe;
     } finally {
       setClosed();
       // shutdown executor of flushAll tasks

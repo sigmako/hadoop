@@ -21,10 +21,13 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity;
 import java.util.Map;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.metrics2.MetricsSink;
+import org.apache.hadoop.metrics2.MetricsSource;
 import org.apache.hadoop.metrics2.MetricsSystem;
 import org.apache.hadoop.metrics2.annotation.Metric;
 import org.apache.hadoop.metrics2.annotation.Metrics;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
+import org.apache.hadoop.metrics2.lib.MetricsAnnotations;
 import org.apache.hadoop.metrics2.lib.MutableGaugeFloat;
 import org.apache.hadoop.metrics2.lib.MutableGaugeInt;
 import org.apache.hadoop.metrics2.lib.MutableGaugeLong;
@@ -78,6 +81,8 @@ public class CSQueueMetrics extends QueueMetrics {
   private static final String MAX_CAPACITY_METRIC_DESC =
       "MaxCapacity of NAME";
 
+  private CSQueueMetricsForCustomResources csQueueMetricsForCustomResources;
+
   CSQueueMetrics(MetricsSystem ms, String queueName, Queue parent,
       boolean enableUserMetrics, Configuration conf) {
     super(ms, queueName, parent, enableUserMetrics, conf);
@@ -90,11 +95,14 @@ public class CSQueueMetrics extends QueueMetrics {
    * mandatory resources metrics
    */
   protected void registerCustomResources() {
-    Map<String, Long> customResources = initAndGetCustomResources();
-    registerCustomResources(customResources, GUARANTEED_CAPACITY_METRIC_PREFIX,
-        GUARANTEED_CAPACITY_METRIC_DESC);
-    registerCustomResources(customResources, MAX_CAPACITY_METRIC_PREFIX,
-        MAX_CAPACITY_METRIC_DESC);
+    Map<String, Long> customResources =
+        csQueueMetricsForCustomResources.initAndGetCustomResources();
+    csQueueMetricsForCustomResources
+        .registerCustomResources(customResources, this.registry,
+            GUARANTEED_CAPACITY_METRIC_PREFIX, GUARANTEED_CAPACITY_METRIC_DESC);
+    csQueueMetricsForCustomResources
+        .registerCustomResources(customResources, this.registry,
+            MAX_CAPACITY_METRIC_PREFIX, MAX_CAPACITY_METRIC_DESC);
     super.registerCustomResources();
   }
 
@@ -184,12 +192,10 @@ public class CSQueueMetrics extends QueueMetrics {
     if (partition == null || partition.equals(RMNodeLabelsManager.NO_LABEL)) {
       guaranteedMB.set(res.getMemorySize());
       guaranteedVCores.set(res.getVirtualCores());
-      if (getQueueMetricsForCustomResources() != null) {
-        ((CSQueueMetricsForCustomResources) getQueueMetricsForCustomResources())
-            .setGuaranteedCapacity(res);
-        registerCustomResources(
-            ((CSQueueMetricsForCustomResources)
-                getQueueMetricsForCustomResources()).getGuaranteedCapacity(),
+      if (csQueueMetricsForCustomResources != null) {
+        csQueueMetricsForCustomResources.setGuaranteedCapacity(res);
+        csQueueMetricsForCustomResources.registerCustomResources(
+            csQueueMetricsForCustomResources.getGuaranteedCapacity(), registry,
             GUARANTEED_CAPACITY_METRIC_PREFIX, GUARANTEED_CAPACITY_METRIC_DESC);
       }
     }
@@ -207,12 +213,10 @@ public class CSQueueMetrics extends QueueMetrics {
     if (partition == null || partition.equals(RMNodeLabelsManager.NO_LABEL)) {
       maxCapacityMB.set(res.getMemorySize());
       maxCapacityVCores.set(res.getVirtualCores());
-      if (getQueueMetricsForCustomResources() != null) {
-        ((CSQueueMetricsForCustomResources) getQueueMetricsForCustomResources())
-            .setMaxCapacity(res);
-        registerCustomResources(
-            ((CSQueueMetricsForCustomResources)
-                getQueueMetricsForCustomResources()).getMaxCapacity(),
+      if (csQueueMetricsForCustomResources != null) {
+        csQueueMetricsForCustomResources.setMaxCapacity(res);
+        csQueueMetricsForCustomResources.registerCustomResources(
+            csQueueMetricsForCustomResources.getMaxCapacity(), registry,
             MAX_CAPACITY_METRIC_PREFIX, MAX_CAPACITY_METRIC_DESC);
       }
     }
@@ -221,15 +225,82 @@ public class CSQueueMetrics extends QueueMetrics {
   @Override
   protected void createQueueMetricsForCustomResources() {
     if (ResourceUtils.getNumberOfKnownResourceTypes() > 2) {
-      setQueueMetricsForCustomResources(new CSQueueMetricsForCustomResources());
+      this.csQueueMetricsForCustomResources =
+          new CSQueueMetricsForCustomResources();
+      setQueueMetricsForCustomResources(csQueueMetricsForCustomResources);
       registerCustomResources();
+    }
+  }
+
+  @Metrics(context="dummymetricssystem")
+  public static class DummyMetricsSystemImpl extends MetricsSystem {
+    @Override
+    public MetricsSystem init(String prefix) {
+      return this;
+    }
+
+    @Override
+    public <T> T register(String name, String desc, T source) {
+      MetricsAnnotations.newSourceBuilder(source).build();
+      return source;
+    }
+
+    @Override
+    public void unregisterSource(String name) {
+    }
+
+    @Override
+    public MetricsSource getSource(String name) {
+      return null;
+    }
+
+    @Override
+    public <T extends MetricsSink> T register(String name, String desc, T sink) {
+      return null;
+    }
+
+    @Override
+    public void register(Callback callback) {
+    }
+
+    @Override
+    public void publishMetricsNow() {
+    }
+
+    @Override
+    public boolean shutdown() {
+      return false;
+    }
+
+    @Override
+    public void start() {
+    }
+
+    @Override
+    public void stop() {
+    }
+
+    @Override
+    public void startMetricsMBeans() {
+    }
+
+    @Override
+    public void stopMetricsMBeans() {
+    }
+
+    @Override
+    public String currentConfig() {
+      return null;
     }
   }
 
   public synchronized static CSQueueMetrics forQueue(String queueName,
       Queue parent, boolean enableUserMetrics, Configuration conf) {
-    MetricsSystem ms = DefaultMetricsSystem.instance();
-    QueueMetrics metrics = QueueMetrics.getQueueMetrics().get(queueName);
+    final boolean isConfigValidation = isConfigurationValidationSet(conf);
+
+    MetricsSystem ms = isConfigValidation
+        ? new DummyMetricsSystemImpl() : DefaultMetricsSystem.instance();
+    QueueMetrics metrics = getQueueMetrics().get(queueName);
     if (metrics == null) {
       metrics =
           new CSQueueMetrics(ms, queueName, parent, enableUserMetrics, conf)
@@ -241,7 +312,10 @@ public class CSQueueMetrics extends QueueMetrics {
             ms.register(sourceName(queueName).toString(), "Metrics for queue: "
                 + queueName, metrics);
       }
-      QueueMetrics.getQueueMetrics().put(queueName, metrics);
+
+      if (!isConfigValidation) {
+        getQueueMetrics().put(queueName, metrics);
+      }
     }
 
     return (CSQueueMetrics) metrics;
@@ -254,7 +328,8 @@ public class CSQueueMetrics extends QueueMetrics {
     }
     CSQueueMetrics metrics = (CSQueueMetrics) users.get(userName);
     if (metrics == null) {
-      metrics = new CSQueueMetrics(metricsSystem, queueName, null, false, conf);
+      metrics =
+        new CSQueueMetrics(metricsSystem, queueName, null, false, conf);
       users.put(userName, metrics);
       metricsSystem.register(
           sourceName(queueName).append(",user=").append(userName).toString(),

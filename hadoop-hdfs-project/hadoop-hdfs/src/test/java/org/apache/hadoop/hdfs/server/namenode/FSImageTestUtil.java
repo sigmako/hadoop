@@ -45,8 +45,6 @@ import java.util.Properties;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.permission.FsPermission;
@@ -61,15 +59,18 @@ import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeDirType;
 import org.apache.hadoop.hdfs.util.Holder;
 import org.apache.hadoop.hdfs.util.MD5FileUtils;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.util.Lists;
+import org.apache.hadoop.util.Sets;
 import org.mockito.Mockito;
 
-import com.google.common.base.Joiner;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
-import com.google.common.io.Files;
+import org.apache.hadoop.thirdparty.com.google.common.base.Joiner;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ImmutableList;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ImmutableSet;
+import org.apache.hadoop.thirdparty.com.google.common.collect.Maps;
+import org.apache.hadoop.thirdparty.com.google.common.io.Files;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Utility functions for testing fsimage storage.
@@ -415,7 +416,7 @@ public abstract class FSImageTestUtil {
     if (files.length < 2) return;
     
     Map<File, String> md5s = getFileMD5s(files);
-    if (Sets.newHashSet(md5s.values()).size() > 1) {
+    if (new HashSet<>(md5s.values()).size() > 1) {
       fail("File contents differed:\n  " +
           Joiner.on("\n  ")
             .withKeyValueSeparator("=")
@@ -432,7 +433,8 @@ public abstract class FSImageTestUtil {
       File... files) throws Exception
   {
     Map<File, String> md5s = getFileMD5s(files);
-    if (Sets.newHashSet(md5s.values()).size() != expectedUniqueHashes) {
+    int uniqueHashes = new HashSet<>(md5s.values()).size();
+    if (uniqueHashes != expectedUniqueHashes) {
       fail("Expected " + expectedUniqueHashes + " different hashes, got:\n  " +
           Joiner.on("\n  ")
             .withKeyValueSeparator("=")
@@ -512,6 +514,23 @@ public abstract class FSImageTestUtil {
       for (long checkpointTxId : txids) {
         File image = new File(nameDir,
                               NNStorage.getImageFileName(checkpointTxId));
+        assertTrue("Expected non-empty " + image, image.length() > 0);
+      }
+    }
+  }
+
+  public static void assertNNHasRollbackCheckpoints(MiniDFSCluster cluster,
+      int nnIdx, List<Integer> txids) {
+
+    for (File nameDir : getNameNodeCurrentDirs(cluster, nnIdx)) {
+      LOG.info("examining name dir with files: {}",
+                   Joiner.on(",").join(nameDir.listFiles()));
+      // Should have fsimage_N for the three checkpoints
+      LOG.info("Examining storage dir {} with contents: {}", nameDir,
+                   StringUtils.join(nameDir.listFiles(), ", "));
+      for (long checkpointTxId : txids) {
+        File image = new File(nameDir,
+            NNStorage.getRollbackImageFileName(checkpointTxId));
         assertTrue("Expected non-empty " + image, image.length() > 0);
       }
     }
@@ -607,9 +626,10 @@ public abstract class FSImageTestUtil {
   
   public static void assertNNFilesMatch(MiniDFSCluster cluster) throws Exception {
     List<File> curDirs = Lists.newArrayList();
-    curDirs.addAll(FSImageTestUtil.getNameNodeCurrentDirs(cluster, 0));
-    curDirs.addAll(FSImageTestUtil.getNameNodeCurrentDirs(cluster, 1));
-    
+    for (int i = 0; i < cluster.getNumNameNodes(); i++) {
+      curDirs.addAll(FSImageTestUtil.getNameNodeCurrentDirs(cluster, i));
+    }
+
     // Ignore seen_txid file, since the newly bootstrapped standby
     // will have a higher seen_txid than the one it bootstrapped from.
     Set<String> ignoredFiles = ImmutableSet.of("seen_txid");

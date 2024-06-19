@@ -21,10 +21,11 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.conf;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Arrays;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 import com.google.gson.GsonBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -337,6 +338,12 @@ public class FSSchedulerConfigurationStore extends YarnConfigurationStore {
   }
 
   @Override
+  protected LinkedList<LogMutation> getLogs() {
+    // Unimplemented.
+    return null;
+  }
+
+  @Override
   protected Version getConfStoreVersion() throws Exception {
     return null;
   }
@@ -351,6 +358,7 @@ public class FSSchedulerConfigurationStore extends YarnConfigurationStore {
     return CURRENT_VERSION_INFO;
   }
 
+  @Override
   public void close() throws IOException {
     if (fileSystem != null) {
       fileSystem.close();

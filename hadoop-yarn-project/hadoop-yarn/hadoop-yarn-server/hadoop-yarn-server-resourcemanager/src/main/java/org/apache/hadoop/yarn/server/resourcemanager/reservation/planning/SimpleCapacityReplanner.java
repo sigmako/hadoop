@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.QueuePath;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.yarn.api.records.ReservationDefinition;
@@ -36,7 +37,7 @@ import org.apache.hadoop.yarn.util.UTCClock;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.Resources;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 
 /**
  * This (re)planner scan a period of time from now to a maximum time window (or
@@ -72,7 +73,7 @@ public class SimpleCapacityReplanner implements Planner {
   @Override
   public void init(String planQueueName,
       ReservationSchedulerConfiguration conf) {
-    this.lengthOfCheckZone = conf.getEnforcementWindow(planQueueName);
+    this.lengthOfCheckZone = conf.getEnforcementWindow(new QueuePath(planQueueName));
   }
 
   @Override

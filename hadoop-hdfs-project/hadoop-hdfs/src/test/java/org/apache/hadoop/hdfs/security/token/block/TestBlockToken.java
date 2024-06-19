@@ -42,6 +42,7 @@ import java.util.GregorianCalendar;
 import java.util.Set;
 
 import org.mockito.Mockito;
+import org.apache.commons.lang3.reflect.FieldUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -73,7 +74,7 @@ import org.apache.hadoop.io.DataInputBuffer;
 import org.apache.hadoop.io.DataOutputBuffer;
 import org.apache.hadoop.io.TestWritable;
 import org.apache.hadoop.ipc.Client;
-import org.apache.hadoop.ipc.ProtobufRpcEngine;
+import org.apache.hadoop.ipc.ProtobufRpcEngine2;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.net.NetUtils;
@@ -86,7 +87,6 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.Time;
-import org.apache.log4j.Level;
 import org.junit.Assert;
 import org.junit.Assume;
 import org.junit.Before;
@@ -98,6 +98,7 @@ import org.apache.hadoop.thirdparty.protobuf.BlockingService;
 import org.apache.hadoop.thirdparty.protobuf.ServiceException;
 
 import org.apache.hadoop.fs.StorageType;
+import org.slf4j.event.Level;
 
 /** Unit tests for block tokens */
 public class TestBlockToken {
@@ -106,11 +107,11 @@ public class TestBlockToken {
   private static final String ADDRESS = "0.0.0.0";
 
   static {
-    GenericTestUtils.setLogLevel(Client.LOG, Level.ALL);
-    GenericTestUtils.setLogLevel(Server.LOG, Level.ALL);
-    GenericTestUtils.setLogLevel(SaslRpcClient.LOG, Level.ALL);
-    GenericTestUtils.setLogLevel(SaslRpcServer.LOG, Level.ALL);
-    GenericTestUtils.setLogLevel(SaslInputStream.LOG, Level.ALL);
+    GenericTestUtils.setLogLevel(Client.LOG, Level.TRACE);
+    GenericTestUtils.setLogLevel(Server.LOG, Level.TRACE);
+    GenericTestUtils.setLogLevel(SaslRpcClient.LOG, Level.TRACE);
+    GenericTestUtils.setLogLevel(SaslRpcServer.LOG, Level.TRACE);
+    GenericTestUtils.setLogLevel(SaslInputStream.LOG, Level.TRACE);
   }
 
   /**
@@ -313,7 +314,7 @@ public class TestBlockToken {
         .getReplicaVisibleLength(any(), any());
 
     RPC.setProtocolEngine(conf, ClientDatanodeProtocolPB.class,
-        ProtobufRpcEngine.class);
+        ProtobufRpcEngine2.class);
     BlockingService service = ClientDatanodeProtocolService
         .newReflectiveBlockingService(mockDN);
     return new RPC.Builder(conf).setProtocol(ClientDatanodeProtocolPB.class)
@@ -390,7 +391,7 @@ public class TestBlockToken {
     DatanodeID fakeDnId = DFSTestUtil.getLocalDatanodeID(addr.getPort());
 
     ExtendedBlock b = new ExtendedBlock("fake-pool", new Block(12345L));
-    LocatedBlock fakeBlock = new LocatedBlock(b, new DatanodeInfo[0]);
+    LocatedBlock fakeBlock = new LocatedBlock(b, DatanodeInfo.EMPTY_ARRAY);
     fakeBlock.setBlockToken(token);
 
     // Create another RPC proxy with the same configuration - this will never
@@ -466,7 +467,7 @@ public class TestBlockToken {
       bpMgr.addBlockPool(bpid, slaveHandler);
 
       ExportedBlockKeys keys = masterHandler.exportKeys();
-      bpMgr.addKeys(bpid, keys);
+      bpMgr.addKeys(bpid, keys, true);
       String[] storageIds = new String[] {"DS-9001"};
       tokenGenerationAndVerification(masterHandler, bpMgr.get(bpid),
           new StorageType[]{StorageType.DEFAULT}, storageIds);
@@ -479,7 +480,7 @@ public class TestBlockToken {
       tokenGenerationAndVerification(masterHandler, bpMgr.get(bpid), null,
           null);
       keys = masterHandler.exportKeys();
-      bpMgr.addKeys(bpid, keys);
+      bpMgr.addKeys(bpid, keys, true);
       tokenGenerationAndVerification(masterHandler, bpMgr.get(bpid),
           new StorageType[]{StorageType.DEFAULT}, new String[]{"DS-9001"});
       tokenGenerationAndVerification(masterHandler, bpMgr.get(bpid), null,
@@ -617,6 +618,24 @@ public class TestBlockToken {
     readToken.readFields(dib);
   }
 
+  /**
+   * If the NameNode predates HDFS-6708 and HDFS-9807, then the LocatedBlocks
+   * that it returns to the client will have block tokens that don't include
+   * the storage types or storage IDs. Simulate this by setting the storage
+   * type and storage ID to null to test backwards compatibility.
+   */
+  @Test
+  public void testLegacyBlockTokenWithoutStorages() throws IOException,
+          IllegalAccessException {
+    BlockTokenIdentifier identifier = new BlockTokenIdentifier("user",
+            "blockpool", 123,
+            EnumSet.allOf(BlockTokenIdentifier.AccessMode.class), null, null,
+            false);
+    FieldUtils.writeField(identifier, "storageTypes", null, true);
+    FieldUtils.writeField(identifier, "storageIds", null, true);
+    testCraftedBlockTokenIdentifier(identifier, false, false, false);
+  }
+
   @Test
   public void testProtobufBlockTokenBytesIsProtobuf() throws IOException {
     final boolean useProto = true;
@@ -662,13 +681,17 @@ public class TestBlockToken {
     assertEquals(protobufToken, readToken);
   }
 
-  private void testCraftedProtobufBlockTokenIdentifier(
+  private void testCraftedBlockTokenIdentifier(
       BlockTokenIdentifier identifier, boolean expectIOE,
-      boolean expectRTE) throws IOException {
+      boolean expectRTE, boolean isProtobuf) throws IOException {
     DataOutputBuffer dob = new DataOutputBuffer(4096);
     DataInputBuffer dib = new DataInputBuffer();
 
-    identifier.writeProtobuf(dob);
+    if (isProtobuf) {
+      identifier.writeProtobuf(dob);
+    } else {
+      identifier.writeLegacy(dob);
+    }
     byte[] identBytes = Arrays.copyOf(dob.getData(), dob.getLength());
 
     BlockTokenIdentifier legacyToken = new BlockTokenIdentifier();
@@ -691,22 +714,23 @@ public class TestBlockToken {
       invalidLegacyMessage = true;
     }
 
-    assertTrue(invalidLegacyMessage);
+    if (isProtobuf) {
+      assertTrue(invalidLegacyMessage);
 
-    dib.reset(identBytes, identBytes.length);
-    protobufToken.readFieldsProtobuf(dib);
-
-    dib.reset(identBytes, identBytes.length);
-    readToken.readFieldsProtobuf(dib);
-    assertEquals(protobufToken, readToken);
-    assertEquals(identifier, readToken);
+      dib.reset(identBytes, identBytes.length);
+      protobufToken.readFieldsProtobuf(dib);
+      dib.reset(identBytes, identBytes.length);
+      readToken.readFields(dib);
+      assertEquals(identifier, readToken);
+      assertEquals(protobufToken, readToken);
+    }
   }
 
   @Test
   public void testEmptyProtobufBlockTokenBytesIsProtobuf() throws IOException {
     // Empty BlockTokenIdentifiers throw IOException
     BlockTokenIdentifier identifier = new BlockTokenIdentifier();
-    testCraftedProtobufBlockTokenIdentifier(identifier, true, false);
+    testCraftedBlockTokenIdentifier(identifier, true, false, true);
   }
 
   @Test
@@ -727,10 +751,10 @@ public class TestBlockToken {
     datetime = ((datetime / 1000) * 1000); // strip milliseconds.
     datetime = datetime + 71; // 2017-02-09 00:12:35,071+0100
     identifier.setExpiryDate(datetime);
-    testCraftedProtobufBlockTokenIdentifier(identifier, false, true);
+    testCraftedBlockTokenIdentifier(identifier, false, true, true);
     datetime += 1; // 2017-02-09 00:12:35,072+0100
     identifier.setExpiryDate(datetime);
-    testCraftedProtobufBlockTokenIdentifier(identifier, true, false);
+    testCraftedBlockTokenIdentifier(identifier, true, false, true);
   }
 
   private BlockTokenIdentifier writeAndReadBlockToken(
@@ -768,7 +792,7 @@ public class TestBlockToken {
         EnumSet.allOf(BlockTokenIdentifier.AccessMode.class);
     StorageType[] storageTypes =
         new StorageType[]{StorageType.RAM_DISK, StorageType.SSD,
-            StorageType.DISK, StorageType.ARCHIVE};
+            StorageType.DISK, StorageType.ARCHIVE, StorageType.NVDIMM};
     BlockTokenIdentifier ident = new BlockTokenIdentifier("user", "bpool",
         123, accessModes, storageTypes, new String[] {"fake-storage-id"},
         useProto);

@@ -24,11 +24,11 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.SafeModeAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.*;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream.SyncFlag;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.NSQuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport.DiffReportEntry;
@@ -163,6 +163,7 @@ public class TestRenameWithSnapshots {
     
     hdfs.delete(bar, false);
     Assert.assertEquals(1, withCount.getReferenceCount());
+    restartClusterAndCheckImage(true);
   }
   
   private static boolean existsInDiffReport(List<DiffReportEntry> entries,
@@ -196,6 +197,7 @@ public class TestRenameWithSnapshots {
     assertTrue(existsInDiffReport(entries, DiffType.MODIFY, "", null));
     assertTrue(existsInDiffReport(entries, DiffType.CREATE, file2.getName(),
         null));
+    restartClusterAndCheckImage(true);
   }
 
   /**
@@ -218,6 +220,7 @@ public class TestRenameWithSnapshots {
     assertTrue(existsInDiffReport(entries, DiffType.MODIFY, "", null));
     assertTrue(existsInDiffReport(entries, DiffType.RENAME, file1.getName(),
         file2.getName()));
+    restartClusterAndCheckImage(true);
   }
 
   @Test (timeout=60000)
@@ -310,7 +313,46 @@ public class TestRenameWithSnapshots {
     assertTrue(existsInDiffReport(entries, DiffType.RENAME, sub2.getName(),
         sub3.getName()));
   }
-  
+
+  @Test (timeout=60000)
+  public void testRenameDirectoryAndFileInSnapshot() throws Exception {
+    final Path sub2 = new Path(sub1, "sub2");
+    final Path sub3 = new Path(sub1, "sub3");
+    final Path sub2file1 = new Path(sub2, "file1");
+    final Path sub2file2 = new Path(sub2, "file2");
+    final Path sub3file2 = new Path(sub3, "file2");
+    final Path sub3file3 = new Path(sub3, "file3");
+    final String sub1snap1 = "sub1snap1";
+    final String sub1snap2 = "sub1snap2";
+    final String sub1snap3 = "sub1snap3";
+    final String sub1snap4 = "sub1snap4";
+    hdfs.mkdirs(sub1);
+    hdfs.mkdirs(sub2);
+    DFSTestUtil.createFile(hdfs, sub2file1, BLOCKSIZE, REPL, SEED);
+    SnapshotTestHelper.createSnapshot(hdfs, sub1, sub1snap1);
+    hdfs.rename(sub2file1, sub2file2);
+    SnapshotTestHelper.createSnapshot(hdfs, sub1, sub1snap2);
+
+    // First rename the sub-directory.
+    hdfs.rename(sub2, sub3);
+    SnapshotTestHelper.createSnapshot(hdfs, sub1, sub1snap3);
+    hdfs.rename(sub3file2, sub3file3);
+    SnapshotTestHelper.createSnapshot(hdfs, sub1, sub1snap4);
+    hdfs.deleteSnapshot(sub1, sub1snap1);
+    hdfs.deleteSnapshot(sub1, sub1snap2);
+    hdfs.deleteSnapshot(sub1, sub1snap3);
+    // check the internal details
+    INode sub3file3Inode = fsdir.getINode4Write(sub3file3.toString());
+    INodeReference ref = sub3file3Inode
+            .asReference();
+    INodeReference.WithCount withCount = (WithCount) ref
+            .getReferredINode();
+    Assert.assertEquals(withCount.getReferenceCount(), 1);
+    // Ensure name list is empty for the reference sub3file3Inode
+    Assert.assertNull(withCount.getLastWithName());
+    Assert.assertTrue(sub3file3Inode.isInCurrentState());
+  }
+
   /**
    * After the following steps:
    * <pre>
@@ -526,9 +568,9 @@ public class TestRenameWithSnapshots {
     SnapshotTestHelper.dumpTree2File(fsdir, fsnMiddle);
    
     // save namespace and restart cluster
-    hdfs.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
+    hdfs.setSafeMode(SafeModeAction.ENTER);
     hdfs.saveNamespace();
-    hdfs.setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
+    hdfs.setSafeMode(SafeModeAction.LEAVE);
     cluster.shutdown();
     cluster = new MiniDFSCluster.Builder(conf).format(false)
         .numDataNodes(REPL).build();
@@ -1598,7 +1640,7 @@ public class TestRenameWithSnapshots {
     final Path foo2 = new Path(subdir2, foo.getName());
     FSDirectory fsdir2 = Mockito.spy(fsdir);
     Mockito.doThrow(new NSQuotaExceededException("fake exception")).when(fsdir2)
-        .addLastINode(any(), any(), any(), anyBoolean());
+        .addLastINode(any(), any(), any(), anyBoolean(), any());
     Whitebox.setInternalState(fsn, "dir", fsdir2);
     // rename /test/dir1/foo to /test/dir2/subdir2/foo. 
     // FSDirectory#verifyQuota4Rename will pass since the remaining quota is 2.
@@ -1772,9 +1814,9 @@ public class TestRenameWithSnapshots {
     // correct. Note that when loading fsimage, foo and bar will be converted 
     // back to normal INodeDirectory and INodeFile since they do not store any 
     // snapshot data
-    hdfs.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
+    hdfs.setSafeMode(SafeModeAction.ENTER);
     hdfs.saveNamespace();
-    hdfs.setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
+    hdfs.setSafeMode(SafeModeAction.LEAVE);
     cluster.shutdown();
     cluster = new MiniDFSCluster.Builder(conf).format(false)
         .numDataNodes(REPL).build();
@@ -2446,9 +2488,9 @@ public class TestRenameWithSnapshots {
     deleteSnapshot(sub1, snap6);
     deleteSnapshot(sub1, snap3);
     // save namespace and restart Namenode
-    hdfs.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
+    hdfs.setSafeMode(SafeModeAction.ENTER);
     hdfs.saveNamespace();
-    hdfs.setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
+    hdfs.setSafeMode(SafeModeAction.LEAVE);
     cluster.restartNameNode(true);
   }
 

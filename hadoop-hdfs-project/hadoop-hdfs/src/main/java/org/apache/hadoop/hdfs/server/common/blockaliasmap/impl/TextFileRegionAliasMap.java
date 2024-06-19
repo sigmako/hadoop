@@ -26,7 +26,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Iterator;
@@ -54,7 +54,7 @@ import org.apache.hadoop.io.compress.CompressionCodecFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 
 /**
  * This class is used for block maps stored as text files,
@@ -149,7 +149,7 @@ public class TextFileRegionAliasMap
     }
     OutputStream tmp = fs.create(file);
     java.io.Writer out = new BufferedWriter(new OutputStreamWriter(
-          (null == codec) ? tmp : codec.createOutputStream(tmp), "UTF-8"));
+          (null == codec) ? tmp : codec.createOutputStream(tmp), StandardCharsets.UTF_8));
     return new TextWriter(out, delim);
   }
 
@@ -380,7 +380,7 @@ public class TextFileRegionAliasMap
       FRIterator i = new FRIterator();
       try {
         BufferedReader r =
-            new BufferedReader(new InputStreamReader(createStream(), "UTF-8"));
+            new BufferedReader(new InputStreamReader(createStream(), StandardCharsets.UTF_8));
         iterators.put(i, r);
         i.pending = nextInternal(i);
       } catch (IOException e) {

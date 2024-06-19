@@ -21,28 +21,40 @@ package org.apache.hadoop.fs.azurebfs;
 import java.io.IOException;
 import java.net.URI;
 import java.util.Hashtable;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 
 import org.junit.After;
+import org.junit.Assume;
 import org.junit.Before;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.azurebfs.constants.FSOperationType;
+import org.apache.hadoop.fs.azurebfs.contracts.exceptions.AzureBlobFileSystemException;
+import org.apache.hadoop.fs.azurebfs.oauth2.AccessTokenProvider;
 import org.apache.hadoop.fs.azurebfs.security.AbfsDelegationTokenManager;
+import org.apache.hadoop.fs.azurebfs.services.AbfsClient;
+import org.apache.hadoop.fs.azurebfs.services.AbfsOutputStream;
 import org.apache.hadoop.fs.azurebfs.services.AuthType;
+import org.apache.hadoop.fs.azurebfs.services.ITestAbfsClient;
 import org.apache.hadoop.fs.azure.AzureNativeFileSystemStore;
 import org.apache.hadoop.fs.azure.NativeAzureFileSystem;
 import org.apache.hadoop.fs.azure.metrics.AzureFileSystemInstrumentation;
 import org.apache.hadoop.fs.azurebfs.constants.FileSystemUriSchemes;
 import org.apache.hadoop.fs.azurebfs.constants.AbfsHttpConstants;
 import org.apache.hadoop.fs.azurebfs.contracts.exceptions.AbfsRestOperationException;
+import org.apache.hadoop.fs.azurebfs.utils.TracingContext;
+import org.apache.hadoop.fs.azurebfs.utils.TracingHeaderFormat;
 import org.apache.hadoop.fs.azurebfs.utils.UriUtils;
 import org.apache.hadoop.fs.contract.ContractTestUtils;
+import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.io.IOUtils;
 
 import static org.apache.hadoop.fs.azure.AzureBlobStorageTestAccount.WASB_ACCOUNT_NAME_DOMAIN_SUFFIX;
@@ -75,6 +87,8 @@ public abstract class AbstractAbfsIntegrationTest extends
   private String testUrl;
   private AuthType authType;
   private boolean useConfiguredFileSystem = false;
+  private boolean usingFilesystemForSASTests = false;
+  public static final int SHORTENED_GUID_LEN = 12;
 
   protected AbstractAbfsIntegrationTest() throws Exception {
     fileSystemName = TEST_CONTAINER_PREFIX + UUID.randomUUID().toString();
@@ -92,17 +106,10 @@ public abstract class AbstractAbfsIntegrationTest extends
     abfsConfig = new AbfsConfiguration(rawConfig, accountName);
 
     authType = abfsConfig.getEnum(FS_AZURE_ACCOUNT_AUTH_TYPE_PROPERTY_NAME, AuthType.SharedKey);
+    assumeValidAuthConfigsPresent();
+
     abfsScheme = authType == AuthType.SharedKey ? FileSystemUriSchemes.ABFS_SCHEME
             : FileSystemUriSchemes.ABFS_SECURE_SCHEME;
-
-    if (authType == AuthType.SharedKey) {
-      assumeTrue("Not set: " + FS_AZURE_ACCOUNT_KEY,
-          abfsConfig.get(FS_AZURE_ACCOUNT_KEY) != null);
-      // Update credentials
-    } else {
-      assumeTrue("Not set: " + FS_AZURE_ACCOUNT_TOKEN_PROVIDER_TYPE_PROPERTY_NAME,
-          abfsConfig.get(FS_AZURE_ACCOUNT_TOKEN_PROVIDER_TYPE_PROPERTY_NAME) != null);
-    }
 
     final String abfsUrl = this.getFileSystemName() + "@" + this.getAccountName();
     URI defaultUri = null;
@@ -116,6 +123,10 @@ public abstract class AbstractAbfsIntegrationTest extends
     this.testUrl = defaultUri.toString();
     abfsConfig.set(CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY, defaultUri.toString());
     abfsConfig.setBoolean(AZURE_CREATE_REMOTE_FILESYSTEM_DURING_INITIALIZATION, true);
+    if (isAppendBlobEnabled()) {
+      String appendblobDirs = this.testUrl + "," + abfsConfig.get(FS_AZURE_CONTRACT_TEST_URI);
+      rawConfig.set(FS_AZURE_APPEND_BLOB_KEY, appendblobDirs);
+    }
     // For testing purposes, an IP address and port may be provided to override
     // the host specified in the FileSystem URI.  Also note that the format of
     // the Azure Storage Service URI changes from
@@ -127,19 +138,57 @@ public abstract class AbstractAbfsIntegrationTest extends
     } else {
       this.isIPAddress = false;
     }
+
+    // For tests, we want to enforce checksum validation so that any regressions can be caught.
+    abfsConfig.setIsChecksumValidationEnabled(true);
   }
 
+  protected boolean getIsNamespaceEnabled(AzureBlobFileSystem fs)
+      throws IOException {
+    return fs.getIsNamespaceEnabled(getTestTracingContext(fs, false));
+  }
+
+  public static TracingContext getSampleTracingContext(AzureBlobFileSystem fs,
+      boolean needsPrimaryReqId) {
+    String correlationId, fsId;
+    TracingHeaderFormat format;
+    correlationId = "test-corr-id";
+    fsId = "test-filesystem-id";
+    format = TracingHeaderFormat.ALL_ID_FORMAT;
+    return new TracingContext(correlationId, fsId,
+        FSOperationType.TEST_OP, needsPrimaryReqId, format, null);
+  }
+
+  public TracingContext getTestTracingContext(AzureBlobFileSystem fs,
+      boolean needsPrimaryReqId) {
+    String correlationId, fsId;
+    TracingHeaderFormat format;
+    if (fs == null) {
+      correlationId = "test-corr-id";
+      fsId = "test-filesystem-id";
+      format = TracingHeaderFormat.ALL_ID_FORMAT;
+    } else {
+      AbfsConfiguration abfsConf = fs.getAbfsStore().getAbfsConfiguration();
+      correlationId = abfsConf.getClientCorrelationId();
+      fsId = fs.getFileSystemId();
+      format = abfsConf.getTracingHeaderFormat();
+    }
+    return new TracingContext(correlationId, fsId,
+        FSOperationType.TEST_OP, needsPrimaryReqId, format, null);
+  }
 
   @Before
   public void setup() throws Exception {
     //Create filesystem first to make sure getWasbFileSystem() can return an existing filesystem.
     createFileSystem();
 
-    // Only live account without namespace support can run ABFS&WASB compatibility tests
-    if (!isIPAddress
-        && (abfsConfig.getAuthType(accountName) != AuthType.SAS)
-        && !abfs.getIsNamespaceEnabled()) {
-      final URI wasbUri = new URI(abfsUrlToWasbUrl(getTestUrl()));
+    // Only live account without namespace support can run ABFS&WASB
+    // compatibility tests
+    if (!isIPAddress && (abfsConfig.getAuthType(accountName) != AuthType.SAS)
+        && !abfs.getIsNamespaceEnabled(getTestTracingContext(
+            getFileSystem(), false))) {
+      final URI wasbUri = new URI(
+          abfsUrlToWasbUrl(getTestUrl(), abfsConfig.isHttpsAlwaysUsed()));
       final AzureNativeFileSystemStore azureNativeFileSystemStore =
           new AzureNativeFileSystemStore();
 
@@ -170,17 +219,23 @@ public abstract class AbstractAbfsIntegrationTest extends
       if (abfs == null) {
         return;
       }
+      TracingContext tracingContext = getTestTracingContext(getFileSystem(), false);
 
-      // Delete all uniquely created filesystem from the account
-      if (!useConfiguredFileSystem) {
+      if (usingFilesystemForSASTests) {
+        abfsConfig.set(FS_AZURE_ACCOUNT_AUTH_TYPE_PROPERTY_NAME, AuthType.SharedKey.name());
+        AzureBlobFileSystem tempFs = (AzureBlobFileSystem) FileSystem.newInstance(rawConfig);
+        tempFs.getAbfsStore().deleteFilesystem(tracingContext);
+      }
+      else if (!useConfiguredFileSystem) {
+        // Delete all uniquely created filesystem from the account
         final AzureBlobFileSystemStore abfsStore = abfs.getAbfsStore();
-        abfsStore.deleteFilesystem();
+        abfsStore.deleteFilesystem(tracingContext);
 
         AbfsRestOperationException ex = intercept(AbfsRestOperationException.class,
             new Callable<Hashtable<String, String>>() {
               @Override
               public Hashtable<String, String> call() throws Exception {
-                return abfsStore.getFilesystemProperties();
+                return abfsStore.getFilesystemProperties(tracingContext);
               }
             });
         if (FILE_SYSTEM_NOT_FOUND.getStatusCode() != ex.getStatusCode()) {
@@ -195,30 +250,64 @@ public abstract class AbstractAbfsIntegrationTest extends
     }
   }
 
+  public AccessTokenProvider getAccessTokenProvider(final AzureBlobFileSystem fs) {
+    return ITestAbfsClient.getAccessTokenProvider(fs.getAbfsStore().getClient());
+  }
 
   public void loadConfiguredFileSystem() throws Exception {
-      // disable auto-creation of filesystem
-      abfsConfig.setBoolean(AZURE_CREATE_REMOTE_FILESYSTEM_DURING_INITIALIZATION,
+    // disable auto-creation of filesystem
+    abfsConfig.setBoolean(AZURE_CREATE_REMOTE_FILESYSTEM_DURING_INITIALIZATION,
           false);
 
-      // AbstractAbfsIntegrationTest always uses a new instance of FileSystem,
-      // need to disable that and force filesystem provided in test configs.
-      String[] authorityParts =
-          (new URI(rawConfig.get(FS_AZURE_CONTRACT_TEST_URI))).getRawAuthority().split(
-        AbfsHttpConstants.AZURE_DISTRIBUTED_FILE_SYSTEM_AUTHORITY_DELIMITER, 2);
-      this.fileSystemName = authorityParts[0];
+    // AbstractAbfsIntegrationTest always uses a new instance of FileSystem,
+    // need to disable that and force filesystem provided in test configs.
+    assumeValidTestConfigPresent(this.getRawConfiguration(), FS_AZURE_CONTRACT_TEST_URI);
 
-      // Reset URL with configured filesystem
-      final String abfsUrl = this.getFileSystemName() + "@" + this.getAccountName();
-      URI defaultUri = null;
+    String[] authorityParts =
+        (new URI(rawConfig.get(FS_AZURE_CONTRACT_TEST_URI))).getRawAuthority().split(
+      AbfsHttpConstants.AZURE_DISTRIBUTED_FILE_SYSTEM_AUTHORITY_DELIMITER, 2);
+    this.fileSystemName = authorityParts[0];
 
-      defaultUri = new URI(abfsScheme, abfsUrl, null, null, null);
+    // Reset URL with configured filesystem
+    final String abfsUrl = this.getFileSystemName() + "@" + this.getAccountName();
+    URI defaultUri = null;
 
-      this.testUrl = defaultUri.toString();
-      abfsConfig.set(CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY,
-          defaultUri.toString());
+    defaultUri = new URI(abfsScheme, abfsUrl, null, null, null);
+
+    this.testUrl = defaultUri.toString();
+    abfsConfig.set(CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY,
+        defaultUri.toString());
 
     useConfiguredFileSystem = true;
+  }
+
+  /**
+   * Create a filesystem for SAS tests using the SharedKey authentication.
+   * We do not allow filesystem creation with SAS because certain type of SAS do not have
+   * required permissions, and it is not known what type of SAS is configured by user.
+   * @throws Exception
+   */
+  protected void createFilesystemForSASTests() throws Exception {
+    createFilesystemWithTestFileForSASTests(null);
+  }
+
+  /**
+   * Create a filesystem for SAS tests along with a test file using SharedKey authentication.
+   * We do not allow filesystem creation with SAS because certain type of SAS do not have
+   * required permissions, and it is not known what type of SAS is configured by user.
+   * @param testPath path of the test file.
+   * @throws Exception
+   */
+  protected void createFilesystemWithTestFileForSASTests(Path testPath) throws Exception {
+    try (AzureBlobFileSystem tempFs = (AzureBlobFileSystem) FileSystem.newInstance(rawConfig)){
+      ContractTestUtils.assertPathExists(tempFs, "This path should exist",
+          new Path("/"));
+      if (testPath != null) {
+        tempFs.create(testPath).close();
+      }
+      abfsConfig.set(FS_AZURE_ACCOUNT_AUTH_TYPE_PROPERTY_NAME, AuthType.SAS.name());
+      usingFilesystemForSASTests = true;
+    }
   }
 
   public AzureBlobFileSystem getFileSystem() throws IOException {
@@ -270,6 +359,11 @@ public abstract class AbstractAbfsIntegrationTest extends
   protected void setFileSystemName(String fileSystemName) {
     this.fileSystemName = fileSystemName;
   }
+
+  protected String getMethodName() {
+    return methodName.getMethodName();
+  }
+
   protected String getFileSystemName() {
     return fileSystemName;
   }
@@ -284,6 +378,14 @@ public abstract class AbstractAbfsIntegrationTest extends
 
   public AbfsConfiguration getConfiguration() {
     return abfsConfig;
+  }
+
+  public AbfsConfiguration getConfiguration(AzureBlobFileSystem fs) {
+    return fs.getAbfsStore().getAbfsConfiguration();
+  }
+
+  public Map<String, Long> getInstrumentationMap(AzureBlobFileSystem fs) {
+    return fs.getInstrumentationMap();
   }
 
   public Configuration getRawConfiguration() {
@@ -325,13 +427,13 @@ public abstract class AbstractAbfsIntegrationTest extends
   protected static String wasbUrlToAbfsUrl(final String wasbUrl) {
     return convertTestUrls(
         wasbUrl, FileSystemUriSchemes.WASB_SCHEME, FileSystemUriSchemes.WASB_SECURE_SCHEME, FileSystemUriSchemes.WASB_DNS_PREFIX,
-        FileSystemUriSchemes.ABFS_SCHEME, FileSystemUriSchemes.ABFS_SECURE_SCHEME, FileSystemUriSchemes.ABFS_DNS_PREFIX);
+        FileSystemUriSchemes.ABFS_SCHEME, FileSystemUriSchemes.ABFS_SECURE_SCHEME, FileSystemUriSchemes.ABFS_DNS_PREFIX, false);
   }
 
-  protected static String abfsUrlToWasbUrl(final String abfsUrl) {
+  protected static String abfsUrlToWasbUrl(final String abfsUrl, final boolean isAlwaysHttpsUsed) {
     return convertTestUrls(
         abfsUrl, FileSystemUriSchemes.ABFS_SCHEME, FileSystemUriSchemes.ABFS_SECURE_SCHEME, FileSystemUriSchemes.ABFS_DNS_PREFIX,
-        FileSystemUriSchemes.WASB_SCHEME, FileSystemUriSchemes.WASB_SECURE_SCHEME, FileSystemUriSchemes.WASB_DNS_PREFIX);
+        FileSystemUriSchemes.WASB_SCHEME, FileSystemUriSchemes.WASB_SECURE_SCHEME, FileSystemUriSchemes.WASB_DNS_PREFIX, isAlwaysHttpsUsed);
   }
 
   private static String convertTestUrls(
@@ -341,14 +443,16 @@ public abstract class AbstractAbfsIntegrationTest extends
       final String fromDnsPrefix,
       final String toNonSecureScheme,
       final String toSecureScheme,
-      final String toDnsPrefix) {
+      final String toDnsPrefix,
+      final boolean isAlwaysHttpsUsed) {
     String data = null;
-    if (url.startsWith(fromNonSecureScheme + "://")) {
+    if (url.startsWith(fromNonSecureScheme + "://") && isAlwaysHttpsUsed) {
+      data = url.replace(fromNonSecureScheme + "://", toSecureScheme + "://");
+    } else if (url.startsWith(fromNonSecureScheme + "://")) {
       data = url.replace(fromNonSecureScheme + "://", toNonSecureScheme + "://");
     } else if (url.startsWith(fromSecureScheme + "://")) {
       data = url.replace(fromSecureScheme + "://", toSecureScheme + "://");
     }
-
 
     if (data != null) {
       data = data.replace("." + fromDnsPrefix + ".",
@@ -362,6 +466,23 @@ public abstract class AbstractAbfsIntegrationTest extends
     return path;
   }
 
+  public AzureBlobFileSystemStore getAbfsStore(final AzureBlobFileSystem fs) {
+    return fs.getAbfsStore();
+  }
+
+  public AbfsClient getAbfsClient(final AzureBlobFileSystemStore abfsStore) {
+    return abfsStore.getClient();
+  }
+
+  public void setAbfsClient(AzureBlobFileSystemStore abfsStore,
+      AbfsClient client) {
+    abfsStore.setClient(client);
+  }
+
+  public Path makeQualified(Path path) throws java.io.IOException {
+    return getFileSystem().makeQualified(path);
+  }
+
   /**
    * Create a path under the test path provided by
    * {@link #getTestPath()}.
@@ -371,7 +492,20 @@ public abstract class AbstractAbfsIntegrationTest extends
    */
   protected Path path(String filepath) throws IOException {
     return getFileSystem().makeQualified(
-        new Path(getTestPath(), filepath));
+        new Path(getTestPath(), getUniquePath(filepath)));
+  }
+
+  /**
+   * Generate a unique path using the given filepath.
+   * @param filepath path string
+   * @return unique path created from filepath and a GUID
+   */
+  protected Path getUniquePath(String filepath) {
+    if (filepath.equals("/")) {
+      return new Path(filepath);
+    }
+    return new Path(filepath + StringUtils
+        .right(UUID.randomUUID().toString(), SHORTENED_GUID_LEN));
   }
 
   /**
@@ -382,5 +516,63 @@ public abstract class AbstractAbfsIntegrationTest extends
   protected AbfsDelegationTokenManager getDelegationTokenManager()
       throws IOException {
     return getFileSystem().getDelegationTokenManager();
+  }
+
+  /**
+   * Generic create File and enabling AbfsOutputStream Flush.
+   *
+   * @param fs   AzureBlobFileSystem that is initialised in the test.
+   * @param path Path of the file to be created.
+   * @return AbfsOutputStream for writing.
+   * @throws AzureBlobFileSystemException
+   */
+  protected AbfsOutputStream createAbfsOutputStreamWithFlushEnabled(
+      AzureBlobFileSystem fs,
+      Path path) throws IOException {
+    AzureBlobFileSystemStore abfss = fs.getAbfsStore();
+    abfss.getAbfsConfiguration().setDisableOutputStreamFlush(false);
+
+    return (AbfsOutputStream) abfss.createFile(path, fs.getFsStatistics(),
+        true, FsPermission.getDefault(), FsPermission.getUMask(fs.getConf()),
+        getTestTracingContext(fs, false));
+  }
+
+  /**
+   * Custom assertion for AbfsStatistics which have statistics, expected
+   * value and map of statistics and value as its parameters.
+   * @param statistic the AbfsStatistics which needs to be asserted.
+   * @param expectedValue the expected value of the statistics.
+   * @param metricMap map of (String, Long) with statistics name as key and
+   *                  statistics value as map value.
+   */
+  protected long assertAbfsStatistics(AbfsStatistic statistic,
+      long expectedValue, Map<String, Long> metricMap) {
+    assertEquals("Mismatch in " + statistic.getStatName(), expectedValue,
+        (long) metricMap.get(statistic.getStatName()));
+    return expectedValue;
+  }
+
+  protected void assumeValidTestConfigPresent(final Configuration conf, final String key) {
+    String configuredValue = conf.get(accountProperty(key, accountName),
+        conf.get(key, ""));
+    Assume.assumeTrue(String.format("Missing Required Test Config: %s.", key),
+        !configuredValue.isEmpty());
+  }
+
+  protected void assumeValidAuthConfigsPresent() {
+    final AuthType currentAuthType = getAuthType();
+    Assume.assumeFalse(
+        "SAS Based Authentication Not Allowed For Integration Tests",
+        currentAuthType == AuthType.SAS);
+    if (currentAuthType == AuthType.SharedKey) {
+      assumeValidTestConfigPresent(getRawConfiguration(), FS_AZURE_ACCOUNT_KEY);
+    } else {
+      assumeValidTestConfigPresent(getRawConfiguration(),
+          FS_AZURE_ACCOUNT_TOKEN_PROVIDER_TYPE_PROPERTY_NAME);
+    }
+  }
+
+  protected boolean isAppendBlobEnabled() {
+    return getRawConfiguration().getBoolean(FS_AZURE_TEST_APPENDBLOB_ENABLED, false);
   }
 }

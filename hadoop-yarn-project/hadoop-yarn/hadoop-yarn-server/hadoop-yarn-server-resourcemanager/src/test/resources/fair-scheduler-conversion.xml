@@ -31,18 +31,21 @@
             <schedulingPolicy>drf</schedulingPolicy>
             <queue name="john">
                 <weight>1.0</weight>
+                <minResources>memory-mb=4096, vcores=1</minResources>
                 <schedulingPolicy>drf</schedulingPolicy>
-                <aclSubmitApps>john </aclSubmitApps>
-                <aclAdministerApps>john </aclAdministerApps>
+                <aclSubmitApps>*</aclSubmitApps>
+                <aclAdministerApps>*</aclAdministerApps>
                 <maxContainerAllocation>vcores=2,memory-mb=8192</maxContainerAllocation>
             </queue>
             <queue name="joe">
                 <maxResources>memory-mb=50.0%, vcores=50.0%</maxResources>
+                <minResources>memory-mb=4096, vcores=1</minResources>
                 <weight>3.0</weight>
                 <allowPreemptionFrom>false</allowPreemptionFrom>
                 <schedulingPolicy>drf</schedulingPolicy>
                 <aclSubmitApps>joe </aclSubmitApps>
                 <aclAdministerApps>joe </aclAdministerApps>
+                <maxAMShare>0.16</maxAMShare>
             </queue>
         </queue>
         <queue name="admins" type="parent">
@@ -70,6 +73,15 @@
                 <maxAMShare>-1.0</maxAMShare>
             </queue>
         </queue>
+        <queue name="misc" type="parent">
+          <weight>0</weight>
+          <queue name="a">
+            <weight>0</weight>
+          </queue>
+          <queue name="b">
+            <weight>0</weight>
+          </queue>
+        </queue>
     </queue>
     <user name="alice">
       <maxRunningApps>30</maxRunningApps>
@@ -84,6 +96,9 @@
     <queuePlacementPolicy>
         <rule name="nestedUserQueue" create="false">
             <rule name="default" create="false" queue="admins.devs"/>
+        </rule>
+        <rule name="nestedUserQueue" create="false">
+            <rule name="primaryGroup" create="false" queue="users.devs"/>
         </rule>
         <rule name="specified" create="true"/>
         <rule name="nestedUserQueue" create="true">

@@ -27,6 +27,8 @@ import java.io.IOException;
 import java.net.URI;
 import java.text.DateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -35,8 +37,6 @@ import java.util.Set;
 
 import javax.ws.rs.core.MediaType;
 
-import mockit.Mock;
-import mockit.MockUp;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
@@ -52,7 +52,6 @@ import org.apache.hadoop.yarn.api.records.timelineservice.TimelineMetric;
 import org.apache.hadoop.yarn.api.records.timelineservice.TimelineMetric.Type;
 import org.apache.hadoop.yarn.server.metrics.ApplicationMetricsConstants;
 import org.apache.hadoop.yarn.server.timelineservice.collector.TimelineCollectorContext;
-import org.apache.hadoop.yarn.server.timelineservice.metrics.TimelineReaderMetrics;
 import org.apache.hadoop.yarn.server.timelineservice.storage.HBaseTimelineWriterImpl;
 import org.apache.hadoop.yarn.server.timelineservice.storage.common.HBaseTimelineSchemaUtils;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
@@ -60,8 +59,7 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Sets;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ImmutableMap;
 import com.sun.jersey.api.client.Client;
 import com.sun.jersey.api.client.ClientResponse;
 import com.sun.jersey.api.client.ClientResponse.Status;
@@ -76,17 +74,9 @@ public class TestTimelineReaderWebServicesHBaseStorage
   private static long dayTs =
       HBaseTimelineSchemaUtils.getTopOfTheDayTimestamp(ts);
   private static String doAsUser = "remoteuser";
-  private static final DummyTimelineReaderMetrics METRICS
-      = new DummyTimelineReaderMetrics();
 
   @BeforeClass
   public static void setupBeforeClass() throws Exception {
-    new MockUp<TimelineReaderMetrics>() {
-      @Mock
-      public TimelineReaderMetrics getInstance() {
-        return METRICS;
-      }
-    };
     setup();
     loadData();
     initialize();
@@ -262,20 +252,24 @@ public class TestTimelineReaderWebServicesHBaseStorage
     event54.setTimestamp(cTime);
     entity5.addEvent(event54);
     Map<String, Set<String>> isRelatedTo1 = new HashMap<String, Set<String>>();
-    isRelatedTo1.put("type2",
-        Sets.newHashSet("entity21", "entity22", "entity23", "entity24"));
-    isRelatedTo1.put("type4", Sets.newHashSet("entity41", "entity42"));
-    isRelatedTo1.put("type1", Sets.newHashSet("entity14", "entity15"));
-    isRelatedTo1.put("type3",
-        Sets.newHashSet("entity31", "entity35", "entity32", "entity33"));
+    isRelatedTo1.put("type2", new HashSet<>(Arrays.asList("entity21",
+        "entity22", "entity23", "entity24")));
+    isRelatedTo1.put("type4", new HashSet<>(Arrays.asList("entity41",
+        "entity42")));
+    isRelatedTo1.put("type1", new HashSet<>(Arrays.asList("entity14",
+        "entity15")));
+    isRelatedTo1.put("type3", new HashSet<>(Arrays.asList("entity31",
+        "entity35", "entity32", "entity33")));
     entity5.addIsRelatedToEntities(isRelatedTo1);
     Map<String, Set<String>> relatesTo1 = new HashMap<String, Set<String>>();
-    relatesTo1.put("type2",
-        Sets.newHashSet("entity21", "entity22", "entity23", "entity24"));
-    relatesTo1.put("type4", Sets.newHashSet("entity41", "entity42"));
-    relatesTo1.put("type1", Sets.newHashSet("entity14", "entity15"));
-    relatesTo1.put("type3",
-        Sets.newHashSet("entity31", "entity35", "entity32", "entity33"));
+    relatesTo1.put("type2", new HashSet<>(Arrays.asList("entity21",
+        "entity22", "entity23", "entity24")));
+    relatesTo1.put("type4", new HashSet<>(Arrays.asList("entity41",
+        "entity42")));
+    relatesTo1.put("type1", new HashSet<>(Arrays.asList("entity14",
+        "entity15")));
+    relatesTo1.put("type3", new HashSet<>(Arrays.asList("entity31",
+        "entity35", "entity32", "entity33")));
     entity5.addRelatesToEntities(relatesTo1);
     userEntities.addEntity(new SubApplicationEntity(entity5));
 
@@ -323,18 +317,25 @@ public class TestTimelineReaderWebServicesHBaseStorage
     event64.setTimestamp(cTime);
     entity6.addEvent(event64);
     Map<String, Set<String>> isRelatedTo2 = new HashMap<String, Set<String>>();
-    isRelatedTo2.put("type2",
-        Sets.newHashSet("entity21", "entity22", "entity23", "entity24"));
-    isRelatedTo2.put("type5", Sets.newHashSet("entity51", "entity52"));
-    isRelatedTo2.put("type6", Sets.newHashSet("entity61", "entity66"));
-    isRelatedTo2.put("type3", Sets.newHashSet("entity31"));
+    isRelatedTo2.put("type2", new HashSet<>(Arrays.asList("entity21",
+        "entity22", "entity23", "entity24")));
+    isRelatedTo2.put("type5", new HashSet<>(Arrays.asList("entity51",
+        "entity52")));
+    isRelatedTo2.put("type6", new HashSet<>(Arrays.asList("entity61",
+        "entity66")));
+    isRelatedTo2.put("type3",
+        new HashSet<>(Collections.singletonList("entity31")));
     entity6.addIsRelatedToEntities(isRelatedTo2);
     Map<String, Set<String>> relatesTo2 = new HashMap<String, Set<String>>();
     relatesTo2.put("type2",
-        Sets.newHashSet("entity21", "entity22", "entity23", "entity24"));
-    relatesTo2.put("type5", Sets.newHashSet("entity51", "entity52"));
-    relatesTo2.put("type6", Sets.newHashSet("entity61", "entity66"));
-    relatesTo2.put("type3", Sets.newHashSet("entity31"));
+        new HashSet<>(Arrays.asList("entity21", "entity22", "entity23",
+            "entity24")));
+    relatesTo2.put("type5", new HashSet<>(Arrays.asList("entity51",
+        "entity52")));
+    relatesTo2.put("type6", new HashSet<>(Arrays.asList("entity61",
+        "entity66")));
+    relatesTo2.put("type3",
+        new HashSet<>(Collections.singletonList("entity31")));
     entity6.addRelatesToEntities(relatesTo2);
     userEntities.addEntity(new SubApplicationEntity(entity6));
 
@@ -2594,6 +2595,22 @@ public class TestTimelineReaderWebServicesHBaseStorage
           "apps?fields=ALL&metricslimit=100&metricstimestart=" +
           (ts - 100000) + "&metricstimeend=" + (ts - 200000));
       verifyHttpResponse(client, uri, Status.BAD_REQUEST);
+    } finally {
+      client.destroy();
+    }
+  }
+
+  @Test
+  public void testGetEntityWithSystemEntityType() throws Exception {
+    Client client = createClient();
+    try {
+      URI uri = URI.create("http://localhost:" + getServerPort() + "/ws/v2/" +
+          "timeline/apps/application_1111111111_1111/" +
+          "entities/YARN_APPLICATION");
+      ClientResponse resp = getResponse(client, uri);
+      Set<TimelineEntity> entities =
+          resp.getEntity(new GenericType<Set<TimelineEntity>>(){});
+      assertEquals(0, entities.size());
     } finally {
       client.destroy();
     }

@@ -21,7 +21,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.security.Principal;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map.Entry;
 import java.util.Set;
 
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.records.AuxServiceRecord;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.records.AuxServiceRecords;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.resourceplugin.ResourcePlugin;
@@ -55,7 +56,6 @@ import javax.ws.rs.core.Response.ResponseBuilder;
 import javax.ws.rs.core.Response.Status;
 import javax.ws.rs.core.StreamingOutput;
 import javax.ws.rs.core.UriInfo;
-import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
@@ -490,7 +490,7 @@ public class NMWebServices {
             }
             sb.append(StringUtils.repeat("*", endOfFile.length() + 50)
                 + "\n\n");
-            os.write(sb.toString().getBytes(Charset.forName("UTF-8")));
+            os.write(sb.toString().getBytes(StandardCharsets.UTF_8));
             // If we have aggregated logs for this container,
             // output the aggregation logs as well.
             ApplicationId appId = containerId.getApplicationAttemptId()
@@ -518,7 +518,7 @@ public class NMWebServices {
               }
             }
           } finally {
-            IOUtils.closeQuietly(fis);
+            IOUtils.closeStream(fis);
           }
         }
       };

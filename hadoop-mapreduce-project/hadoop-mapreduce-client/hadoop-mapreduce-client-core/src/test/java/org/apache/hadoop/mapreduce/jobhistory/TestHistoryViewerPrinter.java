@@ -24,7 +24,10 @@ import org.apache.hadoop.mapreduce.Counters;
 import org.apache.hadoop.mapreduce.JobID;
 import org.apache.hadoop.mapreduce.JobStatus;
 import org.apache.hadoop.mapreduce.TaskType;
+import org.assertj.core.api.Assertions;
+import org.junit.AfterClass;
 import org.junit.Assert;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.skyscreamer.jsonassert.JSONAssert;
 import org.skyscreamer.jsonassert.JSONCompareMode;
@@ -33,8 +36,11 @@ import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.TimeZone;
+import java.util.Locale;
 
 public class TestHistoryViewerPrinter {
 
@@ -42,6 +48,18 @@ public class TestHistoryViewerPrinter {
       LoggerFactory.getLogger(TestHistoryViewerPrinter.class);
 
   private final String LINE_SEPARATOR = System.lineSeparator();
+
+  private static final Locale DEFAULT_LOCALE = Locale.getDefault();
+
+  @BeforeClass
+  public static void setUp() throws Exception {
+    Locale.setDefault(Locale.ENGLISH);
+  }
+
+  @AfterClass
+  public static void tearDown() throws Exception {
+    Locale.setDefault(DEFAULT_LOCALE);
+  }
 
   @Test
   public void testHumanPrinter() throws Exception {
@@ -145,6 +163,13 @@ public class TestHistoryViewerPrinter {
         LINE_SEPARATOR, outStr);
   }
 
+  private static void assertEqualLines(String str1, String str2) {
+    final List<String> linesFromStr1 = Arrays.asList(str1.trim().split("\n"));
+    final List<String> linesFromStr2 = Arrays.asList(str2.trim().split("\n"));
+
+    Assertions.assertThat(linesFromStr1).containsExactlyInAnyOrderElementsOf(linesFromStr2);
+  }
+
   @Test
   public void testHumanPrinterAll() throws Exception {
     JobHistoryParser.JobInfo job = createJobInfo();
@@ -153,7 +178,7 @@ public class TestHistoryViewerPrinter {
             TimeZone.getTimeZone("GMT"));
     String outStr = run(printer);
     if (System.getProperty("java.version").startsWith("1.7")) {
-      Assert.assertEquals("\n" +
+      assertEqualLines("\n" +
           "Hadoop job: job_1317928501754_0001\n" +
           "=====================================\n" +
           "User: rkanter\n" +
@@ -341,7 +366,7 @@ public class TestHistoryViewerPrinter {
           "localhost\ttask_1317928501754_0001_m_000002, " +
           LINE_SEPARATOR, outStr);
     } else {
-      Assert.assertEquals("\n" +
+      assertEqualLines("\n" +
           "Hadoop job: job_1317928501754_0001\n" +
           "=====================================\n" +
           "User: rkanter\n" +

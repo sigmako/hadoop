@@ -12,7 +12,7 @@
   limitations under the License. See accompanying LICENSE file.
 -->
 
-# Testing the S3A filesystem client and its features, including S3Guard
+# Testing the S3A filesystem client and its features
 
 <!-- MACRO{toc|fromDepth=0|toDepth=3} -->
 
@@ -22,9 +22,6 @@ connection to S3 to interact with a bucket.  Unit test suites follow the naming
 convention `Test*.java`.  Integration tests follow the naming convention
 `ITest*.java`.
 
-Due to eventual consistency, integration tests may fail without reason.
-Transient failures, which no longer occur upon rerunning the test, should thus
-be ignored.
 
 ## <a name="policy"></a> Policy for submitting patches which affect the `hadoop-aws` module.
 
@@ -46,7 +43,7 @@ is a more specific lie and harder to make. And, if you get caught out: you
 lose all credibility with the project.
 
 You don't need to test from a VM within the AWS infrastructure; with the
-`-Dparallel=tests` option the non-scale tests complete in under ten minutes.
+`-Dparallel-tests` option the non-scale tests complete in under twenty minutes.
 Because the tests clean up after themselves, they are also designed to be low
 cost. It's neither hard nor expensive to run the tests; if you can't,
 there's no guarantee your patch works. The reviewers have enough to do, and
@@ -55,7 +52,6 @@ make for a slow iterative development.
 
 Please: run the tests. And if you don't, we are sorry for declining your
 patch, but we have to.
-
 
 ### What if there's an intermittent failure of a test?
 
@@ -147,10 +143,10 @@ Example:
 </configuration>
 ```
 
-### <a name="encryption"></a> Configuring S3a Encryption
+## <a name="encryption"></a> Configuring S3a Encryption
 
 For S3a encryption tests to run correctly, the
-`fs.s3a.server-side-encryption.key` must be configured in the s3a contract xml
+`fs.s3a.encryption.key` must be configured in the s3a contract xml
 file or `auth-keys.xml` file with a AWS KMS encryption key arn as this value is
 different for each AWS KMS. Please note this KMS key should be created in the
 same region as your S3 bucket. Otherwise, you may get `KMS.NotFoundException`.
@@ -159,14 +155,36 @@ Example:
 
 ```xml
 <property>
-  <name>fs.s3a.server-side-encryption.key</name>
+  <name>fs.s3a.encryption.key</name>
   <value>arn:aws:kms:us-west-2:360379543683:key/071a86ff-8881-4ba0-9230-95af6d01ca01</value>
 </property>
 ```
 
 You can also force all the tests to run with a specific SSE encryption method
-by configuring the property `fs.s3a.server-side-encryption-algorithm` in the s3a
+by configuring the property `fs.s3a.encryption.algorithm` in the s3a
 contract file.
+
+### <a name="default_encyption"></a> Default Encryption
+
+Buckets can be configured with [default encryption](https://docs.aws.amazon.com/AmazonS3/latest/dev/bucket-encryption.html)
+on the AWS side. Some S3AFileSystem tests are skipped when default encryption is
+enabled due to unpredictability in how [ETags](https://docs.aws.amazon.com/AmazonS3/latest/API/RESTCommonResponseHeaders.html)
+are generated.
+
+### Disabling the encryption tests
+
+If the S3 store/storage class doesn't support server-side-encryption, these will fail. They
+can be turned off.
+
+```xml
+<property>
+  <name>test.fs.s3a.encryption.enabled</name>
+  <value>false</value>
+</property>
+```
+
+Encryption is only used for those specific test suites with `Encryption` in
+their classname.
 
 ## <a name="running"></a> Running the Tests
 
@@ -234,36 +252,28 @@ define the target region in `auth-keys.xml`.
 
 ```xml
 <property>
-  <name>fs.s3a.endpoint</name>
-  <value>s3.eu-central-1.amazonaws.com</value>
+  <name>fs.s3a.endpoint.region</name>
+  <value>eu-central-1</value>
 </property>
 ```
-
-Alternatively you can use endpoints defined in [core-site.xml](../../../../test/resources/core-site.xml).
-
-```xml
-<property>
-  <name>fs.s3a.endpoint</name>
-  <value>${frankfurt.endpoint}</value>
-</property>
-```
-
-This is used for all tests expect for scale tests using a Public CSV.gz file
-(see below)
 
 ### <a name="csv"></a> CSV Data Tests
 
 The `TestS3AInputStreamPerformance` tests require read access to a multi-MB
-text file. The default file for these tests is one published by amazon,
-[s3a://landsat-pds.s3.amazonaws.com/scene_list.gz](http://landsat-pds.s3.amazonaws.com/scene_list.gz).
-This is a gzipped CSV index of other files which amazon serves for open use.
+text file. The default file for these tests is a public one.
+`s3a://noaa-cors-pds/raw/2023/001/akse/AKSE001a.23_.gz`
+from the [NOAA Continuously Operating Reference Stations (CORS) Network (NCN)](https://registry.opendata.aws/noaa-ncn/)
+
+Historically it was required to be a `csv.gz` file to validate S3 Select
+support. Now that S3 Select support has been removed, other large files
+may be used instead.
 
 The path to this object is set in the option `fs.s3a.scale.test.csvfile`,
 
 ```xml
 <property>
   <name>fs.s3a.scale.test.csvfile</name>
-  <value>s3a://landsat-pds/scene_list.gz</value>
+  <value>s3a://noaa-cors-pds/raw/2023/001/akse/AKSE001a.23_.gz</value>
 </property>
 ```
 
@@ -273,21 +283,32 @@ is hosted in Amazon's US-east datacenter.
 1. If the data cannot be read for any reason then the test will fail.
 1. If the property is set to a different path, then that data must be readable
 and "sufficiently" large.
+1. If a `.gz` file, expect decompression-related test failures.
 
 (the reason the space or newline is needed is to add "an empty entry"; an empty
 `<value/>` would be considered undefined and pick up the default)
 
-Of using a test file in an S3 region requiring a different endpoint value
-set in `fs.s3a.endpoint`, a bucket-specific endpoint must be defined.
-For the default test dataset, hosted in the `landsat-pds` bucket, this is:
+
+If using a test file in a different AWS S3 region then
+a bucket-specific region must be defined.
+For the default test dataset, hosted in the `noaa-cors-pds` bucket, this is:
 
 ```xml
-<property>
-  <name>fs.s3a.bucket.landsat-pds.endpoint</name>
-  <value>s3.amazonaws.com</value>
-  <description>The endpoint for s3a://landsat-pds URLs</description>
-</property>
+  <property>
+    <name>fs.s3a.bucket.noaa-cors-pds.endpoint.region</name>
+    <value>us-east-1</value>
+  </property>
 ```
+
+### <a name="access"></a> Testing Access Point Integration
+
+S3a supports using Access Point ARNs to access data in S3. If you think your changes affect VPC
+integration, request signing, ARN manipulation, or any code path that deals with the actual
+sending and retrieving of data to/from S3, make sure you run the entire integration test suite with
+this feature enabled.
+
+Check out [our documentation](./index.html#accesspoints) for steps on how to enable this feature. To
+create access points for your S3 bucket you can use the AWS Console or CLI.
 
 ## <a name="reporting"></a> Viewing Integration Test Reports
 
@@ -302,7 +323,7 @@ mvn surefire-report:failsafe-report-only
 ## <a name="versioning"></a> Testing Versioned Stores
 
 Some tests (specifically some in `ITestS3ARemoteFileChanged`) require
-a versioned bucket for full test coverage as well as S3Guard being enabled.
+a versioned bucket for full test coverage.
 
 To enable versioning in a bucket.
 
@@ -317,6 +338,65 @@ Once a bucket is converted to being versioned, it cannot be converted back
 to being unversioned.
 
 
+## <a name="marker"></a> Testing Different Marker Retention Policy
+
+Hadoop supports [different policies for directory marker retention](directory_markers.html)
+-essentially the classic "delete" and the higher-performance "keep" options; "authoritative"
+is just "keep" restricted to a part of the bucket.
+
+
+Example: test with `markers=keep`
+
+```
+mvn verify -Dparallel-tests -DtestsThreadCount=4 -Dmarkers=keep
+```
+
+This is the default and does not need to be explicitly set.
+
+Example: test with `markers=delete`
+
+```
+mvn verify -Dparallel-tests -DtestsThreadCount=4 -Dmarkers=delete
+```
+
+Example: test with `markers=authoritative`
+
+```
+mvn verify -Dparallel-tests -DtestsThreadCount=4 -Dmarkers=authoritative
+```
+
+This final option is of limited use unless paths in the bucket have actually been configured to be
+of mixed status; unless anything is set up then the outcome should equal that of "delete"
+
+### Enabling auditing of markers
+
+To enable an audit of the output directory of every test suite,
+enable the option `fs.s3a.directory.marker.audit`
+
+```
+-Dfs.s3a.directory.marker.audit=true
+```
+
+When set, if the marker policy is to delete markers under the test output directory, then
+the marker tool audit command will be run. This will fail if a marker was found.
+
+This adds extra overhead to every operation, but helps verify that the connector is
+not keeping markers where it needs to be deleting them -and hence backwards compatibility
+is maintained.
+
+## <a name="enabling-prefetch"></a> Enabling prefetch for all tests
+
+The tests are run with prefetch if the `prefetch` property is set in the
+maven build. This can be combined with the scale tests as well.
+
+```bash
+mvn verify -Dprefetch
+
+mvn verify -Dparallel-tests -Dprefetch -DtestsThreadCount=8
+
+mvn verify -Dparallel-tests -Dprefetch -Dscale -DtestsThreadCount=8
+```
+
 ## <a name="scale"></a> Scale Tests
 
 There are a set of tests designed to measure the scalability and performance
@@ -328,11 +408,6 @@ This makes them a foundational part of the benchmarking.
 By their very nature they are slow. And, as their execution time is often
 limited by bandwidth between the computer running the tests and the S3 endpoint,
 parallel execution does not speed these tests up.
-
-***Note: Running scale tests with `-Ds3guard` and `-Ddynamo` requires that
-you use a private, testing-only DynamoDB table.*** The tests do disruptive
-things such as deleting metadata and setting the provisioned throughput
-to very low values.
 
 ### <a name="enabling-scale"></a> Enabling the Scale Tests
 
@@ -464,12 +539,51 @@ Otherwise, set a large timeout in `fs.s3a.scale.test.timeout`
 The tests are executed in an order to only clean up created files after
 the end of all the tests. If the tests are interrupted, the test data will remain.
 
-## <a name="alternate_s3"></a> Load tests.
+## <a name="CI"/> Testing through continuous integration
 
-Some are designed to overload AWS services with more
+### Parallel CI builds.
+For CI testing of the module, including the integration tests,
+it is generally necessary to support testing multiple PRs simultaneously.
+
+To do this
+1. A job ID must be supplied in the `job.id` property, so each job works on an isolated directory
+   tree. This should be a number or unique string, which will be used within a path element, so
+   must only contain characters valid in an S3/hadoop path element.
+2. Root directory tests need to be disabled by setting `fs.s3a.root.tests.enabled` to
+   `false`, either in the command line to maven or in the XML configurations.
+
+```
+mvn verify -T 1C -Dparallel-tests -DtestsThreadCount=14 -Dscale -Dfs.s3a.root.tests.enabled=false -Djob.id=001
+```
+
+This parallel execution feature is only for isolated builds sharing a single S3 bucket; it does
+not support parallel builds and tests from the same local source tree.
+
+Without the root tests being executed, set up a scheduled job to purge the test bucket of all
+data on a regular basis, to keep costs down.
+The easiest way to do this is to have a bucket lifecycle rule for the bucket to delete all files more than a few days old,
+alongside one to abort all pending uploads more than 24h old.
+
+
+### Securing CI builds
+
+It's clearly unsafe to have CI infrastructure testing PRs submitted to apache github account
+with AWS credentials -which is why it isn't done by the Yetus-initiated builds.
+
+Anyone doing this privately should:
+* Review incoming patches before triggering the tests.
+* Have a dedicated IAM role with restricted access to the test bucket, any KMS keys used, and the
+  external bucket containing the CSV test file.
+* Have a build process which generates short-lived session credentials for this role.
+* Run the tests in an EC2 VM/container which collects the restricted IAM credentials
+  from the IAM instance/container credentials provider.
+
+## <a name="load"></a> Load tests.
+
+Some tests are designed to overload AWS services with more
 requests per second than an AWS account is permitted.
 
-The operation of these test maybe observable to other users of the same
+The operation of these tests may be observable to other users of the same
 account -especially if they are working in the AWS region to which the
 tests are targeted.
 
@@ -481,32 +595,70 @@ They do not run automatically: they must be explicitly run from the command line
 
 Look in the source for these and reads the Javadocs before executing.
 
-## <a name="alternate_s3"></a> Testing against non AWS S3 endpoints.
+Note: one fear here was that asking for two many session/role credentials in a short period
+of time would actually lock an account out of a region. It doesn't: it simply triggers
+throttling of STS requests.
 
-The S3A filesystem is designed to work with storage endpoints which implement
+## <a name="alternate_s3"></a> Testing against non-AWS S3 Stores.
+
+The S3A filesystem is designed to work with S3 stores which implement
 the S3 protocols to the extent that the amazon S3 SDK is capable of talking
 to it. We encourage testing against other filesystems and submissions of patches
 which address issues. In particular, we encourage testing of Hadoop release
 candidates, as these third-party endpoints get even less testing than the
 S3 endpoint itself.
 
+The core XML settings to turn off tests of features unavailable
+on third party stores.
 
-### Disabling the encryption tests
+```xml
+  <property>
+    <name>test.fs.s3a.encryption.enabled</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>test.fs.s3a.create.storage.class.enabled</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>test.fs.s3a.sts.enabled</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>test.fs.s3a.create.create.acl.enabled</name>
+    <value>false</value>
+  </property>
+```
 
-If the endpoint doesn't support server-side-encryption, these will fail. They
-can be turned off.
+See [Third Party Stores](third_party_stores.html) for more on this topic.
+
+### Public datasets used in tests
+
+Some tests rely on the presence of existing public datasets available on Amazon S3.
+You may find a number of these in `org.apache.hadoop.fs.s3a.test.PublicDatasetTestUtils`.
+
+When testing against an endpoint which is not part of Amazon S3's standard commercial partition
+(`aws`) such as third-party implementations or AWS's China regions, you should replace these
+configurations with an empty space (` `) to disable the tests or an existing path in your object
+store that supports these tests.
+
+An example of this might be the MarkerTools tests which require a bucket with a large number of
+objects or the requester pays tests that require requester pays to be enabled for the bucket.
+
+
+### Disabling the storage class tests
+
+When running storage class tests against third party object store that doesn't support
+S3 storage class, these tests might fail. They can be disabled.
 
 ```xml
 <property>
-  <name>test.fs.s3a.encryption.enabled</name>
+  <name>test.fs.s3a.create.storage.class.enabled</name>
   <value>false</value>
 </property>
 ```
 
-Encryption is only used for those specific test suites with `Encryption` in
-their classname.
-
-### Configuring the CSV file read tests**
+### Configuring the CSV file read tests
 
 To test on alternate infrastructures supporting
 the same APIs, the option `fs.s3a.scale.test.csvfile` must either be
@@ -523,22 +675,49 @@ the `fs.s3a.scale.test.csvfile` option set to its path.
 (yes, the space is necessary. The Hadoop `Configuration` class treats an empty
 value as "do not override the default").
 
-### Turning off S3 Select
+### <a name="enabling-prefetch"></a> Enabling prefetch for all tests
 
-The S3 select tests are skipped when the S3 endpoint doesn't support S3 Select.
+The tests are run with prefetch if the `prefetch` property is set in the
+maven build. This can be combined with the scale tests as well.
+
+
+If `ITestS3AContractGetFileStatusV1List` fails with any error about unsupported API.
+```xml
+  <property>
+    <name>test.fs.s3a.list.v1.enabled</name>
+    <value>false</value>
+  </property>
+```
+
+Note: there's no equivalent for turning off v2 listing API, which all stores are now
+required to support.
+
+
+### Testing Requester Pays
+
+By default, the requester pays tests will look for a bucket that exists on Amazon S3
+in us-east-1.
+
+If the endpoint does support requester pays, you can specify an alternative object.
+The test only requires an object of at least a few bytes in order
+to check that lists and basic reads work.
 
 ```xml
 <property>
-  <name>fs.s3a.select.enabled</name>
-  <value>false</value>
+  <name>test.fs.s3a.requester.pays.file</name>
+  <value>s3a://my-req-pays-enabled-bucket/on-another-endpoint.json</value>
 </property>
 ```
 
-If your endpoint doesn't support that feature, this option should be in
-your `core-site.xml` file, so that trying to use S3 select fails fast with
-a meaningful error ("S3 Select not supported") rather than a generic Bad Request
-exception.
+If the endpoint does not support requester pays, you can also disable the tests by configuring
+the test URI as a single space.
 
+```xml
+<property>
+  <name>test.fs.s3a.requester.pays.file</name>
+  <value> </value>
+</property>
+```
 
 ### Testing Session Credentials
 
@@ -579,6 +758,20 @@ The default is ""; meaning "use the amazon default endpoint" (`sts.amazonaws.com
 Consult the [AWS documentation](https://docs.aws.amazon.com/general/latest/gr/rande.html#sts_region)
 for the full list of locations.
 
+### Disabling Content Encoding tests
+
+Tests in `ITestS3AContentEncoding` may need disabling
+```xml
+  <property>
+    <name>test.fs.s3a.content.encoding.enabled</name>
+    <value>false</value>
+  </property>
+```
+### Tests which may fail (and which you can ignore)
+
+* `ITestS3AContractMultipartUploader` tests `testMultipartUploadAbort` and `testSingleUpload` raising `FileNotFoundException`
+* `ITestS3AMiscOperations.testEmptyFileChecksums`: if the FS encrypts data always.
+
 ## <a name="debugging"></a> Debugging Test failures
 
 Logging at debug level is the standard way to provide more diagnostics output;
@@ -588,12 +781,8 @@ after setting this rerun the tests
 log4j.logger.org.apache.hadoop.fs.s3a=DEBUG
 ```
 
-There are also some logging options for debug logging of the AWS client
-```properties
-log4j.logger.com.amazonaws=DEBUG
-log4j.logger.com.amazonaws.http.conn.ssl=INFO
-log4j.logger.com.amazonaws.internal=INFO
-```
+There are also some logging options for debug logging of the AWS client;
+consult the file.
 
 There is also the option of enabling logging on a bucket; this could perhaps
 be used to diagnose problems from that end. This isn't something actively
@@ -709,19 +898,19 @@ the tests become skipped, rather than fail with a trace which is really a false 
 The ordered test case mechanism of `AbstractSTestS3AHugeFiles` is probably
 the most elegant way of chaining test setup/teardown.
 
-Regarding reusing existing data, we tend to use the landsat archive of
+Regarding reusing existing data, we tend to use the noaa-cors-pds archive of
 AWS US-East for our testing of input stream operations. This doesn't work
 against other regions, or with third party S3 implementations. Thus the
 URL can be overridden for testing elsewhere.
 
 
-### Works With Other S3 Endpoints
+### Works With Other S3 Stored
 
 Don't assume AWS S3 US-East only, do allow for working with external S3 implementations.
 Those may be behind the latest S3 API features, not support encryption, session
 APIs, etc.
 
-They won't have the same CSV test files as some of the input tests rely on.
+They won't have the same CSV/large test files as some of the input tests rely on.
 Look at `ITestS3AInputStreamPerformance` to see how tests can be written
 to support the declaration of a specific large test file on alternate filesystems.
 
@@ -778,6 +967,8 @@ modifying the config. As an example from `AbstractTestS3AEncryption`:
 protected Configuration createConfiguration() {
   Configuration conf = super.createConfiguration();
   S3ATestUtils.disableFilesystemCaching(conf);
+  removeBaseAndBucketOverrides(conf,
+      SERVER_SIDE_ENCRYPTION_ALGORITHM);  
   conf.set(Constants.SERVER_SIDE_ENCRYPTION_ALGORITHM,
           getSSEAlgorithm().getMethod());
   return conf;
@@ -825,46 +1016,22 @@ sequential one afterwards. The IO heavy ones must also be subclasses of
 `S3AScaleTestBase` and so only run if the system/maven property
 `fs.s3a.scale.test.enabled` is true.
 
-## Individual test cases can be run in an IDE
+### Individual test cases can be run in an IDE
 
 This is invaluable for debugging test failures.
 
 How to set test options in your hadoop configuration rather
 than on the maven command line:
 
-As an example let's assume you want to run S3Guard integration tests using IDE.
-Please add the following properties in
-`hadoop-tools/hadoop-aws/src/test/resources/auth-keys.xml` file.
- Local configuration is stored in auth-keys.xml. The changes to this file won't be committed,
- so it's safe to store local config here.
-```xml
-<property>
-  <name>fs.s3a.s3guard.test.enabled</name>
-  <value>true</value>
-</property>
-```
-
-```xml
-<property>
-  <name>fs.s3a.s3guard.test.implementation</name>
-  <value>dynamo</value>
-</property>
-```
-
-Warning : Although this is easier for IDE debugging setups, once you do this,
-you cannot change configurations on the mvn command line, such as testing without s3guard.
-
 ### Keeping AWS Costs down
 
-Most of the base S3 tests are designed to use public AWS data
-(the landsat-pds bucket) for read IO, so you don't have to pay for bytes
-downloaded or long term storage costs. The scale tests do work with more data
+Most of the base S3 tests are designed delete files after test runs,
+so you don't have to pay for storage costs. The scale tests do work with more data
 so will cost more as well as generally take more time to execute.
 
 You are however billed for
 
 1. Data left in S3 after test runs.
-2. DynamoDB capacity reserved by S3Guard tables.
 3. HTTP operations on files (HEAD, LIST, GET).
 4. In-progress multipart uploads from bulk IO or S3A committer tests.
 5. Encryption/decryption using AWS KMS keys.
@@ -872,8 +1039,6 @@ You are however billed for
 The GET/decrypt costs are incurred on each partial read of a file,
 so random IO can cost more than sequential IO; the speedup of queries with
 columnar data usually justifies this.
-
-The DynamoDB costs come from the number of entries stores and the allocated capacity.
 
 How to keep costs down
 
@@ -885,19 +1050,7 @@ it can be manually done:
 * Abort all outstanding uploads:
 
       hadoop s3guard uploads -abort -force s3a://test-bucket/
-* If you don't need it, destroy the S3Guard DDB table.
 
-      hadoop s3guard destroy s3a://test-bucket/
-
-The S3Guard tests will automatically create the Dynamo DB table in runs with
-`-Ds3guard -Ddynamo` set; default capacity of these buckets
-tests is very small; it keeps costs down at the expense of IO performance
-and, for test runs in or near the S3/DDB stores, throttling events.
-
-If you want to manage capacity, use `s3guard set-capacity` to increase it
-(performance) or decrease it (costs).
-For remote `hadoop-aws` test runs, the read/write capacities of "0" each should suffice;
-increase it if parallel test run logs warn of throttling.
 
 ## <a name="tips"></a> Tips
 
@@ -921,420 +1074,19 @@ using an absolute XInclude reference to it.
 
 ## <a name="failure-injection"></a>Failure Injection
 
-**Warning do not enable any type of failure injection in production.  The
-following settings are for testing only.**
+S3A provides an "Inconsistent S3 Client Factory" that can be used to
+simulate throttling by injecting random failures on S3 client requests.
 
-One of the challenges with S3A integration tests is the fact that S3 is an
-eventually-consistent storage system.  In practice, we rarely see delays in
-visibility of recently created objects both in listings (`listStatus()`) and
-when getting a single file's metadata (`getFileStatus()`). Since this behavior
-is rare and non-deterministic, thorough integration testing is challenging.
 
-To address this, S3A supports a shim layer on top of the `AmazonS3Client`
-class which artificially delays certain paths from appearing in listings.
-This is implemented in the class `InconsistentAmazonS3Client`.
+**Note**
 
-## Simulating List Inconsistencies
+In previous releases, this factory could also be used to simulate
+inconsistencies during testing of S3Guard. Now that S3 is consistent,
+injecting inconsistency is no longer needed during testing.
 
-### Enabling the InconsistentAmazonS3CClient
 
-There are two ways of enabling the `InconsistentAmazonS3Client`: at
-config-time, or programmatically. For an example of programmatic test usage,
-see `ITestS3GuardListConsistency`.
 
-To enable the fault-injecting client via configuration, switch the
-S3A client to use the "Inconsistent S3 Client Factory" when connecting to
-S3:
-
-```xml
-<property>
-  <name>fs.s3a.s3.client.factory.impl</name>
-  <value>org.apache.hadoop.fs.s3a.InconsistentS3ClientFactory</value>
-</property>
-```
-
-The inconsistent client works by:
-
-1. Choosing which objects will be "inconsistent" at the time the object is
-created or deleted.
-2. When `listObjects()` is called, any keys that we have marked as
-inconsistent above will not be returned in the results (until the
-configured delay has elapsed). Similarly, deleted items may be *added* to
-missing results to delay the visibility of the delete.
-
-There are two ways of choosing which keys (filenames) will be affected: By
-substring, and by random probability.
-
-```xml
-<property>
-  <name>fs.s3a.failinject.inconsistency.key.substring</name>
-  <value>DELAY_LISTING_ME</value>
-</property>
-
-<property>
-  <name>fs.s3a.failinject.inconsistency.probability</name>
-  <value>1.0</value>
-</property>
-```
-
-By default, any object which has the substring "DELAY_LISTING_ME" in its key
-will subject to delayed visibility. For example, the path
-`s3a://my-bucket/test/DELAY_LISTING_ME/file.txt` would match this condition.
-To match all keys use the value "\*" (a single asterisk). This is a special
-value: *We don't support arbitrary wildcards.*
-
-The default probability of delaying an object is 1.0. This means that *all*
-keys that match the substring will get delayed visibility. Note that we take
-the logical *and* of the two conditions (substring matches *and* probability
-random chance occurs). Here are some example configurations:
-
-```
-| substring | probability |  behavior                                  |
-|-----------|-------------|--------------------------------------------|
-|           | 0.001       | An empty <value> tag in .xml config will   |
-|           |             | be interpreted as unset and revert to the  |
-|           |             | default value, "DELAY_LISTING_ME"          |
-|           |             |                                            |
-| *         | 0.001       | 1/1000 chance of *any* key being delayed.  |
-|           |             |                                            |
-| delay     | 0.01        | 1/100 chance of any key containing "delay" |
-|           |             |                                            |
-| delay     | 1.0         | All keys containing substring "delay" ..   |
-```
-
-You can also configure how long you want the delay in visibility to last.
-The default is 5000 milliseconds (five seconds).
-
-```xml
-<property>
-  <name>fs.s3a.failinject.inconsistency.msec</name>
-  <value>5000</value>
-</property>
-```
-
-Future versions of this client will introduce new failure modes,
-with simulation of S3 throttling exceptions the next feature under
-development.
-
-### Limitations of Inconsistency Injection
-
-Although `InconsistentAmazonS3Client` can delay the visibility of an object
-or parent directory, it does not prevent the key of that object from
-appearing in all prefix searches. For example, if we create the following
-object with the default configuration above, in an otherwise empty bucket:
-
-```
-s3a://bucket/a/b/c/DELAY_LISTING_ME
-```
-
-Then the following paths will still be visible as directories (ignoring
-possible real-world inconsistencies):
-
-```
-s3a://bucket/a
-s3a://bucket/a/b
-```
-
-Whereas `getFileStatus()` on the following *will* be subject to delayed
-visibility (`FileNotFoundException` until delay has elapsed):
-
-```
-s3a://bucket/a/b/c
-s3a://bucket/a/b/c/DELAY_LISTING_ME
-```
-
-In real-life S3 inconsistency, however, we expect that all the above paths
-(including `a` and `b`) will be subject to delayed visibility.
-
-### Using the `InconsistentAmazonS3CClient` in downstream integration tests
-
-The inconsistent client is shipped in the `hadoop-aws` JAR, so it can
-be used in applications which work with S3 to see how they handle
-inconsistent directory listings.
-
-## <a name="s3guard"></a> Testing S3Guard
-
-[S3Guard](./s3guard.html) is an extension to S3A which adds consistent metadata
-listings to the S3A client. As it is part of S3A, it also needs to be tested.
-
-The basic strategy for testing S3Guard correctness consists of:
-
-1. MetadataStore Contract tests.
-
-    The MetadataStore contract tests are inspired by the Hadoop FileSystem and
-    `FileContext` contract tests.  Each implementation of the `MetadataStore` interface
-    subclasses the `MetadataStoreTestBase` class and customizes it to initialize
-    their MetadataStore.  This test ensures that the different implementations
-    all satisfy the semantics of the MetadataStore API.
-
-2. Running existing S3A unit and integration tests with S3Guard enabled.
-
-    You can run the S3A integration tests on top of S3Guard by configuring your
-    `MetadataStore` in your
-    `hadoop-tools/hadoop-aws/src/test/resources/core-site.xml` or
-    `hadoop-tools/hadoop-aws/src/test/resources/auth-keys.xml` files.
-    Next run the S3A integration tests as outlined in the *Running the Tests* section
-    of the [S3A documentation](./index.html)
-
-3. Running fault-injection tests that test S3Guard's consistency features.
-
-    The `ITestS3GuardListConsistency` uses failure injection to ensure
-    that list consistency logic is correct even when the underlying storage is
-    eventually consistent.
-
-    The integration test adds a shim above the Amazon S3 Client layer that injects
-    delays in object visibility.
-
-    All of these tests will be run if you follow the steps listed in step 2 above.
-
-    No charges are incurred for using this store, and its consistency
-    guarantees are that of the underlying object store instance. <!-- :) -->
-
-### Testing S3A with S3Guard Enabled
-
-All the S3A tests which work with a private repository can be configured to
-run with S3Guard by using the `s3guard` profile. When set, this will run
-all the tests with local memory for the metadata set to "non-authoritative" mode.
-
-```bash
-mvn -T 1C verify -Dparallel-tests -DtestsThreadCount=6 -Ds3guard
-```
-
-When the `s3guard` profile is enabled, following profiles can be specified:
-
-* `dynamo`: use an AWS-hosted DynamoDB table; creating the table if it does
-  not exist. You will have to pay the bills for DynamoDB web service.
-* `auth`: treat the S3Guard metadata as authoritative.
-
-```bash
-mvn -T 1C verify -Dparallel-tests -DtestsThreadCount=6 -Ds3guard -Ddynamo -Dauth
-```
-
-When experimenting with options, it is usually best to run a single test suite
-at a time until the operations appear to be working.
-
-```bash
-mvn -T 1C verify -Dtest=skip -Dit.test=ITestS3AMiscOperations -Ds3guard -Ddynamo
-```
-
-### Notes
-
-1. If the `s3guard` profile is not set, then the S3Guard properties are those
-of the test configuration set in s3a contract xml file or `auth-keys.xml`
-
-If the `s3guard` profile *is* set:
-1. The S3Guard options from maven (the dynamo and authoritative flags)
-  overwrite any previously set in the configuration files.
-1. DynamoDB will be configured to create any missing tables.
-1. When using DynamoDB and running `ITestDynamoDBMetadataStore`,
-  the `fs.s3a.s3guard.ddb.test.table`
-property MUST be configured, and the name of that table MUST be different
- than what is used for `fs.s3a.s3guard.ddb.table`. The test table is destroyed
- and modified multiple times during the test.
- 1. Several of the tests create and destroy DynamoDB tables. The table names
- are prefixed with the value defined by
- `fs.s3a.s3guard.test.dynamo.table.prefix` (default="s3guard.test."). The user
- executing the tests will need sufficient privilege to create and destroy such
- tables. If the tests abort uncleanly, these tables may be left behind,
- incurring AWS charges.
-
-
-### How to Dump the Table and Metastore State
-
-There's an unstable entry point to list the contents of a table
-and S3 filesystem ot a set of Tab Separated Value files:
-
-```
-hadoop org.apache.hadoop.fs.s3a.s3guard.DumpS3GuardDynamoTable s3a://bucket/ dir/out
-```
-
-This generates a set of files prefixed `dir/out-` with different views of the
-world which can then be viewed on the command line or editor:
-
-```
-"type" "deleted" "path" "is_auth_dir" "is_empty_dir" "len" "updated" "updated_s" "last_modified" "last_modified_s" "etag" "version"
-"file" "true" "s3a://bucket/fork-0001/test/ITestS3AContractDistCp/testDirectWrite/remote" "false" "UNKNOWN" 0 1562171244451 "Wed Jul 03 17:27:24 BST 2019" 1562171244451 "Wed Jul 03 17:27:24 BST 2019" "" ""
-"file" "true" "s3a://bucket/Users/stevel/Projects/hadoop-trunk/hadoop-tools/hadoop-aws/target/test-dir/1/5xlPpalRwv/test/new/newdir/file1" "false" "UNKNOWN" 0 1562171518435 "Wed Jul 03 17:31:58 BST 2019" 1562171518435 "Wed Jul 03 17:31:58 BST 2019" "" ""
-"file" "true" "s3a://bucket/Users/stevel/Projects/hadoop-trunk/hadoop-tools/hadoop-aws/target/test-dir/1/5xlPpalRwv/test/new/newdir/subdir" "false" "UNKNOWN" 0 1562171518535 "Wed Jul 03 17:31:58 BST 2019" 1562171518535 "Wed Jul 03 17:31:58 BST 2019" "" ""
-"file" "true" "s3a://bucket/test/DELAY_LISTING_ME/testMRJob" "false" "UNKNOWN" 0 1562172036299 "Wed Jul 03 17:40:36 BST 2019" 1562172036299 "Wed Jul 03 17:40:36 BST 2019" "" ""
-```
-
-This is unstable: the output format may change without warning.
-To understand the meaning of the fields, consult the documentation.
-They are, currently:
-
-| field | meaning | source |
-|-------|---------| -------|
-| `type` | type | filestatus |
-| `deleted` | tombstone marker | metadata |
-| `path` | path of an entry | filestatus |
-| `is_auth_dir` | directory entry authoritative status | metadata |
-| `is_empty_dir` | does the entry represent an empty directory | metadata |
-| `len` | file length | filestatus |
-| `last_modified` | file status last modified | filestatus |
-| `last_modified_s` | file status last modified as string | filestatus |
-| `updated` | time (millis) metadata was updated | metadata |
-| `updated_s` | updated time as a string | metadata |
-| `etag` | any etag | filestatus |
-| `version` |  any version| filestatus |
-
-Files generated
-
-| suffix        | content |
-|---------------|---------|
-| `-scan.csv`   | Full scan/dump of the metastore |
-| `-store.csv`  | Recursive walk through the metastore |
-| `-tree.csv`   | Treewalk through filesystem `listStatus("/")` calls |
-| `-flat.csv`   | Flat listing through filesystem `listFiles("/", recursive)` |
-| `-s3.csv`     | Dump of the S3 Store *only* |
-| `-scan-2.csv` | Scan of the store after the previous operations |
-
-Why the two scan entries? The S3A listing and treewalk operations
-may add new entries to the metastore/DynamoDB table.
-
-Note 1: this is unstable; entry list and meaning may change, sorting of output,
-the listing algorithm, representation of types, etc. It's expected
-uses are: diagnostics, support calls and helping us developers
-work out what we've just broken.
-
-Note 2: This *is* safe to use against an active store; the tables may appear
-to be inconsistent due to changes taking place during the dump sequence.
-
-### Resetting the Metastore: `PurgeS3GuardDynamoTable`
-
-The `PurgeS3GuardDynamoTable` entry point
-`org.apache.hadoop.fs.s3a.s3guard.PurgeS3GuardDynamoTable` can
-list all entries in a store for a specific filesystem, and delete them.
-It *only* deletes those entries in the store for that specific filesystem,
-even if the store is shared.
-
-```bash
-hadoop org.apache.hadoop.fs.s3a.s3guard.PurgeS3GuardDynamoTable \
-  -force s3a://bucket/
-```
-
-Without the `-force` option the table is scanned, but no entries deleted;
-with it then all entries for that filesystem are deleted.
-No attempt is made to order the deletion; while the operation is under way
-the store is not fully connected (i.e. there may be entries whose parent has
-already been deleted).
-
-Needless to say: *it is not safe to use this against a table in active use.*
-
-### Scale Testing MetadataStore Directly
-
-There are some scale tests that exercise Metadata Store implementations
-directly. These ensure that S3Guard is are robust to things like DynamoDB
-throttling, and compare performance for different implementations. These
-are included in the scale tests executed when `-Dscale` is passed to
-the maven command line.
-
-The two S3Guard scale tests are `ITestDynamoDBMetadataStoreScale` and
-`ITestLocalMetadataStoreScale`.
-
-To run these tests, your DynamoDB table needs to be of limited capacity;
-the values in `ITestDynamoDBMetadataStoreScale` currently require a read capacity
-of 10 or less. a write capacity of 15 or more.
-
-The following settings allow us to run `ITestDynamoDBMetadataStoreScale` with
-artificially low read and write capacity provisioned, so we can judge the
-effects of being throttled by the DynamoDB service:
-
-```xml
-<property>
-  <name>scale.test.operation.count</name>
-  <value>10</value>
-</property>
-<property>
-  <name>scale.test.directory.count</name>
-  <value>3</value>
-</property>
-<property>
-  <name>fs.s3a.scale.test.enabled</name>
-  <value>true</value>
-</property>
-<property>
-  <name>fs.s3a.s3guard.ddb.table</name>
-  <value>my-scale-test</value>
-</property>
-<property>
-  <name>fs.s3a.s3guard.ddb.table.create</name>
-  <value>true</value>
-</property>
-<property>
-  <name>fs.s3a.s3guard.ddb.table.capacity.read</name>
-  <value>5</value>
-</property>
-<property>
-  <name>fs.s3a.s3guard.ddb.table.capacity.write</name>
-  <value>5</value>
-</property>
-```
-
-These tests verify that the invoked operations can trigger retries in the
-S3Guard code, rather than just in the AWS SDK level, so showing that if
-SDK operations fail, they get retried. They also verify that the filesystem
-statistics are updated to record that throttling took place.
-
-*Do not panic if these tests fail to detect throttling!*
-
-These tests are unreliable as they need certain conditions to be met
-to repeatedly fail:
-
-1. You must have a low-enough latency connection to the DynamoDB store that,
-for the capacity allocated, you can overload it.
-1. The AWS Console can give you a view of what is happening here.
-1. Running a single test on its own is less likely to trigger an overload
-than trying to run the whole test suite.
-1. And running the test suite more than once, back-to-back, can also help
-overload the cluster.
-1. Stepping through with a debugger will reduce load, so may not trigger
-failures.
-
-If the tests fail, it *probably* just means you aren't putting enough load
-on the table.
-
-These tests do not verify that the entire set of DynamoDB calls made
-during the use of a S3Guarded S3A filesystem are wrapped by retry logic.
-
-*The best way to verify resilience is to run the entire `hadoop-aws` test suite,
-or even a real application, with throttling enabled.
-
-### Testing encrypted DynamoDB tables
-
-By default, a DynamoDB table is encrypted using AWS owned customer master key
-(CMK). You can enable server side encryption (SSE) using AWS managed CMK or
-customer managed CMK in KMS before running the S3Guard tests.
-1. To enable AWS managed CMK, set the config
-`fs.s3a.s3guard.ddb.table.sse.enabled` to true in `auth-keys.xml`.
-1. To enable customer managed CMK, you need to create a KMS key and set the
-config in `auth-keys.xml`. The value can be the key ARN or alias. Example:
-```
-  <property>
-    <name>fs.s3a.s3guard.ddb.table.sse.enabled</name>
-    <value>true</value>
-  </property>
-  <property>
-    <name>fs.s3a.s3guard.ddb.table.sse.cmk</name>
-    <value>arn:aws:kms:us-west-2:360379543683:key/071a86ff-8881-4ba0-9230-95af6d01ca01</value>
-  </property>
-```
-For more details about SSE on DynamoDB table, please see [S3Guard doc](./s3guard.html).
-
-### Testing only: Local Metadata Store
-
-There is an in-memory Metadata Store for testing.
-
-```xml
-<property>
-  <name>fs.s3a.metadatastore.impl</name>
-  <value>org.apache.hadoop.fs.s3a.s3guard.LocalMetadataStore</value>
-</property>
-```
-
-This is not for use in production.
-
-##<a name="assumed_roles"></a> Testing Assumed Roles
+## <a name="assumed_roles"></a> Testing Assumed Roles
 
 Tests for the AWS Assumed Role credential provider require an assumed
 role to request.
@@ -1351,11 +1103,8 @@ The specific tests an Assumed Role ARN is required for are
 To run these tests you need:
 
 1. A role in your AWS account will full read and write access rights to
-the S3 bucket used in the tests, DynamoDB, for S3Guard, and KMS for any
-SSE-KMS tests.
+the S3 bucket used in the tests, and KMS for any SSE-KMS or DSSE-KMS tests.
 
-If your bucket is set up by default to use S3Guard, the role must have access
-to that service.
 
 1. Your IAM User to have the permissions to "assume" that role.
 
@@ -1383,10 +1132,10 @@ thorough test, by switching to the credentials provider.
 ```
 
 The usual credentials needed to log in to the bucket will be used, but now
-the credentials used to interact with S3 and DynamoDB will be temporary
+the credentials used to interact with S3 will be temporary
 role credentials, rather than the full credentials.
 
-## <a name="qualifiying_sdk_updates"></a> Qualifying an AWS SDK Update
+## <a name="qualifying_sdk_updates"></a> Qualifying an AWS SDK Update
 
 Updating the AWS SDK is something which does need to be done regularly,
 but is rarely without complications, major or minor.
@@ -1402,19 +1151,22 @@ picked and reverted easily.
 1. Do not mix in an SDK update with any other piece of work, for the same reason.
 1. Plan for an afternoon's work, including before/after testing, log analysis
 and any manual tests.
-1. Make sure all the integration tests are running (including s3guard, ARN, encryption, scale)
+1. Make sure all the integration tests are running (including ARN, encryption, scale)
   *before you start the upgrade*.
 1. Create a JIRA for updating the SDK. Don't include the version (yet),
 as it may take a couple of SDK updates before it is ready.
 1. Identify the latest AWS SDK [available for download](https://aws.amazon.com/sdk-for-java/).
 1. Create a private git branch of trunk for JIRA, and in
   `hadoop-project/pom.xml` update the `aws-java-sdk.version` to the new SDK version.
-1. Update AWS SDK versions in NOTICE.txt.
-1. Do a clean build and rerun all the `hadoop-aws` tests, with and without the `-Ds3guard -Ddynamo` options.
+1. Update AWS SDK versions in NOTICE.txt and LICENSE.binary
+1. Do a clean build and rerun all the `hadoop-aws` tests.
   This includes the `-Pscale` set, with a role defined for the assumed role tests.
   in `fs.s3a.assumed.role.arn` for testing assumed roles,
-  and `fs.s3a.server-side-encryption.key` for encryption, for full coverage.
+  and `fs.s3a.encryption.key` for encryption, for full coverage.
   If you can, scale up the scale tests.
+1. Create an Access Point for your bucket (using the AWS Console or CLI), update S3a configuration
+to use it ([docs for help](./index.html#accesspoints)) and re-run the `ITest*` integration tests from
+your IDE or via maven.
 1. Run the `ILoadTest*` load tests from your IDE or via maven through
       `mvn verify -Dtest=skip -Dit.test=ILoadTest\*`  ; look for regressions in performance
       as much as failures.
@@ -1428,13 +1180,31 @@ as it may take a couple of SDK updates before it is ready.
   `mvn dependency:tree -Dverbose > target/dependencies.txt`.
   Examine the `target/dependencies.txt` file to verify that no new
   artifacts have unintentionally been declared as dependencies
-  of the shaded `aws-java-sdk-bundle` artifact.
+  of the shaded `software.amazon.awssdk:bundle:jar` artifact.
+1. Run a full AWS-test suite with S3 client-side encryption enabled by
+ setting `fs.s3a.encryption.algorithm` to 'CSE-KMS' and setting up AWS-KMS
+  Key ID in `fs.s3a.encryption.key`.
 
+The dependency chain of the `hadoop-aws` module should be similar to this, albeit
+with different version numbers:
+```
+[INFO] +- org.apache.hadoop:hadoop-aws:jar:3.4.0-SNAPSHOT:compile
+[INFO] |  +- software.amazon.awssdk:bundle:jar:2.23.5:compile
+[INFO] |  \- org.wildfly.openssl:wildfly-openssl:jar:1.1.3.Final:compile
+```
 ### Basic command line regression testing
 
 We need a run through of the CLI to see if there have been changes there
 which cause problems, especially whether new log messages have surfaced,
-or whether some packaging change breaks that CLI
+or whether some packaging change breaks that CLI.
+
+It is always interesting when doing this to enable IOStatistics reporting
+```xml
+<property>
+  <name>fs.iostatistics.logging.level</name>
+  <value>info</value>
+</property>
+```
 
 From the root of the project, create a command line release `mvn package -Pdist -DskipTests -Dmaven.javadoc.skip=true  -DskipShade`;
 
@@ -1446,39 +1216,56 @@ From the root of the project, create a command line release `mvn package -Pdist 
 export HADOOP_OPTIONAL_TOOLS="hadoop-aws"
 ```
 
-Run some basic s3guard commands as well as file operations.
+Run some basic s3guard CLI as well as file operations.
 
 ```bash
-export BUCKET=s3a://example-bucket-name
+export BUCKETNAME=example-bucket-name
+export BUCKET=s3a://$BUCKETNAME
 
 bin/hadoop s3guard bucket-info $BUCKET
-bin/hadoop s3guard set-capacity $BUCKET
-bin/hadoop s3guard set-capacity -read 15 -write 15 $BUCKET
+
 bin/hadoop s3guard uploads $BUCKET
-bin/hadoop s3guard diff $BUCKET/
-bin/hadoop s3guard prune -minutes 10 $BUCKET/
-bin/hadoop s3guard import $BUCKET/
+# repeat twice, once with "no" and once with "yes" as responses
+bin/hadoop s3guard uploads -abort $BUCKET
+
+# ---------------------------------------------------
+# root filesystem operatios
+# ---------------------------------------------------
+
 bin/hadoop fs -ls $BUCKET/
+# assuming file is not yet created, expect error and status code of 1
 bin/hadoop fs -ls $BUCKET/file
+
+# exit code of 0 even when path doesn't exist
 bin/hadoop fs -rm -R -f $BUCKET/dir-no-trailing
 bin/hadoop fs -rm -R -f $BUCKET/dir-trailing/
+
+# error because it is a directory
 bin/hadoop fs -rm $BUCKET/
+
 bin/hadoop fs -touchz $BUCKET/file
-# expect I/O error as root dir is not empty
-bin/hadoop fs -rm -r $BUCKET/
-bin/hadoop fs -rm -r $BUCKET/\*
-# now success
+# expect I/O error as it is the root directory
 bin/hadoop fs -rm -r $BUCKET/
 
+# succeeds
+bin/hadoop fs -rm -r $BUCKET/\*
+
+# ---------------------------------------------------
+# File operations
+# ---------------------------------------------------
+
 bin/hadoop fs -mkdir $BUCKET/dir-no-trailing
-# fails with S3Guard
 bin/hadoop fs -mkdir $BUCKET/dir-trailing/
 bin/hadoop fs -touchz $BUCKET/file
 bin/hadoop fs -ls $BUCKET/
 bin/hadoop fs -mv $BUCKET/file $BUCKET/file2
 # expect "No such file or directory"
 bin/hadoop fs -stat $BUCKET/file
+
+# expect success
 bin/hadoop fs -stat $BUCKET/file2
+
+# expect "file exists"
 bin/hadoop fs -mkdir $BUCKET/dir-no-trailing
 bin/hadoop fs -mv $BUCKET/file2 $BUCKET/dir-no-trailing
 bin/hadoop fs -stat $BUCKET/dir-no-trailing/file2
@@ -1495,8 +1282,46 @@ bin/hadoop fs -checksum $BUCKET/dir-no-trailing/file2
 # expect "etag" + a long string
 bin/hadoop fs -D fs.s3a.etag.checksum.enabled=true -checksum $BUCKET/dir-no-trailing/file2
 bin/hadoop fs -expunge -immediate -fs $BUCKET
+
+# ---------------------------------------------------
+# Delegation Token support
+# ---------------------------------------------------
+
+# failure unless delegation tokens are enabled
 bin/hdfs fetchdt --webservice $BUCKET secrets.bin
+# success
 bin/hdfs fetchdt -D fs.s3a.delegation.token.binding=org.apache.hadoop.fs.s3a.auth.delegation.SessionTokenBinding --webservice $BUCKET secrets.bin
+bin/hdfs fetchdt -print secrets.bin
+
+# expect warning "No TokenRenewer defined for token kind S3ADelegationToken/Session"
+bin/hdfs fetchdt -renew secrets.bin
+
+
+# ---------------------------------------------------
+# Copy to from local
+# ---------------------------------------------------
+
+time bin/hadoop fs -copyFromLocal -t 10  share/hadoop/tools/lib/*aws*jar $BUCKET/
+
+# expect the iostatistics object_list_request value to be O(directories)
+bin/hadoop fs -ls -R $BUCKET/
+
+# expect the iostatistics object_list_request and op_get_content_summary values to be 1
+bin/hadoop fs -du -h -s $BUCKET/
+
+mkdir tmp
+time bin/hadoop fs -copyToLocal -t 10  $BUCKET/\*aws\* tmp
+
+# ---------------------------------------------------
+# Cloudstore
+# check out and build https://github.com/steveloughran/cloudstore
+# then for these tests, set CLOUDSTORE env var to point to the JAR
+# ---------------------------------------------------
+
+bin/hadoop jar $CLOUDSTORE storediag $BUCKET
+
+time bin/hadoop jar $CLOUDSTORE bandwidth 64M $BUCKET/testfile
+
 ```
 
 ### Other tests
@@ -1512,6 +1337,7 @@ to AWS services.
 * Try and get other people, especially anyone with their own endpoints,
   apps or different deployment environments, to run their own tests.
 * Run the load tests, especially `ILoadTestS3ABulkDeleteThrottling`.
+* Checkout cloudstore, build it against your version of hadoop, then use its CLI to run some commands (`storediag` etc)
 
 ### Dealing with Deprecated APIs and New Features
 
@@ -1549,5 +1375,5 @@ Don't be surprised if this happens, don't worry too much, and,
 while that rollback option is there to be used, ideally try to work forwards.
 
 If the problem is with the SDK, file issues with the
- [AWS SDK Bug tracker](https://github.com/aws/aws-sdk-java/issues).
+ [AWS V2 SDK Bug tracker](https://github.com/aws/aws-sdk-java-v2/issues).
 If the problem can be fixed or worked around in the Hadoop code, do it there too.

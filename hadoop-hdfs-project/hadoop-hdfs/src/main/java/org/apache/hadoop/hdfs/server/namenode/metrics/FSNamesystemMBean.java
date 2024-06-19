@@ -151,6 +151,12 @@ public interface FSNamesystemMBean {
   public int getNumDecomDeadDataNodes();
 
   /**
+   * @return Number of in-service data nodes, where NumInServiceDataNodes =
+   * NumLiveDataNodes - NumDecomLiveDataNodes - NumInMaintenanceLiveDataNodes
+   */
+  int getNumInServiceLiveDataNodes();
+
+  /**
    * Number of failed data volumes across all live data nodes.
    * @return number of failed data volumes across all live data nodes
    */
@@ -248,4 +254,18 @@ public interface FSNamesystemMBean {
    * @return number of DTs
    */
   long getCurrentTokensCount();
+
+  /**
+   * Returns the number of paths to be processed by storage policy satisfier.
+   *
+   * @return The number of paths to be processed by sps.
+   */
+  int getPendingSPSPaths();
+
+  /**
+   * Get the progress of the reconstruction queues initialisation.
+   *
+   * @return Returns values between 0 and 1 for the progress.
+   */
+  float getReconstructionQueuesInitProgress();
 }

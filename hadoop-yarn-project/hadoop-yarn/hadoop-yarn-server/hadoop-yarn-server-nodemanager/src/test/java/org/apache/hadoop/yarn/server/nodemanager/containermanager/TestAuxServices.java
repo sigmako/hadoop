@@ -36,6 +36,7 @@ import static org.mockito.Mockito.verify;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.util.Sets;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.records.AuxServiceRecord;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.records.AuxServiceRecords;
 import org.junit.After;
@@ -46,13 +47,12 @@ import org.junit.runners.Parameterized;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.base.Charsets;
-import com.google.common.collect.Sets;
 import java.io.File;
 import java.io.IOException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.attribute.FileTime;
@@ -426,7 +426,7 @@ public class TestAuxServices {
     Assert.assertTrue(meta.size() == 1);
     for(Entry<String, ByteBuffer> i : meta.entrySet()) {
       auxName = i.getKey();
-      String auxClassPath = Charsets.UTF_8.decode(i.getValue()).toString();
+      String auxClassPath = StandardCharsets.UTF_8.decode(i.getValue()).toString();
       defaultAuxClassPath = new HashSet<String>(Arrays.asList(StringUtils
           .getTrimmedStrings(auxClassPath)));
     }
@@ -478,7 +478,7 @@ public class TestAuxServices {
       Set<String> customizedAuxClassPath = null;
       for(Entry<String, ByteBuffer> i : meta.entrySet()) {
         Assert.assertTrue(auxName.equals(i.getKey()));
-        String classPath = Charsets.UTF_8.decode(i.getValue()).toString();
+        String classPath = StandardCharsets.UTF_8.decode(i.getValue()).toString();
         customizedAuxClassPath = new HashSet<String>(Arrays.asList(StringUtils
             .getTrimmedStrings(classPath)));
         Assert.assertTrue(classPath.contains(testJar.getName()));

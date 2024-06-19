@@ -22,6 +22,7 @@ import java.io.Closeable;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.net.SocketException;
 import java.nio.MappedByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
@@ -36,6 +37,7 @@ import org.apache.commons.collections.map.LinkedMap;
 import org.apache.commons.lang3.mutable.MutableBoolean;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.hdfs.ExtendedBlockId;
+import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.hdfs.client.impl.DfsClientConf.ShortCircuitConf;
 import org.apache.hadoop.hdfs.net.DomainPeer;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
@@ -53,9 +55,9 @@ import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
 import org.apache.hadoop.util.Waitable;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.apache.hadoop.util.Preconditions;
+import org.apache.hadoop.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -181,25 +183,57 @@ public class ShortCircuitCache implements Closeable {
 
     @Override
     public void run() {
+      if (slot == null) {
+        return;
+      }
       LOG.trace("{}: about to release {}", ShortCircuitCache.this, slot);
       final DfsClientShm shm = (DfsClientShm)slot.getShm();
       final DomainSocket shmSock = shm.getPeer().getDomainSocket();
       final String path = shmSock.getPath();
+      DomainSocket domainSocket = pathToDomainSocket.get(path);
+      DataOutputStream out = null;
       boolean success = false;
-      try (DomainSocket sock = DomainSocket.connect(path);
-           DataOutputStream out = new DataOutputStream(
-               new BufferedOutputStream(sock.getOutputStream()))) {
-        new Sender(out).releaseShortCircuitFds(slot.getSlotId());
-        DataInputStream in = new DataInputStream(sock.getInputStream());
-        ReleaseShortCircuitAccessResponseProto resp =
-            ReleaseShortCircuitAccessResponseProto.parseFrom(
-                PBHelperClient.vintPrefixed(in));
-        if (resp.getStatus() != Status.SUCCESS) {
-          String error = resp.hasError() ? resp.getError() : "(unknown)";
-          throw new IOException(resp.getStatus().toString() + ": " + error);
-        }
-        LOG.trace("{}: released {}", this, slot);
-        success = true;
+      int retries = 2;
+      try {
+        while (retries > 0) {
+          try {
+            if (domainSocket == null || !domainSocket.isOpen()) {
+              domainSocket = DomainSocket.connect(path);
+              // we are running in single thread mode, no protection needed for
+              // pathToDomainSocket
+              pathToDomainSocket.put(path, domainSocket);
+            }
+
+            out = new DataOutputStream(
+                new BufferedOutputStream(domainSocket.getOutputStream()));
+            new Sender(out).releaseShortCircuitFds(slot.getSlotId());
+            DataInputStream in =
+                new DataInputStream(domainSocket.getInputStream());
+            ReleaseShortCircuitAccessResponseProto resp =
+                ReleaseShortCircuitAccessResponseProto
+                    .parseFrom(PBHelperClient.vintPrefixed(in));
+            if (resp.getStatus() != Status.SUCCESS) {
+              String error = resp.hasError() ? resp.getError() : "(unknown)";
+              throw new IOException(resp.getStatus().toString() + ": " + error);
+            }
+
+            LOG.trace("{}: released {}", this, slot);
+            success = true;
+            break;
+
+          } catch (SocketException se) {
+            // the domain socket on datanode may be timed out, we retry once
+            retries--;
+            if (domainSocket != null) {
+              domainSocket.close();
+              domainSocket = null;
+              pathToDomainSocket.remove(path);
+            }
+            if (retries == 0) {
+              throw new SocketException("Create domain socket failed");
+            }
+          }
+        } // end of while block
       } catch (IOException e) {
         LOG.warn(ShortCircuitCache.this + ": failed to release "
             + "short-circuit shared memory slot " + slot + " by sending "
@@ -211,9 +245,11 @@ public class ShortCircuitCache implements Closeable {
           shmManager.freeSlot(slot);
         } else {
           shm.getEndpointShmManager().shutdown(shm);
+          IOUtilsClient.cleanupWithLogger(LOG, domainSocket, out);
+          pathToDomainSocket.remove(path);
         }
       }
-    }
+    } // end of run()
   }
 
   public interface ShortCircuitReplicaCreator {
@@ -324,6 +360,12 @@ public class ShortCircuitCache implements Closeable {
    */
   private final DfsClientShmManager shmManager;
 
+  /**
+   * A map contains all DomainSockets used in SlotReleaser. Keys are the domain socket
+   * paths of short-circuit shared memory segments.
+   */
+  private Map<String, DomainSocket> pathToDomainSocket = new HashMap<>();
+
   public static ShortCircuitCache fromConf(ShortCircuitConf conf) {
     return new ShortCircuitCache(
         conf.getShortCircuitStreamsCacheSize(),
@@ -338,13 +380,17 @@ public class ShortCircuitCache implements Closeable {
   public ShortCircuitCache(int maxTotalSize, long maxNonMmappedEvictableLifespanMs,
       int maxEvictableMmapedSize, long maxEvictableMmapedLifespanMs,
       long mmapRetryTimeoutMs, long staleThresholdMs, int shmInterruptCheckMs) {
-    Preconditions.checkArgument(maxTotalSize >= 0);
+    Preconditions.checkArgument(maxTotalSize >= 0,
+        "maxTotalSize must be greater than zero.");
     this.maxTotalSize = maxTotalSize;
-    Preconditions.checkArgument(maxNonMmappedEvictableLifespanMs >= 0);
+    Preconditions.checkArgument(maxNonMmappedEvictableLifespanMs >= 0,
+        "maxNonMmappedEvictableLifespanMs must be greater than zero.");
     this.maxNonMmappedEvictableLifespanMs = maxNonMmappedEvictableLifespanMs;
-    Preconditions.checkArgument(maxEvictableMmapedSize >= 0);
+    Preconditions.checkArgument(maxEvictableMmapedSize >= 0,
+        HdfsClientConfigKeys.Mmap.CACHE_SIZE_KEY + " must be greater than zero.");
     this.maxEvictableMmapedSize = maxEvictableMmapedSize;
-    Preconditions.checkArgument(maxEvictableMmapedLifespanMs >= 0);
+    Preconditions.checkArgument(maxEvictableMmapedLifespanMs >= 0,
+        "maxEvictableMmapedLifespanMs must be greater than zero.");
     this.maxEvictableMmapedLifespanMs = maxEvictableMmapedLifespanMs;
     this.mmapRetryTimeoutMs = mmapRetryTimeoutMs;
     this.staleThresholdMs = staleThresholdMs;
@@ -997,6 +1043,9 @@ public class ShortCircuitCache implements Closeable {
    * @param slot           The slot to release.
    */
   public void scheduleSlotReleaser(Slot slot) {
+    if (slot == null) {
+      return;
+    }
     Preconditions.checkState(shmManager != null);
     releaserExecutor.execute(new SlotReleaser(slot));
   }

@@ -27,10 +27,13 @@ import java.util.Random;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.junit.Rule;
+import org.junit.rules.TemporaryFolder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.SafeModeAction;
 import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.hdfs.DFSOutputStream;
 import org.apache.hadoop.hdfs.DFSTestUtil;
@@ -43,8 +46,8 @@ import org.apache.hadoop.hdfs.MiniDFSCluster.DataNodeProperties;
 import org.apache.hadoop.hdfs.TestRollingUpgrade;
 import org.apache.hadoop.hdfs.protocol.BlockLocalPathInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+import org.apache.hadoop.hdfs.protocol.LayoutVersion;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.tools.DFSAdmin;
 import org.apache.hadoop.test.GenericTestUtils;
@@ -64,6 +67,9 @@ public class TestDataNodeRollingUpgrade {
   private static final long FILE_SIZE = BLOCK_SIZE;
   private static final long SEED = 0x1BADF00DL;
 
+  @Rule
+  public TemporaryFolder baseDir = new TemporaryFolder();
+
   Configuration conf;
   MiniDFSCluster cluster = null;
   DistributedFileSystem fs = null;
@@ -74,7 +80,7 @@ public class TestDataNodeRollingUpgrade {
   private void startCluster() throws IOException {
     conf = new HdfsConfiguration();
     conf.setInt("dfs.blocksize", 1024*1024);
-    cluster = new Builder(conf).numDataNodes(REPL_FACTOR).build();
+    cluster = new Builder(conf, baseDir.getRoot()).numDataNodes(REPL_FACTOR).build();
     cluster.waitActive();
     fs = cluster.getFileSystem();
     nn = cluster.getNameNode(0);
@@ -169,7 +175,7 @@ public class TestDataNodeRollingUpgrade {
 
   private void startRollingUpgrade() throws Exception {
     LOG.info("Starting rolling upgrade");
-    fs.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
+    fs.setSafeMode(SafeModeAction.ENTER);
     final DFSAdmin dfsadmin = new DFSAdmin(conf);
     TestRollingUpgrade.runCmd(dfsadmin, true, "-rollingUpgrade", "prepare");
     triggerHeartBeats();
@@ -361,9 +367,8 @@ public class TestDataNodeRollingUpgrade {
       // Restart the DN with a new layout version to trigger layout upgrade.
       LOG.info("Shutting down the Datanode");
       MiniDFSCluster.DataNodeProperties dnprop = cluster.stopDataNode(0);
-      DFSTestUtil.addDataNodeLayoutVersion(
-          DataNodeLayoutVersion.CURRENT_LAYOUT_VERSION - 1,
-          "Test Layout for TestDataNodeRollingUpgrade");
+      addDataNodeLayoutVersion(
+          DataNodeLayoutVersion.getCurrentLayoutVersion() - 1);
       LOG.info("Restarting the DataNode");
       cluster.restartDataNode(dnprop, true);
       cluster.waitActive();
@@ -422,9 +427,8 @@ public class TestDataNodeRollingUpgrade {
       // Restart the DN with a new layout version to trigger layout upgrade.
       LOG.info("Shutting down the Datanode");
       MiniDFSCluster.DataNodeProperties dnprop = cluster.stopDataNode(0);
-      DFSTestUtil.addDataNodeLayoutVersion(
-          DataNodeLayoutVersion.CURRENT_LAYOUT_VERSION - 1,
-          "Test Layout for TestDataNodeRollingUpgrade");
+      addDataNodeLayoutVersion(
+          DataNodeLayoutVersion.getCurrentLayoutVersion() - 1);
       LOG.info("Restarting the DataNode");
       cluster.restartDataNode(dnprop, true);
       cluster.waitActive();
@@ -469,5 +473,19 @@ public class TestDataNodeRollingUpgrade {
     } finally {
       shutdownCluster();
     }
+  }
+
+  static void addDataNodeLayoutVersion(final int lv) {
+    assertTrue(lv < DataNodeLayoutVersion.getCurrentLayoutVersion());
+    DataNodeLayoutVersion.setCurrentLayoutVersionForTesting(lv);
+
+    // Inject the feature into the FEATURES map.
+    final LayoutVersion.FeatureInfo featureInfo =
+        new LayoutVersion.FeatureInfo(lv, lv + 1,
+            "Test Layout for TestDataNodeRollingUpgrade", false);
+
+    // Update the FEATURES map with the new layout version.
+    LayoutVersion.updateMap(DataNodeLayoutVersion.FEATURES,
+        new LayoutVersion.LayoutFeature[]{() -> featureInfo});
   }
 }

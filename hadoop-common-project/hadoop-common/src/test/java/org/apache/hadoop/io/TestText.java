@@ -22,9 +22,9 @@ import java.io.IOException;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
+import java.nio.charset.StandardCharsets;
 import java.util.Random;
-import com.google.common.base.Charsets;
-import com.google.common.primitives.Bytes;
+import org.apache.hadoop.thirdparty.com.google.common.primitives.Bytes;
 import org.junit.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -105,7 +105,7 @@ public class TestText {
       ByteBuffer bb = Text.encode(before);
           
       byte[] utf8Text = bb.array();
-      byte[] utf8Java = before.getBytes("UTF-8");
+      byte[] utf8Java = before.getBytes(StandardCharsets.UTF_8);
       assertEquals(0, WritableComparator.compareBytes(
               utf8Text, 0, bb.limit(),
               utf8Java, 0, utf8Java.length));
@@ -268,6 +268,8 @@ public class TestText {
             0, text.getBytes().length);
     assertEquals("String's length must be zero",
         0, text.getLength());
+    assertEquals("String's text length must be zero",
+        0, text.getTextLength());
 
     // Test if clear works as intended
     text = new Text("abcd\u20acbdcd\u20ac");
@@ -280,6 +282,8 @@ public class TestText {
         text.getBytes().length >= len);
     assertEquals("Length of the string must be reset to 0 after clear()",
         0, text.getLength());
+    assertEquals("Text length of the string must be reset to 0 after clear()",
+        0, text.getTextLength());
   }
 
   @Test
@@ -288,12 +292,15 @@ public class TestText {
     Text b=new Text("a");
     b.set(a);
     assertEquals("abc", b.toString());
+    assertEquals(3, a.getTextLength());
+    assertEquals(3, b.getTextLength());
     a.append("xdefgxxx".getBytes(), 1, 4);
     assertEquals("modified aliased string", "abc", b.toString());
     assertEquals("appended string incorrectly", "abcdefg", a.toString());
-    // add an extra byte so that capacity = 14 and length = 8
+    assertEquals("This should reflect in the lenght", 7, a.getTextLength());
+    // add an extra byte so that capacity = 10 and length = 8
     a.append(new byte[]{'d'}, 0, 1);
-    assertEquals(14, a.getBytes().length);
+    assertEquals(10, a.getBytes().length);
     assertEquals(8, a.copyBytes().length);
   }
   
@@ -385,23 +392,26 @@ public class TestText {
   @Test
   public void testReadWithKnownLength() throws IOException {
     String line = "hello world";
-    byte[] inputBytes = line.getBytes(Charsets.UTF_8);
+    byte[] inputBytes = line.getBytes(StandardCharsets.UTF_8);
     DataInputBuffer in = new DataInputBuffer();
     Text text = new Text();
 
     in.reset(inputBytes, inputBytes.length);
     text.readWithKnownLength(in, 5);
     assertEquals("hello", text.toString());
+    assertEquals(5, text.getTextLength());
 
     // Read longer length, make sure it lengthens
     in.reset(inputBytes, inputBytes.length);
     text.readWithKnownLength(in, 7);
     assertEquals("hello w", text.toString());
+    assertEquals(7, text.getTextLength());
 
     // Read shorter length, make sure it shortens
     in.reset(inputBytes, inputBytes.length);
     text.readWithKnownLength(in, 2);
     assertEquals("he", text.toString());
+    assertEquals(2, text.getTextLength());
   }
   
   /**
@@ -449,4 +459,22 @@ public class TestText {
             2, Text.utf8Length(new String(new char[]{(char)254})));
   }
 
+  @Test
+  public void testSetBytes(){
+    Text a = new Text(new byte[100]);
+    assertEquals("testSetBytes100 getLength error !",
+            100, a.getLength());
+    assertEquals("testSetBytes100 getBytes.length error !",
+            100, a.getBytes().length);
+    assertEquals("testSetBytes100 getTextLength error !",
+            100, a.getTextLength());
+
+    a.set(new byte[0]);
+    assertEquals("testSetBytes0 getLength error !",
+            0, a.getLength());
+    assertEquals("testSetBytes0 getBytes.length error !",
+            0, a.getBytes().length);
+    assertEquals("testSetBytes0 getTextLength error !",
+            0, a.getTextLength());
+  }
 }

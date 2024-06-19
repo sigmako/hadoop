@@ -28,11 +28,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Supplier;
 
-import com.google.common.base.Supplier;
-import com.google.common.collect.Lists;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -58,12 +55,16 @@ import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.GenericTestUtils.DelayAnswer;
-import org.apache.log4j.Level;
+import org.apache.hadoop.util.Lists;
+
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.event.Level;
 
 
 public class TestDNFencing {
@@ -79,7 +80,7 @@ public class TestDNFencing {
   private FileSystem fs;
 
   static {
-    DFSTestUtil.setNameNodeLogLevel(Level.ALL);
+    DFSTestUtil.setNameNodeLogLevel(Level.TRACE);
   }
   
   @Before
@@ -420,9 +421,6 @@ public class TestDNFencing {
    */
   @Test
   public void testQueueingWithAppend() throws Exception {
-    int numQueued = 0;
-    int numDN = cluster.getDataNodes().size();
-    
     // case 1: create file and call hflush after write
     FSDataOutputStream out = fs.create(TEST_FILE_PATH);
     try {
@@ -435,20 +433,16 @@ public class TestDNFencing {
       // Apply cluster.triggerBlockReports() to trigger the reporting sooner.
       //
       cluster.triggerBlockReports();
-      numQueued += numDN; // RBW messages
 
       // The cluster.triggerBlockReports() call above does a full 
       // block report that incurs 3 extra RBW messages
-      numQueued += numDN; // RBW messages      
     } finally {
       IOUtils.closeStream(out);
-      numQueued += numDN; // blockReceived messages
     }
 
     cluster.triggerBlockReports();
-    numQueued += numDN;
-    assertEquals(numQueued, cluster.getNameNode(1).getNamesystem().
-        getPendingDataNodeMessageCount());
+    assertEquals("The queue should only have the latest report for each DN",
+        3, nn2.getNamesystem().getPendingDataNodeMessageCount());
 
     // case 2: append to file and call hflush after write
     try {
@@ -456,14 +450,12 @@ public class TestDNFencing {
       AppendTestUtil.write(out, 10, 10);
       out.hflush();
       cluster.triggerBlockReports();
-      numQueued += numDN * 2; // RBW messages, see comments in case 1
     } finally {
       IOUtils.closeStream(out);
       cluster.triggerHeartbeats();
-      numQueued += numDN; // blockReceived
     }
-    assertEquals(numQueued, cluster.getNameNode(1).getNamesystem().
-        getPendingDataNodeMessageCount());
+    assertEquals("The queue should only have the latest report for each DN",
+        3, nn2.getNamesystem().getPendingDataNodeMessageCount());
 
     // case 3: similar to case 2, except no hflush is called.
     try {
@@ -482,17 +474,12 @@ public class TestDNFencing {
       //    BPServiceActor#addPendingReplicationBlockInfo 
       //
       IOUtils.closeStream(out);
-      numQueued += numDN; // blockReceived
     }
 
     cluster.triggerBlockReports();
-    numQueued += numDN;
 
-    LOG.info("Expect " + numQueued + " and got: " + cluster.getNameNode(1).getNamesystem().
-        getPendingDataNodeMessageCount());      
-
-    assertEquals(numQueued, cluster.getNameNode(1).getNamesystem().
-        getPendingDataNodeMessageCount());
+    assertEquals("The queue should only have the latest report for each DN",
+        3, nn2.getNamesystem().getPendingDataNodeMessageCount());
 
     cluster.transitionToStandby(0);
     cluster.transitionToActive(1);

@@ -32,6 +32,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CancellationException;
 
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.MultivaluedMap;
@@ -55,7 +56,7 @@ import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.security.client.TimelineDelegationTokenIdentifier;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 import com.sun.jersey.api.client.ClientResponse;
 import com.sun.jersey.api.client.ClientHandlerException;
 import com.sun.jersey.api.client.UniformInterfaceException;
@@ -530,7 +531,7 @@ public class TimelineV2ClientImpl extends TimelineV2Client {
               count++;
               if (count == numberOfAsyncsToMerge) {
                 // Flush the entities if the number of the async
-                // putEntites merged reaches the desired limit. To avoid
+                // putEntities merged reaches the desired limit. To avoid
                 // collecting multiple entities and delaying for a long
                 // time.
                 entitiesHolder.run();
@@ -575,9 +576,11 @@ public class TimelineV2ClientImpl extends TimelineV2Client {
         } catch (ExecutionException e) {
           throw new YarnException("Failed while publishing entity",
               e.getCause());
-        } catch (InterruptedException e) {
+        } catch (InterruptedException | CancellationException e) {
           Thread.currentThread().interrupt();
           throw new YarnException("Interrupted while publishing entity", e);
+        } catch (Exception e) {
+          throw new YarnException("Encountered error while publishing entity", e);
         }
       }
     }

@@ -18,10 +18,11 @@
 
 package org.apache.hadoop.hdfs.security.token.block;
 
-import com.google.common.base.Charsets;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.EnumSet;
@@ -44,10 +45,10 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.Time;
 import org.apache.hadoop.util.Timer;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.HashMultiset;
-import com.google.common.collect.Multiset;
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.apache.hadoop.util.Preconditions;
+import org.apache.hadoop.thirdparty.com.google.common.collect.HashMultiset;
+import org.apache.hadoop.thirdparty.com.google.common.collect.Multiset;
 
 /**
  * BlockTokenSecretManager can be instantiated in 2 modes, master mode
@@ -217,17 +218,23 @@ public class BlockTokenSecretManager extends
     }
   }
 
+  public synchronized void addKeys(ExportedBlockKeys exportedKeys) throws IOException {
+    addKeys(exportedKeys, true);
+  }
+
   /**
    * Set block keys, only to be used in worker mode
    */
-  public synchronized void addKeys(ExportedBlockKeys exportedKeys)
-      throws IOException {
+  public synchronized void addKeys(ExportedBlockKeys exportedKeys,
+      boolean updateCurrentKey) throws IOException {
     if (isMaster || exportedKeys == null) {
       return;
     }
-    LOG.info("Setting block keys");
+    LOG.info("Setting block keys. BlockPool = {} .", blockPoolId);
     removeExpiredKeys();
-    this.currentKey = exportedKeys.getCurrentKey();
+    if (updateCurrentKey || currentKey == null) {
+      this.currentKey = exportedKeys.getCurrentKey();
+    }
     BlockKey[] receivedKeys = exportedKeys.getAllKeys();
     for (int i = 0; i < receivedKeys.length; i++) {
       if (receivedKeys[i] != null) {
@@ -292,7 +299,7 @@ public class BlockTokenSecretManager extends
     if (shouldWrapQOP) {
       String qop = Server.getAuxiliaryPortEstablishedQOP();
       if (qop != null) {
-        id.setHandshakeMsg(qop.getBytes(Charsets.UTF_8));
+        id.setHandshakeMsg(qop.getBytes(StandardCharsets.UTF_8));
       }
     }
     return new Token<BlockTokenIdentifier>(id, this);
@@ -407,7 +414,7 @@ public class BlockTokenSecretManager extends
               + ", block=" + block + ", access mode=" + mode);
     }
     checkAccess(id, userId, block, mode, storageTypes, storageIds);
-    if (!Arrays.equals(retrievePassword(id), token.getPassword())) {
+    if (!MessageDigest.isEqual(retrievePassword(id), token.getPassword())) {
       throw new InvalidToken("Block token with " + id
           + " doesn't have the correct token password");
     }
@@ -427,7 +434,7 @@ public class BlockTokenSecretManager extends
               + ", block=" + block + ", access mode=" + mode);
     }
     checkAccess(id, userId, block, mode);
-    if (!Arrays.equals(retrievePassword(id), token.getPassword())) {
+    if (!MessageDigest.isEqual(retrievePassword(id), token.getPassword())) {
       throw new InvalidToken("Block token with " + id
           + " doesn't have the correct token password");
     }

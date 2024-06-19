@@ -36,8 +36,17 @@ public final class HttpQueryParams {
   public static final String QUERY_PARAM_POSITION = "position";
   public static final String QUERY_PARAM_TIMEOUT = "timeout";
   public static final String QUERY_PARAM_RETAIN_UNCOMMITTED_DATA = "retainUncommittedData";
+  public static final String QUERY_PARAM_FLUSH = "flush";
   public static final String QUERY_PARAM_CLOSE = "close";
   public static final String QUERY_PARAM_UPN = "upn";
+  public static final String QUERY_PARAM_BLOBTYPE = "blobtype";
+  public static final String QUERY_PARAM_PAGINATED = "paginated";
+
+  //query params for SAS
+  public static final String QUERY_PARAM_SAOID = "saoid";
+  public static final String QUERY_PARAM_SKOID = "skoid";
+  public static final String QUERY_PARAM_SUOID = "suoid";
+  public static final String QUERY_PARAM_SIGNATURE = "sig";
 
   private HttpQueryParams() {}
 }

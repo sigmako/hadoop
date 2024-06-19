@@ -18,7 +18,7 @@
 
 package org.apache.hadoop.io.compress.zstd;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
@@ -84,6 +84,8 @@ public class ZStandardCompressor implements Compressor {
   /**
    * Creates a new compressor with the default compression level.
    * Compressed data will be generated in ZStandard format.
+   * @param level level.
+   * @param bufferSize bufferSize.
    */
   public ZStandardCompressor(int level, int bufferSize) {
     this(level, bufferSize, bufferSize);
@@ -159,7 +161,7 @@ public class ZStandardCompressor implements Compressor {
     }
 
     // have we consumed all input
-    if (keepUncompressedBuf && uncompressedDirectBufLen > 0) {
+    if (keepUncompressedBuf && uncompressedDirectBufLen - uncompressedDirectBufOff > 0) {
       return false;
     }
 
@@ -223,7 +225,7 @@ public class ZStandardCompressor implements Compressor {
     compressedDirectBuf.limit(n);
 
     // Check if we have consumed all input buffer
-    if (uncompressedDirectBufLen <= 0) {
+    if (uncompressedDirectBufLen - uncompressedDirectBufOff <= 0) {
       // consumed all input buffer
       keepUncompressedBuf = false;
       uncompressedDirectBuf.clear();

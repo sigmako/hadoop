@@ -27,7 +27,7 @@ import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier.AccessMo
 import org.apache.hadoop.security.token.SecretManager;
 import org.apache.hadoop.security.token.Token;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 import org.apache.hadoop.fs.StorageType;
 
 /**
@@ -141,9 +141,9 @@ public class BlockPoolTokenSecretManager extends
   /**
    * See {@link BlockTokenSecretManager#addKeys(ExportedBlockKeys)}.
    */
-  public void addKeys(String bpid, ExportedBlockKeys exportedKeys)
-      throws IOException {
-    get(bpid).addKeys(exportedKeys);
+  public void addKeys(String bpid, ExportedBlockKeys exportedKeys,
+      boolean updateCurrentKey) throws IOException {
+    get(bpid).addKeys(exportedKeys, updateCurrentKey);
   }
 
   /**

@@ -37,7 +37,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
-
 import org.apache.commons.cli.UnrecognizedOptionException;
 import org.apache.commons.lang3.Range;
 import org.slf4j.Logger;
@@ -198,8 +197,9 @@ import org.apache.hadoop.yarn.util.Clock;
 import org.apache.hadoop.yarn.util.Records;
 import org.apache.hadoop.yarn.util.UTCClock;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 import org.apache.hadoop.yarn.util.resource.ResourceUtils;
+import org.apache.hadoop.yarn.util.resource.Resources;
 import org.apache.hadoop.yarn.util.timeline.TimelineUtils;
 
 
@@ -406,22 +406,11 @@ public class ClientRMService extends AbstractService implements
       throw new ApplicationNotFoundException("Invalid application id: null");
     }
 
-    UserGroupInformation callerUGI;
-    try {
-      callerUGI = UserGroupInformation.getCurrentUser();
-    } catch (IOException ie) {
-      LOG.info("Error getting UGI ", ie);
-      throw RPCUtil.getRemoteException(ie);
-    }
+    UserGroupInformation callerUGI = getCallerUgi(applicationId,
+        AuditConstants.GET_APP_REPORT);
 
-    RMApp application = this.rmContext.getRMApps().get(applicationId);
-    if (application == null) {
-      // If the RM doesn't have the application, throw
-      // ApplicationNotFoundException and let client to handle.
-      throw new ApplicationNotFoundException("Application with id '"
-          + applicationId + "' doesn't exist in RM. Please check "
-          + "that the job submission was successful.");
-    }
+    RMApp application = verifyUserAccessForRMApp(applicationId, callerUGI,
+        AuditConstants.GET_APP_REPORT, ApplicationAccessType.VIEW_APP, false);
 
     boolean allowAccess = checkAccess(callerUGI, application.getUser(),
         ApplicationAccessType.VIEW_APP, application);
@@ -509,6 +498,9 @@ public class ClientRMService extends AbstractService implements
   public GetContainerReportResponse getContainerReport(
       GetContainerReportRequest request) throws YarnException, IOException {
     ContainerId containerId = request.getContainerId();
+    if (containerId == null) {
+      throw new ContainerNotFoundException("Invalid container id: null");
+    }
     ApplicationAttemptId appAttemptId = containerId.getApplicationAttemptId();
     ApplicationId appId = appAttemptId.getApplicationId();
     UserGroupInformation callerUGI = getCallerUgi(appId,
@@ -597,10 +589,12 @@ public class ClientRMService extends AbstractService implements
     // checked here, those that are dependent on RM configuration are validated
     // in RMAppManager.
 
+    UserGroupInformation userUgi = null;
     String user = null;
     try {
       // Safety
-      user = UserGroupInformation.getCurrentUser().getShortUserName();
+      userUgi = UserGroupInformation.getCurrentUser();
+      user = userUgi.getShortUserName();
     } catch (IOException ie) {
       LOG.warn("Unable to get the current user.", ie);
       RMAuditLogger.logFailure(user, AuditConstants.SUBMIT_APP_REQUEST,
@@ -609,6 +603,8 @@ public class ClientRMService extends AbstractService implements
           submissionContext.getQueue());
       throw RPCUtil.getRemoteException(ie);
     }
+
+    checkTags(submissionContext.getApplicationTags());
 
     if (timelineServiceV2Enabled) {
       // Sanity check for flow run
@@ -689,7 +685,7 @@ public class ClientRMService extends AbstractService implements
     try {
       // call RMAppManager to submit application directly
       rmAppManager.submitApplication(submissionContext,
-          System.currentTimeMillis(), user);
+          System.currentTimeMillis(), userUgi);
 
       LOG.info("Application with id " + applicationId.getId() + 
           " submitted by user " + user);
@@ -750,6 +746,31 @@ public class ClientRMService extends AbstractService implements
         attemptId);
 
     return response;
+  }
+
+  private void checkTags(Set<String> tags) throws YarnException {
+    int appMaxTags = getConfig().getInt(
+        YarnConfiguration.RM_APPLICATION_MAX_TAGS,
+        YarnConfiguration.DEFAULT_RM_APPLICATION_MAX_TAGS);
+    int appMaxTagLength = getConfig().getInt(
+        YarnConfiguration.RM_APPLICATION_MAX_TAG_LENGTH,
+        YarnConfiguration.DEFAULT_RM_APPLICATION_MAX_TAG_LENGTH);
+    if (tags.size() > appMaxTags) {
+      throw RPCUtil.getRemoteException(new IllegalArgumentException(
+          "Too many applicationTags, a maximum of only " + appMaxTags
+              + " are allowed!"));
+    }
+    for (String tag : tags) {
+      if (tag.length() > appMaxTagLength) {
+        throw RPCUtil.getRemoteException(
+            new IllegalArgumentException("Tag " + tag + " is too long, "
+                + "maximum allowed length of a tag is " + appMaxTagLength));
+      }
+      if (!org.apache.commons.lang3.StringUtils.isAsciiPrintable(tag)) {
+        throw RPCUtil.getRemoteException(new IllegalArgumentException(
+            "A tag can only have ASCII " + "characters! Invalid tag - " + tag));
+      }
+    }
   }
 
   @SuppressWarnings("unchecked")
@@ -829,12 +850,14 @@ public class ClientRMService extends AbstractService implements
         .newRecordInstance(YarnClusterMetrics.class);
     ymetrics.setNumNodeManagers(this.rmContext.getRMNodes().size());
     ClusterMetrics clusterMetrics = ClusterMetrics.getMetrics();
+    ymetrics.setNumDecommissioningNodeManagers(clusterMetrics.getNumDecommissioningNMs());
     ymetrics.setNumDecommissionedNodeManagers(clusterMetrics
       .getNumDecommisionedNMs());
     ymetrics.setNumActiveNodeManagers(clusterMetrics.getNumActiveNMs());
     ymetrics.setNumLostNodeManagers(clusterMetrics.getNumLostNMs());
     ymetrics.setNumUnhealthyNodeManagers(clusterMetrics.getUnhealthyNMs());
     ymetrics.setNumRebootedNodeManagers(clusterMetrics.getNumRebootedNMs());
+    ymetrics.setNumShutdownNodeManagers(clusterMetrics.getNumShutdownNMs());
     response.setClusterMetrics(ymetrics);
     return response;
   }
@@ -847,13 +870,8 @@ public class ClientRMService extends AbstractService implements
   @Override
   public GetApplicationsResponse getApplications(GetApplicationsRequest request)
       throws YarnException {
-    UserGroupInformation callerUGI;
-    try {
-      callerUGI = UserGroupInformation.getCurrentUser();
-    } catch (IOException ie) {
-      LOG.info("Error getting UGI ", ie);
-      throw RPCUtil.getRemoteException(ie);
-    }
+    UserGroupInformation callerUGI = getCallerUgi(null,
+        AuditConstants.GET_APPLICATIONS_REQUEST);
 
     Set<String> applicationTypes = getLowerCasedAppTypes(request);
     EnumSet<YarnApplicationState> applicationStates =
@@ -868,6 +886,19 @@ public class ClientRMService extends AbstractService implements
     String name = request.getName();
 
     final Map<ApplicationId, RMApp> apps = rmContext.getRMApps();
+    final Set<ApplicationId> runningAppsFilteredByQueues =
+        getRunningAppsFilteredByQueues(apps, queues);
+
+    Set<String> queuePaths = new HashSet<>();
+    for (String queue : queues) {
+      String queuePath = rmAppManager.getQueuePath(queue);
+      if (queuePath != null) {
+        queuePaths.add(queuePath);
+      } else {
+        queuePaths.add(queue);
+      }
+    }
+
     Iterator<RMApp> appsIter = apps.values().iterator();
     
     List<ApplicationReport> reports = new ArrayList<ApplicationReport>();
@@ -880,8 +911,9 @@ public class ClientRMService extends AbstractService implements
         continue;
       }
 
-      if (queues != null && !queues.isEmpty()) {
-        if (!queues.contains(application.getQueue())) {
+      if (queuePaths != null && !queuePaths.isEmpty()) {
+        if (!runningAppsFilteredByQueues.contains(application.getApplicationId()) &&
+            !queuePaths.contains(application.getQueue())) {
           continue;
         }
       }
@@ -960,6 +992,23 @@ public class ClientRMService extends AbstractService implements
     return response;
   }
 
+  private Set<ApplicationId> getRunningAppsFilteredByQueues(
+      Map<ApplicationId, RMApp> apps, Set<String> queues) {
+    final Set<ApplicationId> runningApps = new HashSet<>();
+    for (String queue : queues) {
+      List<ApplicationAttemptId> appsInQueue = scheduler.getAppsInQueue(queue);
+      if (appsInQueue != null) {
+        for (ApplicationAttemptId appAttemptId : appsInQueue) {
+          RMApp rmApp = apps.get(appAttemptId.getApplicationId());
+          if (rmApp != null) {
+            runningApps.add(rmApp.getApplicationId());
+          }
+        }
+      }
+    }
+    return runningApps;
+  }
+
   private Set<String> getLowerCasedAppTypes(GetApplicationsRequest request) {
     Set<String> applicationTypes = new HashSet<>();
     if (request.getApplicationTypes() != null && !request.getApplicationTypes()
@@ -994,13 +1043,8 @@ public class ClientRMService extends AbstractService implements
   @Override
   public GetQueueInfoResponse getQueueInfo(GetQueueInfoRequest request)
       throws YarnException {
-    UserGroupInformation callerUGI;
-    try {
-      callerUGI = UserGroupInformation.getCurrentUser();
-    } catch (IOException ie) {
-      LOG.info("Error getting UGI ", ie);
-      throw RPCUtil.getRemoteException(ie);
-    }
+    UserGroupInformation callerUGI = getCallerUgi(null,
+        AuditConstants.GET_QUEUE_INFO_REQUEST);
 
     GetQueueInfoResponse response =
       recordFactory.newRecordInstance(GetQueueInfoResponse.class);
@@ -1053,7 +1097,7 @@ public class ClientRMService extends AbstractService implements
   private NodeReport createNodeReports(RMNode rmNode) {
     SchedulerNodeReport schedulerNodeReport = 
         scheduler.getNodeReport(rmNode.getNodeID());
-    Resource used = BuilderUtils.newResource(0, 0);
+    Resource used = Resources.createResource(0);
     int numContainers = 0;
     if (schedulerNodeReport != null) {
       used = schedulerNodeReport.getUsedResource();
@@ -1666,16 +1710,10 @@ public class ClientRMService extends AbstractService implements
       SignalContainerRequest request) throws YarnException, IOException {
     ContainerId containerId = request.getContainerId();
 
-    UserGroupInformation callerUGI;
-    try {
-      callerUGI = UserGroupInformation.getCurrentUser();
-    } catch (IOException ie) {
-      LOG.info("Error getting UGI ", ie);
-      throw RPCUtil.getRemoteException(ie);
-    }
-
     ApplicationId applicationId = containerId.getApplicationAttemptId().
         getApplicationId();
+    UserGroupInformation callerUGI = getCallerUgi(applicationId,
+        AuditConstants.SIGNAL_CONTAINER);
     RMApp application = this.rmContext.getRMApps().get(applicationId);
     if (application == null) {
       RMAuditLogger.logFailure(callerUGI.getUserName(),

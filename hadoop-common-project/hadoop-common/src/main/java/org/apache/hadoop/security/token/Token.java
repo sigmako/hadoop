@@ -18,8 +18,8 @@
 
 package org.apache.hadoop.security.token;
 
-import com.google.common.collect.Maps;
-import com.google.common.primitives.Bytes;
+import org.apache.hadoop.thirdparty.com.google.common.collect.Maps;
+import org.apache.hadoop.thirdparty.com.google.common.primitives.Bytes;
 
 import org.apache.commons.codec.binary.Base64;
 import org.apache.hadoop.HadoopIllegalArgumentException;
@@ -32,7 +32,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
-import java.util.Arrays;
+import java.security.MessageDigest;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.ServiceConfigurationError;
@@ -136,6 +136,7 @@ public class Token<T extends TokenIdentifier> implements Writable {
         while (tokenIdentifiers.hasNext()) {
           try {
             TokenIdentifier id = tokenIdentifiers.next();
+            LOG.debug("Added {}:{} into tokenKindMap", id.getKind(), id.getClass());
             tokenKindMap.put(id.getKind(), id.getClass());
           } catch (ServiceConfigurationError | LinkageError e) {
             // failure to load a token implementation
@@ -193,7 +194,7 @@ public class Token<T extends TokenIdentifier> implements Writable {
   /**
    * Set the token kind. This is only intended to be used by services that
    * wrap another service's token.
-   * @param newKind
+   * @param newKind newKind.
    */
   @InterfaceAudience.Private
   public synchronized void setKind(Text newKind) {
@@ -367,7 +368,7 @@ public class Token<T extends TokenIdentifier> implements Writable {
   /**
    * Encode this token as a url safe string.
    * @return the encoded string
-   * @throws IOException
+   * @throws IOException raised on errors performing I/O.
    */
   public String encodeToUrlString() throws IOException {
     return encodeWritable(this);
@@ -376,7 +377,7 @@ public class Token<T extends TokenIdentifier> implements Writable {
   /**
    * Decode the given url safe string into this token.
    * @param newValue the encoded string
-   * @throws IOException
+   * @throws IOException raised on errors performing I/O.
    */
   public void decodeFromUrlString(String newValue) throws IOException {
     decodeWritable(this, newValue);
@@ -391,8 +392,8 @@ public class Token<T extends TokenIdentifier> implements Writable {
       return false;
     } else {
       Token<T> r = (Token<T>) right;
-      return Arrays.equals(identifier, r.identifier) &&
-             Arrays.equals(password, r.password) &&
+      return MessageDigest.isEqual(identifier, r.identifier) &&
+             MessageDigest.isEqual(password, r.password) &&
              kind.equals(r.kind) &&
              service.equals(r.service);
     }
@@ -481,6 +482,7 @@ public class Token<T extends TokenIdentifier> implements Writable {
   /**
    * Is this token managed so that it can be renewed or cancelled?
    * @return true, if it can be renewed and cancelled.
+   * @throws IOException raised on errors performing I/O.
    */
   public boolean isManaged() throws IOException {
     return getRenewer().isManaged(this);
@@ -488,9 +490,10 @@ public class Token<T extends TokenIdentifier> implements Writable {
 
   /**
    * Renew this delegation token.
+   * @param conf configuration.
    * @return the new expiration time
-   * @throws IOException
-   * @throws InterruptedException
+   * @throws IOException raised on errors performing I/O.
+   * @throws InterruptedException if the thread is interrupted.
    */
   public long renew(Configuration conf
                     ) throws IOException, InterruptedException {
@@ -499,8 +502,10 @@ public class Token<T extends TokenIdentifier> implements Writable {
 
   /**
    * Cancel this delegation token.
-   * @throws IOException
-   * @throws InterruptedException
+   *
+   * @param conf configuration.
+   * @throws IOException raised on errors performing I/O.
+   * @throws InterruptedException if the thread is interrupted.
    */
   public void cancel(Configuration conf
                      ) throws IOException, InterruptedException {

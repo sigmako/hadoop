@@ -19,21 +19,16 @@
 package org.apache.hadoop.fs.s3a.scale;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.s3a.AbstractS3ATestBase;
-import org.apache.hadoop.fs.s3a.S3AInputStream;
-import org.apache.hadoop.fs.s3a.S3AInstrumentation;
 import org.apache.hadoop.fs.s3a.S3ATestConstants;
 import org.apache.hadoop.fs.s3a.Statistic;
-import org.apache.hadoop.metrics2.lib.MutableGaugeLong;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.InputStream;
-
 import static org.apache.hadoop.fs.s3a.S3ATestUtils.*;
+import static org.apache.hadoop.fs.statistics.IOStatisticAssertions.lookupGaugeStatistic;
 
 /**
  * Base class for scale tests; here is where the common scale configuration
@@ -88,7 +83,7 @@ public class S3AScaleTestBase extends AbstractS3ATestBase {
   @Override
   public void setup() throws Exception {
     super.setup();
-    testPath = path("/tests3ascale");
+    testPath = path("tests3ascale");
     LOG.debug("Scale test operation count = {}", getOperationCount());
     enabled = getTestPropertyBool(
         getConf(),
@@ -105,9 +100,7 @@ public class S3AScaleTestBase extends AbstractS3ATestBase {
    * @return the configuration.
    */
   private synchronized Configuration demandCreateConfiguration() {
-    if (conf == null) {
-      conf = createScaleConfiguration();
-    }
+    conf = createScaleConfiguration();
     return conf;
   }
 
@@ -157,45 +150,15 @@ public class S3AScaleTestBase extends AbstractS3ATestBase {
   }
 
   /**
-   * Get the input stream statistics of an input stream.
-   * Raises an exception if the inner stream is not an S3A input stream
-   * @param in wrapper
-   * @return the statistics for the inner stream
-   */
-  protected S3AInstrumentation.InputStreamStatistics getInputStreamStatistics(
-      FSDataInputStream in) {
-    return getS3AInputStream(in).getS3AStreamStatistics();
-  }
-
-  /**
-   * Get the inner stream of an input stream.
-   * Raises an exception if the inner stream is not an S3A input stream
-   * @param in wrapper
-   * @return the inner stream
-   * @throws AssertionError if the inner stream is of the wrong type
-   */
-  protected S3AInputStream getS3AInputStream(
-      FSDataInputStream in) {
-    InputStream inner = in.getWrappedStream();
-    if (inner instanceof S3AInputStream) {
-      return (S3AInputStream) inner;
-    } else {
-      throw new AssertionError("Not an S3AInputStream: " + inner);
-    }
-  }
-
-  /**
-   * Get the gauge value of a statistic. Raises an assertion if
+   * Get the gauge value of a statistic from the
+   * IOStatistics of the filesystem. Raises an assertion if
    * there is no such gauge.
    * @param statistic statistic to look up
    * @return the value.
    */
   public long gaugeValue(Statistic statistic) {
-    S3AInstrumentation instrumentation = getFileSystem().getInstrumentation();
-    MutableGaugeLong gauge = instrumentation.lookupGauge(statistic.getSymbol());
-    assertNotNull("No gauge " + statistic
-        + " in " + instrumentation.dump("", " = ", "\n", true), gauge);
-    return gauge.value();
+    return lookupGaugeStatistic(getFileSystem().getIOStatistics(),
+        statistic.getSymbol());
   }
 
   /**

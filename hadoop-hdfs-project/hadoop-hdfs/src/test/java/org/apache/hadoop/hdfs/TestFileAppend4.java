@@ -47,9 +47,9 @@ import org.apache.hadoop.hdfs.server.namenode.INodeFile;
 import org.apache.hadoop.hdfs.server.namenode.LeaseExpiredException;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
 import org.apache.hadoop.test.GenericTestUtils;
-import org.apache.log4j.Level;
 import org.junit.Before;
 import org.junit.Test;
+import org.slf4j.event.Level;
 
 /* File Append tests for HDFS-200 & HDFS-142, specifically focused on:
  *  using append()/sync() to recover block information
@@ -67,9 +67,9 @@ public class TestFileAppend4 {
   FSDataOutputStream stm;
 
   {
-    DFSTestUtil.setNameNodeLogLevel(Level.ALL);
-    GenericTestUtils.setLogLevel(DataNode.LOG, Level.ALL);
-    GenericTestUtils.setLogLevel(DFSClient.LOG, Level.ALL);
+    DFSTestUtil.setNameNodeLogLevel(Level.TRACE);
+    GenericTestUtils.setLogLevel(DataNode.LOG, Level.TRACE);
+    GenericTestUtils.setLogLevel(DFSClient.LOG, Level.TRACE);
   }
 
   @Before
@@ -106,9 +106,9 @@ public class TestFileAppend4 {
 
     // set the soft limit to be 1 second so that the
     // namenode triggers lease recovery upon append request
-    cluster.setLeasePeriod(1,
+    cluster.setLeasePeriod(1000,
         conf.getLong(DFSConfigKeys.DFS_LEASE_HARDLIMIT_KEY,
-            DFSConfigKeys.DFS_LEASE_HARDLIMIT_DEFAULT));
+            DFSConfigKeys.DFS_LEASE_HARDLIMIT_DEFAULT) * 1000);
 
     // Trying recovery
     int tries = 60;

@@ -25,16 +25,16 @@ import java.util.Collection;
 import java.util.Iterator;
 import java.util.AbstractQueue;
 import java.util.HashMap;
+import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 import org.apache.commons.lang3.NotImplementedException;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.ipc.CallQueueManager.CallQueueOverflowException;
 import org.apache.hadoop.metrics2.MetricsCollector;
 import org.apache.hadoop.metrics2.MetricsRecordBuilder;
@@ -58,8 +58,12 @@ public class FairCallQueue<E extends Schedulable> extends AbstractQueue<E>
 
   public static final Logger LOG = LoggerFactory.getLogger(FairCallQueue.class);
 
-  /* The queues */
-  private final ArrayList<BlockingQueue<E>> queues;
+  /**
+   * Save the queue data of multiple priority strategies.
+   * Usually the number of queue data and priority strategies saved
+   * is the same.
+   */
+  private final List<BlockingQueue<E>> queues;
 
   /* Track available permits for scheduled objects.  All methods that will
    * mutate a subqueue must acquire or release a permit on the semaphore.
@@ -80,41 +84,68 @@ public class FairCallQueue<E extends Schedulable> extends AbstractQueue<E>
 
   /* Failover if queue is filled up */
   private boolean serverFailOverEnabled;
+
+  @VisibleForTesting
+  public FairCallQueue(int priorityLevels, int capacity, String ns,
+      Configuration conf) {
+    this(priorityLevels, capacity, ns,
+        CallQueueManager.getDefaultQueueCapacityWeights(priorityLevels),
+        false, conf);
+  }
+
+  @VisibleForTesting
+  public FairCallQueue(int priorityLevels, int capacity, String ns, boolean serverFailOverEnabled,
+      Configuration conf) {
+    this(priorityLevels, capacity, ns,
+        CallQueueManager.getDefaultQueueCapacityWeights(priorityLevels),
+        serverFailOverEnabled, conf);
+  }
+
   /**
    * Create a FairCallQueue.
+   * @param priorityLevels the total size of all multi-level queue
+   *                       priority policies
    * @param capacity the total size of all sub-queues
    * @param ns the prefix to use for configuration
+   * @param capacityWeights the weights array for capacity allocation
+   *                        among subqueues
+   * @param serverFailOverEnabled whether or not to enable callqueue overflow trigger failover
+   *                              for stateless servers when RPC call queue is filled
    * @param conf the configuration to read from
    * Notes: Each sub-queue has a capacity of `capacity / numSubqueues`.
    * The first or the highest priority sub-queue has an excess capacity
    * of `capacity % numSubqueues`
    */
   public FairCallQueue(int priorityLevels, int capacity, String ns,
-      Configuration conf) {
+      int[] capacityWeights, boolean serverFailOverEnabled, Configuration conf) {
     if(priorityLevels < 1) {
       throw new IllegalArgumentException("Number of Priority Levels must be " +
           "at least 1");
     }
     int numQueues = priorityLevels;
+    this.serverFailOverEnabled = serverFailOverEnabled;
     LOG.info("FairCallQueue is in use with " + numQueues +
         " queues with total capacity of " + capacity);
 
     this.queues = new ArrayList<BlockingQueue<E>>(numQueues);
     this.overflowedCalls = new ArrayList<AtomicLong>(numQueues);
-    int queueCapacity = capacity / numQueues;
-    int capacityForFirstQueue = queueCapacity + (capacity % numQueues);
+    int totalWeights = 0;
+    for (int i = 0; i < capacityWeights.length; i++) {
+      totalWeights += capacityWeights[i];
+    }
+    int residueCapacity = capacity % totalWeights;
+    int unitCapacity = capacity / totalWeights;
+    int queueCapacity;
     for(int i=0; i < numQueues; i++) {
+      queueCapacity = unitCapacity * capacityWeights[i];
       if (i == 0) {
-        this.queues.add(new LinkedBlockingQueue<E>(capacityForFirstQueue));
+        this.queues.add(new LinkedBlockingQueue<E>(
+            queueCapacity + residueCapacity));
       } else {
         this.queues.add(new LinkedBlockingQueue<E>(queueCapacity));
       }
       this.overflowedCalls.add(new AtomicLong(0));
     }
-    this.serverFailOverEnabled = conf.getBoolean(
-        ns + "." +
-        CommonConfigurationKeys.IPC_CALLQUEUE_SERVER_FAILOVER_ENABLE,
-        CommonConfigurationKeys.IPC_CALLQUEUE_SERVER_FAILOVER_ENABLE_DEFAULT);
 
     this.multiplexer = new WeightedRoundRobinMultiplexer(numQueues, ns, conf);
     // Make this the active source of metrics
@@ -468,5 +499,10 @@ public class FairCallQueue<E extends Schedulable> extends AbstractQueue<E>
   @VisibleForTesting
   public void setMultiplexer(RpcMultiplexer newMux) {
     this.multiplexer = newMux;
+  }
+
+  @VisibleForTesting
+  public boolean isServerFailOverEnabled() {
+    return serverFailOverEnabled;
   }
 }

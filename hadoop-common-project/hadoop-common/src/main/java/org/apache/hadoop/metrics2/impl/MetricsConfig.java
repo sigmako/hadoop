@@ -23,20 +23,23 @@ import java.io.PrintWriter;
 import java.net.URL;
 import java.net.URLClassLoader;
 import static java.security.AccessController.*;
+
+import java.nio.charset.StandardCharsets;
 import java.security.PrivilegedAction;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import com.google.common.base.Joiner;
-import com.google.common.base.Splitter;
-import com.google.common.collect.Iterables;
-import com.google.common.collect.Maps;
+import org.apache.hadoop.thirdparty.com.google.common.base.Joiner;
+import org.apache.hadoop.thirdparty.com.google.common.base.Splitter;
+import org.apache.hadoop.thirdparty.com.google.common.collect.Iterables;
+import org.apache.hadoop.thirdparty.com.google.common.collect.Maps;
 
 import org.apache.commons.configuration2.Configuration;
 import org.apache.commons.configuration2.PropertiesConfiguration;
 import org.apache.commons.configuration2.SubsetConfiguration;
+import org.apache.commons.configuration2.convert.DefaultListDelimiterHandler;
 import org.apache.commons.configuration2.ex.ConfigurationException;
 import org.apache.commons.configuration2.io.FileHandler;
 import org.apache.hadoop.metrics2.MetricsFilter;
@@ -111,6 +114,7 @@ class MetricsConfig extends SubsetConfiguration {
     for (String fname : fileNames) {
       try {
         PropertiesConfiguration pcf = new PropertiesConfiguration();
+        pcf.setListDelimiterHandler(new DefaultListDelimiterHandler(','));
         FileHandler fh = new FileHandler(pcf);
         fh.setFileName(fname);
         fh.load();
@@ -287,7 +291,7 @@ class MetricsConfig extends SubsetConfiguration {
       PropertiesConfiguration tmp = new PropertiesConfiguration();
       tmp.copy(c);
       tmp.write(pw);
-      return buffer.toString("UTF-8");
+      return new String(buffer.toByteArray(), StandardCharsets.UTF_8);
     } catch (Exception e) {
       throw new MetricsConfigException(e);
     }

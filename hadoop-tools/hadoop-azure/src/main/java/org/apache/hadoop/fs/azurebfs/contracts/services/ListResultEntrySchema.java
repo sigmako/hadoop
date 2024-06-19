@@ -18,7 +18,8 @@
 
 package org.apache.hadoop.fs.azurebfs.contracts.services;
 
-import org.codehaus.jackson.annotate.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 import org.apache.hadoop.classification.InterfaceStability;
 
@@ -26,6 +27,7 @@ import org.apache.hadoop.classification.InterfaceStability;
  * The ListResultEntrySchema model.
  */
 @InterfaceStability.Evolving
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class ListResultEntrySchema {
   /**
    * The name property.
@@ -74,6 +76,18 @@ public class ListResultEntrySchema {
    */
   @JsonProperty(value = "permissions")
   private String permissions;
+
+  /**
+   *  The encryption context property
+   */
+  @JsonProperty(value = "EncryptionContext")
+  private String xMsEncryptionContext;
+
+  /**
+   * The customer-provided encryption-256 value
+   * */
+  @JsonProperty(value = "CustomerProvidedKeySha256")
+  private String customerProvidedKeySha256;
 
   /**
    * Get the name value.
@@ -236,4 +250,19 @@ public class ListResultEntrySchema {
     return this;
   }
 
+  /**
+   * Get the x-ms-encryption-context value.
+   * @return the x-ms-encryption-context value.
+   * */
+  public String getXMsEncryptionContext() {
+    return xMsEncryptionContext;
+  }
+
+  /**
+   * Get the customer-provided sha-256 key
+   * @return the x-ms-encryption-key-sha256 value used by client.
+   * */
+  public String getCustomerProvidedKeySha256() {
+    return customerProvidedKeySha256;
+  }
 }

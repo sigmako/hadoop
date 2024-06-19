@@ -40,6 +40,7 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.SafeModeAction;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
@@ -48,7 +49,6 @@ import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.server.namenode.FSDirectory;
 import org.apache.hadoop.hdfs.server.namenode.FSImageTestUtil;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
@@ -208,9 +208,9 @@ public class TestSnapshot {
     SnapshotTestHelper.dumpTree2File(fsdir, fsnMiddle);
    
     // save namespace and restart cluster
-    hdfs.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
+    hdfs.setSafeMode(SafeModeAction.ENTER);
     hdfs.saveNamespace();
-    hdfs.setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
+    hdfs.setSafeMode(SafeModeAction.LEAVE);
     cluster.shutdown();
     cluster = new MiniDFSCluster.Builder(conf).format(false)
         .numDataNodes(REPLICATION).build();
@@ -257,7 +257,7 @@ public class TestSnapshot {
         FSImageTestUtil.getFSImage(
         cluster.getNameNode()).getStorage().getStorageDir(0));
     assertNotNull("Didn't generate or can't find fsimage", originalFsimage);
-    PrintStream o = new PrintStream(NullOutputStream.NULL_OUTPUT_STREAM);
+    PrintStream o = new PrintStream(NullOutputStream.INSTANCE);
     PBImageXmlWriter v = new PBImageXmlWriter(new Configuration(), o);
     v.visit(new RandomAccessFile(originalFsimage, "r"));
   }
@@ -511,6 +511,59 @@ public class TestSnapshot {
     FileStatus newSnapshotStatus = hdfs.getFileStatus(dir);
     assertEquals(dirStatus.getModificationTime(),
         newSnapshotStatus.getModificationTime());
+  }
+
+  /**
+   * HDFS-15446 - ensure that snapshot operations on /.reserved/raw
+   * paths work and the NN can load the resulting edits.
+   */
+  @Test(timeout = 60000)
+  public void testSnapshotOpsOnReservedPath() throws Exception {
+    Path dir = new Path("/dir");
+    Path nestedDir = new Path("/nested/dir");
+    Path sub = new Path(dir, "sub");
+    Path subFile = new Path(sub, "file");
+    Path nestedFile = new Path(nestedDir, "file");
+    DFSTestUtil.createFile(hdfs, subFile, BLOCKSIZE, REPLICATION, seed);
+    DFSTestUtil.createFile(hdfs, nestedFile, BLOCKSIZE, REPLICATION, seed);
+
+    hdfs.allowSnapshot(dir);
+    hdfs.allowSnapshot(nestedDir);
+    Path reservedDir = new Path("/.reserved/raw/dir");
+    Path reservedNestedDir = new Path("/.reserved/raw/nested/dir");
+    hdfs.createSnapshot(reservedDir, "s1");
+    hdfs.createSnapshot(reservedNestedDir, "s1");
+    hdfs.renameSnapshot(reservedDir, "s1", "s2");
+    hdfs.renameSnapshot(reservedNestedDir, "s1", "s2");
+    hdfs.deleteSnapshot(reservedDir, "s2");
+    hdfs.deleteSnapshot(reservedNestedDir, "s2");
+    // The original problem with reserved path, is that the NN was unable to
+    // replay the edits, therefore restarting the NN to ensure it starts
+    // and no exceptions are raised.
+    cluster.restartNameNode(true);
+  }
+
+  /**
+   * HDFS-15446 - ensure that snapshot operations on /.reserved/raw
+   * paths work and the NN can load the resulting edits. This test if for
+   * snapshots at the root level.
+   */
+  @Test(timeout = 120000)
+  public void testSnapshotOpsOnRootReservedPath() throws Exception {
+    Path dir = new Path("/");
+    Path sub = new Path(dir, "sub");
+    Path subFile = new Path(sub, "file");
+    DFSTestUtil.createFile(hdfs, subFile, BLOCKSIZE, REPLICATION, seed);
+
+    hdfs.allowSnapshot(dir);
+    Path reservedDir = new Path("/.reserved/raw");
+    hdfs.createSnapshot(reservedDir, "s1");
+    hdfs.renameSnapshot(reservedDir, "s1", "s2");
+    hdfs.deleteSnapshot(reservedDir, "s2");
+    // The original problem with reserved path, is that the NN was unable to
+    // replay the edits, therefore restarting the NN to ensure it starts
+    // and no exceptions are raised.
+    cluster.restartNameNode(true);
   }
 
   /**

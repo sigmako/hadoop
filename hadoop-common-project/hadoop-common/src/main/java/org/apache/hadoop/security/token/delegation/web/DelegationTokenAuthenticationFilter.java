@@ -17,7 +17,7 @@
  */
 package org.apache.hadoop.security.token.delegation.web;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -51,7 +51,7 @@ import javax.servlet.http.HttpServletRequestWrapper;
 import javax.servlet.http.HttpServletResponse;
 
 import java.io.IOException;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.security.Principal;
 import java.util.Enumeration;
 import java.util.List;
@@ -94,8 +94,6 @@ public class DelegationTokenAuthenticationFilter
   public static final String DELEGATION_TOKEN_SECRET_MANAGER_ATTR =
       "hadoop.http.delegation-token-secret-manager";
 
-  private static final Charset UTF8_CHARSET = Charset.forName("UTF-8");
-
   private static final ThreadLocal<UserGroupInformation> UGI_TL =
       new ThreadLocal<UserGroupInformation>();
   public static final String PROXYUSER_PREFIX = "proxyuser";
@@ -125,6 +123,7 @@ public class DelegationTokenAuthenticationFilter
    * Set AUTH_TYPE property to the name of the corresponding authentication
    * handler class based on the input properties.
    * @param props input properties.
+   * @throws ServletException servlet exception.
    */
   protected void setAuthHandlerClass(Properties props)
       throws ServletException {
@@ -225,7 +224,7 @@ public class DelegationTokenAuthenticationFilter
     if (queryString == null) {
       return null;
     }
-    List<NameValuePair> list = URLEncodedUtils.parse(queryString, UTF8_CHARSET);
+    List<NameValuePair> list = URLEncodedUtils.parse(queryString, StandardCharsets.UTF_8);
     if (list != null) {
       for (NameValuePair nv : list) {
         if (DelegationTokenAuthenticatedURL.DO_AS.

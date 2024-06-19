@@ -45,7 +45,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 /**
- * The the safe mode for the {@link Router} controlled by
+ * The safe mode for the {@link Router} controlled by
  * {@link SafeModeTimer}.
  */
 public class TestRouter {
@@ -223,10 +223,14 @@ public class TestRouter {
 
   @Test
   public void testSwitchRouter() throws IOException {
-    assertRouterHeartbeater(true, true);
-    assertRouterHeartbeater(true, false);
-    assertRouterHeartbeater(false, true);
-    assertRouterHeartbeater(false, false);
+    assertRouterHeartbeater(true, true, true);
+    assertRouterHeartbeater(true, true, false);
+    assertRouterHeartbeater(true, false, true);
+    assertRouterHeartbeater(true, false, false);
+    assertRouterHeartbeater(false, true, true);
+    assertRouterHeartbeater(false, true, false);
+    assertRouterHeartbeater(false, false, true);
+    assertRouterHeartbeater(false, false, false);
   }
 
   /**
@@ -235,15 +239,19 @@ public class TestRouter {
    * @param expectedRouterHeartbeat expect the routerHeartbeat enable state.
    * @param expectedNNHeartbeat expect the nnHeartbeat enable state.
    */
-  private void assertRouterHeartbeater(boolean expectedRouterHeartbeat,
+  private void assertRouterHeartbeater(boolean enableRpcServer, boolean expectedRouterHeartbeat,
       boolean expectedNNHeartbeat) throws IOException {
     final Router router = new Router();
-    Configuration baseCfg = new RouterConfigBuilder(conf).rpc().build();
+    Configuration baseCfg = new RouterConfigBuilder(conf).rpc(enableRpcServer).build();
     baseCfg.setBoolean(RBFConfigKeys.DFS_ROUTER_HEARTBEAT_ENABLE,
         expectedRouterHeartbeat);
     baseCfg.setBoolean(RBFConfigKeys.DFS_ROUTER_NAMENODE_HEARTBEAT_ENABLE,
         expectedNNHeartbeat);
     router.init(baseCfg);
+
+    // RouterId can not be null , used by RouterHeartbeatService.updateStateStore()
+    assertNotNull(router.getRouterId());
+
     RouterHeartbeatService routerHeartbeatService =
         router.getRouterHeartbeatService();
     if (expectedRouterHeartbeat) {
@@ -274,9 +282,18 @@ public class TestRouter {
    */
   private void checkNamenodeHeartBeatEnableDefault(boolean enable)
       throws IOException {
-    final Router router = new Router();
-    try {
+    try (Router router = new Router()) {
+      // Use default config
       Configuration config = new HdfsConfiguration();
+      // bind to any available port
+      config.set(RBFConfigKeys.DFS_ROUTER_RPC_BIND_HOST_KEY, "0.0.0.0");
+      config.set(RBFConfigKeys.DFS_ROUTER_RPC_ADDRESS_KEY, "127.0.0.1:0");
+      config.set(RBFConfigKeys.DFS_ROUTER_ADMIN_ADDRESS_KEY, "127.0.0.1:0");
+      config.set(RBFConfigKeys.DFS_ROUTER_ADMIN_BIND_HOST_KEY, "0.0.0.0");
+      config.set(RBFConfigKeys.DFS_ROUTER_HTTP_ADDRESS_KEY, "127.0.0.1:0");
+      config.set(RBFConfigKeys.DFS_ROUTER_HTTPS_ADDRESS_KEY, "127.0.0.1:0");
+      config.set(RBFConfigKeys.DFS_ROUTER_HTTP_BIND_HOST_KEY, "0.0.0.0");
+
       config.setBoolean(RBFConfigKeys.DFS_ROUTER_HEARTBEAT_ENABLE, enable);
       router.init(config);
       if (enable) {
@@ -284,8 +301,6 @@ public class TestRouter {
       } else {
         assertNull(router.getNamenodeHeartbeatServices());
       }
-    } finally {
-      router.close();
     }
   }
 }

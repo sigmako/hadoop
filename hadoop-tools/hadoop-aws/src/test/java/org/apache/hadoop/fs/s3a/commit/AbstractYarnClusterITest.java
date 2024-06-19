@@ -39,7 +39,7 @@ import org.apache.hadoop.mapreduce.v2.MiniMRYarnCluster;
 import org.apache.hadoop.mapreduce.v2.jobhistory.JHAdminConfig;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 
-import static com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.hadoop.util.Preconditions.checkNotNull;
 import static org.apache.hadoop.fs.s3a.S3ATestUtils.assume;
 import static org.apache.hadoop.fs.s3a.S3ATestUtils.deployService;
 import static org.apache.hadoop.fs.s3a.S3ATestUtils.getTestPropertyBool;
@@ -156,7 +156,7 @@ public abstract class AbstractYarnClusterITest extends AbstractCommitITest {
   /**
    * Create the cluster binding.
    * The configuration will be patched by propagating down options
-   * from the maven build (S3Guard binding etc) and turning off unwanted
+   * from the maven build and turning off unwanted
    * YARN features.
    *
    * If an HDFS cluster is requested,
@@ -330,10 +330,11 @@ public abstract class AbstractYarnClusterITest extends AbstractCommitITest {
    * called after the base assertions have all passed.
    * @param destPath destination of work
    * @param successData loaded success data
+   * @param jobId job id
    * @throws Exception failure
    */
   protected void customPostExecutionValidation(Path destPath,
-      SuccessData successData)
+      SuccessData successData, String jobId)
       throws Exception {
 
   }

@@ -18,7 +18,7 @@
 
 package org.apache.hadoop.hdfs.server.namenode;
 
-import com.google.common.base.Preconditions;
+import org.apache.hadoop.util.Preconditions;
 
 import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.DirectoryListingStartAfterNotFoundException;
@@ -105,6 +105,7 @@ class FSDirStatAndListingOp {
       // superuser to receive null instead.
       try {
         iip = fsd.resolvePath(pc, srcArg, dirOp);
+        pc.checkSuperuserPrivilege(iip.getPath());
       } catch (AccessControlException ace) {
         return null;
       }
@@ -151,12 +152,14 @@ class FSDirStatAndListingOp {
     BlockManager bm = fsd.getBlockManager();
     fsd.readLock();
     try {
-      final INodesInPath iip = fsd.resolvePath(pc, src, DirOp.READ);
+      // Just get INodesInPath without access checks, since we check for path
+      // access later
+      final INodesInPath iip = fsd.resolvePath(null, src, DirOp.READ);
       src = iip.getPath();
       final INodeFile inode = INodeFile.valueOf(iip.getLastINode(), src);
       if (fsd.isPermissionEnabled()) {
-        fsd.checkPathAccess(pc, iip, FsAction.READ);
         fsd.checkUnreadableBySuperuser(pc, iip);
+        fsd.checkPathAccess(pc, iip, FsAction.READ);
       }
 
       final long fileSize = iip.isSnapshot()
@@ -259,13 +262,24 @@ class FSDirStatAndListingOp {
             needLocation, false);
         listingCnt++;
         if (listing[i] instanceof HdfsLocatedFileStatus) {
-            // Once we  hit lsLimit locations, stop.
-            // This helps to prevent excessively large response payloads.
-            // Approximate #locations with locatedBlockCount() * repl_factor
-            LocatedBlocks blks =
-                ((HdfsLocatedFileStatus)listing[i]).getLocatedBlocks();
-            locationBudget -= (blks == null) ? 0 :
-               blks.locatedBlockCount() * listing[i].getReplication();
+          // Once we hit lsLimit locations, stop.
+          // This helps to prevent excessively large response payloads.
+          LocatedBlocks blks =
+              ((HdfsLocatedFileStatus) listing[i]).getLocatedBlocks();
+          if (blks != null) {
+            ErasureCodingPolicy ecPolicy = listing[i].getErasureCodingPolicy();
+            if (ecPolicy != null && !ecPolicy.isReplicationPolicy()) {
+              // Approximate #locations with locatedBlockCount() *
+              // internalBlocksNum.
+              locationBudget -= blks.locatedBlockCount() *
+                  (ecPolicy.getNumDataUnits() + ecPolicy.getNumParityUnits());
+            } else {
+              // Approximate #locations with locatedBlockCount() *
+              // replicationFactor.
+              locationBudget -=
+                  blks.locatedBlockCount() * listing[i].getReplication();
+            }
+          }
         }
       }
       // truncate return array if necessary

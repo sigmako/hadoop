@@ -22,7 +22,7 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import org.apache.hadoop.conf.Configuration;
@@ -35,24 +35,22 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.test.GenericTestUtils;
 
 import static org.apache.hadoop.test.PlatformAssumptions.assumeNotWindows;
-import org.apache.sshd.common.NamedFactory;
-import org.apache.sshd.server.Command;
 import org.apache.sshd.server.SshServer;
-import org.apache.sshd.server.auth.UserAuth;
+import org.apache.sshd.server.auth.UserAuthFactory;
 import org.apache.sshd.server.auth.password.PasswordAuthenticator;
 import org.apache.sshd.server.auth.password.UserAuthPasswordFactory;
 import org.apache.sshd.server.keyprovider.SimpleGeneratorHostKeyProvider;
 import org.apache.sshd.server.session.ServerSession;
-import org.apache.sshd.server.subsystem.sftp.SftpSubsystemFactory;
-import static org.hamcrest.core.Is.is;
-import org.junit.After;
-import org.junit.AfterClass;
+import org.apache.sshd.sftp.server.SftpSubsystemFactory;
+
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
+import org.junit.After;
+import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Rule;
@@ -81,8 +79,7 @@ public class TestSFTPFileSystem {
     sshd.setPort(0);
     sshd.setKeyPairProvider(new SimpleGeneratorHostKeyProvider());
 
-    List<NamedFactory<UserAuth>> userAuthFactories =
-        new ArrayList<NamedFactory<UserAuth>>();
+    List<UserAuthFactory> userAuthFactories = new ArrayList<>();
     userAuthFactories.add(new UserAuthPasswordFactory());
 
     sshd.setUserAuthFactories(userAuthFactories);
@@ -99,7 +96,7 @@ public class TestSFTPFileSystem {
     });
 
     sshd.setSubsystemFactories(
-        Arrays.<NamedFactory<Command>>asList(new SftpSubsystemFactory()));
+        Collections.singletonList(new SftpSubsystemFactory()));
 
     sshd.start();
     port = sshd.getPort();
@@ -193,8 +190,9 @@ public class TestSFTPFileSystem {
     assertTrue(localFs.exists(file));
     assertTrue(sftpFs.delete(file, false));
     assertFalse(localFs.exists(file));
-    assertThat(((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount(),
-        is(1));
+    assertThat(
+        ((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount())
+        .isEqualTo(1);
   }
 
   /**
@@ -210,8 +208,9 @@ public class TestSFTPFileSystem {
     assertTrue(sftpFs.delete(file, false));
     assertFalse(sftpFs.exists(file));
     assertFalse(localFs.exists(file));
-    assertThat(((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount(),
-        is(1));
+    assertThat(
+        ((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount())
+        .isEqualTo(1);
   }
 
   /**
@@ -235,8 +234,9 @@ public class TestSFTPFileSystem {
       }
     }
     assertTrue(sftpFs.delete(file, false));
-    assertThat(((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount(),
-        is(1));
+    assertThat(
+        ((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount())
+        .isEqualTo(1);
   }
 
   /**
@@ -258,8 +258,9 @@ public class TestSFTPFileSystem {
     assertEquals(data.length, sstat.getLen());
     assertEquals(lstat.getLen(), sstat.getLen());
     assertTrue(sftpFs.delete(file, false));
-    assertThat(((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount(),
-        is(1));
+    assertThat(
+        ((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount())
+        .isEqualTo(1);
   }
 
   /**
@@ -271,8 +272,9 @@ public class TestSFTPFileSystem {
   public void testDeleteNonEmptyDir() throws Exception {
     Path file = touch(localFs, name.getMethodName().toLowerCase());
     sftpFs.delete(localDir, false);
-    assertThat(((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount(),
-        is(1));
+    assertThat(
+        ((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount())
+        .isEqualTo(1);
   }
 
   /**
@@ -284,8 +286,9 @@ public class TestSFTPFileSystem {
   public void testDeleteNonExistFile() throws Exception {
     Path file = new Path(localDir, name.getMethodName().toLowerCase());
     assertFalse(sftpFs.delete(file, false));
-    assertThat(((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount(),
-        is(1));
+    assertThat(
+        ((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount())
+        .isEqualTo(1);
   }
 
   /**
@@ -308,8 +311,9 @@ public class TestSFTPFileSystem {
     assertFalse(localFs.exists(file1));
 
     assertTrue(sftpFs.delete(file2, false));
-    assertThat(((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount(),
-        is(1));
+    assertThat(
+        ((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount())
+        .isEqualTo(1);
   }
 
   /**
@@ -347,8 +351,9 @@ public class TestSFTPFileSystem {
     accessTime1 = (accessTime1 / 1000) * 1000;
     long accessTime2 = sftpFs.getFileStatus(file).getAccessTime();
     assertEquals(accessTime1, accessTime2);
-    assertThat(((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount(),
-        is(1));
+    assertThat(
+        ((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount())
+        .isEqualTo(1);
   }
 
   @Test
@@ -360,8 +365,9 @@ public class TestSFTPFileSystem {
     modifyTime1 = (modifyTime1 / 1000) * 1000;
     long modifyTime2 = sftpFs.getFileStatus(file).getModificationTime();
     assertEquals(modifyTime1, modifyTime2);
-    assertThat(((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount(),
-        is(1));
+    assertThat(
+        ((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount())
+        .isEqualTo(1);
   }
 
   @Test
@@ -371,7 +377,19 @@ public class TestSFTPFileSystem {
     sftpFs.mkdirs(path);
     assertTrue(localFs.exists(path));
     assertTrue(localFs.getFileStatus(path).isDirectory());
-    assertThat(((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount(),
-        is(1));
+    assertThat(
+        ((SFTPFileSystem) sftpFs).getConnectionPool().getLiveConnCount())
+        .isEqualTo(1);
+  }
+
+  @Test
+  public void testCloseFileSystemClosesConnectionPool() throws Exception {
+    SFTPFileSystem fs = (SFTPFileSystem) sftpFs;
+    fs.getHomeDirectory();
+    assertThat(fs.getConnectionPool().getLiveConnCount()).isEqualTo(1);
+    fs.close();
+    assertThat(fs.getConnectionPool().getLiveConnCount()).isEqualTo(0);
+    ///making sure that re-entrant close calls are safe
+    fs.close();
   }
 }

@@ -58,7 +58,7 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final String IPC_CLIENT_RPC_TIMEOUT_KEY =
       "ipc.client.rpc-timeout.ms";
   /** Default value for IPC_CLIENT_RPC_TIMEOUT_KEY. */
-  public static final int IPC_CLIENT_RPC_TIMEOUT_DEFAULT = 0;
+  public static final int IPC_CLIENT_RPC_TIMEOUT_DEFAULT = 120000;
   /** Responses larger than this will be logged */
   public static final String  IPC_SERVER_RPC_MAX_RESPONSE_SIZE_KEY =
     "ipc.server.max.response.size";
@@ -114,6 +114,9 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
       "callqueue.overflow.trigger.failover";
   public static final boolean IPC_CALLQUEUE_SERVER_FAILOVER_ENABLE_DEFAULT =
       false;
+  /** Callqueue subqueue capacity weights. */
+  public static final String IPC_CALLQUEUE_CAPACITY_WEIGHTS_KEY =
+      "callqueue.capacity.weights";
 
   /**
    * IPC scheduler priority levels.
@@ -378,7 +381,9 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final boolean RPC_METRICS_QUANTILE_ENABLE_DEFAULT = false;
   public static final String  RPC_METRICS_PERCENTILES_INTERVALS_KEY =
       "rpc.metrics.percentiles.intervals";
-  
+
+  public static final String RPC_METRICS_TIME_UNIT = "rpc.metrics.timeunit";
+
   /** Allowed hosts for nfs exports */
   public static final String NFS_EXPORTS_ALLOWED_HOSTS_SEPARATOR = ";";
   public static final String NFS_EXPORTS_ALLOWED_HOSTS_KEY = "nfs.exports.allowed.hosts";
@@ -394,6 +399,12 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final String ZK_ACL_DEFAULT = "world:anyone:rwcda";
   /** Authentication for the ZooKeeper ensemble. */
   public static final String ZK_AUTH = ZK_PREFIX + "auth";
+  /** Principal name for zookeeper servers. */
+  public static final String ZK_SERVER_PRINCIPAL = ZK_PREFIX + "server.principal";
+  /** Kerberos principal name for zookeeper connection. */
+  public static final String ZK_KERBEROS_PRINCIPAL = ZK_PREFIX + "kerberos.principal";
+  /** Kerberos keytab for zookeeper connection. */
+  public static final String ZK_KERBEROS_KEYTAB = ZK_PREFIX + "kerberos.keytab";
 
   /** Address of the ZooKeeper ensemble. */
   public static final String ZK_ADDRESS = ZK_PREFIX + "address";
@@ -406,6 +417,19 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   /** How often to retry a ZooKeeper operation  in milliseconds. */
   public static final String ZK_RETRY_INTERVAL_MS =
       ZK_PREFIX + "retry-interval-ms";
+
+  /** SSL enablement for all Hadoop-&gt;ZK communication. */
+  //Note: except ZKSignerSecretProvider in hadoop-auth to avoid circular dependency.
+  public static final String ZK_CLIENT_SSL_ENABLED = ZK_PREFIX + "ssl.enabled";
+  /** Keystore location for ZooKeeper client connection over SSL. */
+  public static final String ZK_SSL_KEYSTORE_LOCATION = ZK_PREFIX + "ssl.keystore.location";
+  /** Keystore password for ZooKeeper client connection over SSL. */
+  public static final String ZK_SSL_KEYSTORE_PASSWORD = ZK_PREFIX + "ssl.keystore.password";
+  /** Truststore location for ZooKeeper client connection over SSL. */
+  public static final String ZK_SSL_TRUSTSTORE_LOCATION = ZK_PREFIX + "ssl.truststore.location";
+  /** Truststore password for ZooKeeper client connection over SSL.  */
+  public static final String ZK_SSL_TRUSTSTORE_PASSWORD = ZK_PREFIX + "ssl.truststore.password";
+
   public static final int    ZK_RETRY_INTERVAL_MS_DEFAULT = 1000;
   /** Default domain name resolver for hadoop to use. */
   public static final String HADOOP_DOMAINNAME_RESOLVER_IMPL =
@@ -435,4 +459,50 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
       "hadoop.metrics.jvm.use-thread-mxbean";
   public static final boolean HADOOP_METRICS_JVM_USE_THREAD_MXBEAN_DEFAULT =
       false;
+
+  /** logging level for IOStatistics (debug or info). */
+  public static final String IOSTATISTICS_LOGGING_LEVEL
+      = "fs.iostatistics.logging.level";
+
+  /** DEBUG logging level for IOStatistics logging. */
+  public static final String IOSTATISTICS_LOGGING_LEVEL_DEBUG
+      = "debug";
+
+  /** WARN logging level for IOStatistics logging. */
+  public static final String IOSTATISTICS_LOGGING_LEVEL_WARN
+      = "warn";
+
+  /** ERROR logging level for IOStatistics logging. */
+  public static final String IOSTATISTICS_LOGGING_LEVEL_ERROR
+      = "error";
+
+  /** INFO logging level for IOStatistics logging. */
+  public static final String IOSTATISTICS_LOGGING_LEVEL_INFO
+      = "info";
+
+  /** Default value for IOStatistics logging level. */
+  public static final String IOSTATISTICS_LOGGING_LEVEL_DEFAULT
+      = IOSTATISTICS_LOGGING_LEVEL_DEBUG;
+
+  /**
+   * default hadoop temp dir on local system: {@value}.
+   */
+  public static final String HADOOP_TMP_DIR = "hadoop.tmp.dir";
+
+  /**
+   * Thread-level IOStats Support.
+   * {@value}
+   */
+  public static final String IOSTATISTICS_THREAD_LEVEL_ENABLED =
+      "fs.iostatistics.thread.level.enabled";
+
+  /**
+   * Default value for Thread-level IOStats Support is true.
+   */
+  public static final boolean IOSTATISTICS_THREAD_LEVEL_ENABLED_DEFAULT =
+      true;
+
+  public static final String HADOOP_SECURITY_RESOLVER_IMPL =
+      "hadoop.security.resolver.impl";
+
 }

@@ -23,9 +23,9 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Map;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSortedMap;
+import org.apache.hadoop.util.Preconditions;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ImmutableMap;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ImmutableSortedMap;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.Options;
 import org.apache.hadoop.ha.FailoverController;
@@ -247,7 +247,7 @@ public class DFSHAAdmin extends HAAdmin {
   }
 
   private int transitionToObserver(final CommandLine cmd)
-      throws IOException, ServiceFailedException {
+      throws IOException {
     String[] argv = cmd.getArgs();
     if (argv.length != 1) {
       errOut.println("transitionToObserver: incorrect number of arguments");
@@ -262,8 +262,13 @@ public class DFSHAAdmin extends HAAdmin {
     if (!checkManualStateManagementOK(target)) {
       return -1;
     }
-    HAServiceProtocol proto = target.getProxy(getConf(), 0);
-    HAServiceProtocolHelper.transitionToObserver(proto, createReqInfo());
+    try {
+      HAServiceProtocol proto = target.getProxy(getConf(), 0);
+      HAServiceProtocolHelper.transitionToObserver(proto, createReqInfo());
+    } catch (ServiceFailedException e) {
+      errOut.println("transitionToObserver failed! " + e.getLocalizedMessage());
+      return -1;
+    }
     return 0;
   }
 
@@ -283,6 +288,11 @@ public class DFSHAAdmin extends HAAdmin {
 
     HAServiceTarget fromNode = resolveTarget(args[0]);
     HAServiceTarget toNode = resolveTarget(args[1]);
+
+    fromNode.setTransitionTargetHAStatus(
+        HAServiceProtocol.HAServiceState.STANDBY);
+    toNode.setTransitionTargetHAStatus(
+        HAServiceProtocol.HAServiceState.ACTIVE);
 
     // Check that auto-failover is consistently configured for both nodes.
     Preconditions.checkState(

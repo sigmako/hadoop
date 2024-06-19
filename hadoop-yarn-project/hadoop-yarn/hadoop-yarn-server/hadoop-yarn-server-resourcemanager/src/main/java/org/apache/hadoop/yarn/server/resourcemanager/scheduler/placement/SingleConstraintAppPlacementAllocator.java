@@ -18,8 +18,7 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.placement;
 
-import com.google.common.annotations.VisibleForTesting;
-import org.apache.commons.collections.IteratorUtils;
+import org.apache.hadoop.classification.VisibleForTesting;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.activities.DiagnosticsCollector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,7 +28,7 @@ import org.apache.hadoop.yarn.api.records.ResourceSizing;
 import org.apache.hadoop.yarn.api.records.SchedulingRequest;
 import org.apache.hadoop.yarn.api.records.impl.pb.SchedulingRequestPBImpl;
 import org.apache.hadoop.yarn.api.resource.PlacementConstraint;
-import org.apache.hadoop.yarn.exceptions.SchedulerInvalidResoureRequestException;
+import org.apache.hadoop.yarn.exceptions.SchedulerInvalidResourceRequestException;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
 import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AppSchedulingInfo;
@@ -46,7 +45,6 @@ import org.apache.hadoop.yarn.server.scheduler.SchedulerRequestKey;
 
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -79,27 +77,11 @@ public class SingleConstraintAppPlacementAllocator<N extends SchedulerNode>
   }
 
   @Override
-  @SuppressWarnings("unchecked")
-  public Iterator<N> getPreferredNodeIterator(
-      CandidateNodeSet<N> candidateNodeSet) {
-    // Now only handle the case that single node in the candidateNodeSet
-    // TODO, Add support to multi-hosts inside candidateNodeSet which is passed
-    // in.
-
-    N singleNode = CandidateNodeSetUtils.getSingleNode(candidateNodeSet);
-    if (null != singleNode) {
-      return IteratorUtils.singletonIterator(singleNode);
-    }
-
-    return IteratorUtils.emptyIterator();
-  }
-
-  @Override
   public PendingAskUpdateResult updatePendingAsk(
       Collection<ResourceRequest> requests,
       boolean recoverPreemptedRequestForAContainer) {
     if (requests != null && !requests.isEmpty()) {
-      throw new SchedulerInvalidResoureRequestException(
+      throw new SchedulerInvalidResourceRequestException(
           this.getClass().getName()
               + " not be able to handle ResourceRequest, there exists a "
               + "SchedulingRequest with the same scheduler key="
@@ -116,7 +98,7 @@ public class SingleConstraintAppPlacementAllocator<N extends SchedulerNode>
       SchedulingRequest newSchedulingRequest, boolean recoverContainer) {
     // When it is a recover container, there must exists an schedulingRequest.
     if (recoverContainer && schedulingRequest == null) {
-      throw new SchedulerInvalidResoureRequestException("Trying to recover a "
+      throw new SchedulerInvalidResourceRequestException("Trying to recover a "
           + "container request=" + newSchedulingRequest.toString() + ", however"
           + "there's no existing scheduling request, this should not happen.");
     }
@@ -145,7 +127,7 @@ public class SingleConstraintAppPlacementAllocator<N extends SchedulerNode>
       if (!schedulingRequest.equals(newSchedulingRequest)) {
         // Rollback #numAllocations
         sizing.setNumAllocations(newNumAllocations);
-        throw new SchedulerInvalidResoureRequestException(
+        throw new SchedulerInvalidResourceRequestException(
             "Invalid updated SchedulingRequest added to scheduler, "
                 + " we only allows changing numAllocations for the updated "
                 + "SchedulingRequest. Old=" + schedulingRequest.toString()
@@ -166,7 +148,7 @@ public class SingleConstraintAppPlacementAllocator<N extends SchedulerNode>
 
       // Basic sanity check
       if (newNumAllocations < 0) {
-        throw new SchedulerInvalidResoureRequestException(
+        throw new SchedulerInvalidResourceRequestException(
             "numAllocation in ResourceSizing field must be >= 0, "
                 + "updating schedulingRequest failed.");
       }
@@ -215,12 +197,12 @@ public class SingleConstraintAppPlacementAllocator<N extends SchedulerNode>
     sb.append("AppId=").append(appSchedulingInfo.getApplicationId()).append(
         " Key=").append(this.schedulerRequestKey).append(". Exception message:")
         .append(message);
-    throw new SchedulerInvalidResoureRequestException(sb.toString());
+    throw new SchedulerInvalidResourceRequestException(sb.toString());
   }
 
   private void validateAndSetSchedulingRequest(SchedulingRequest
       newSchedulingRequest)
-      throws SchedulerInvalidResoureRequestException {
+      throws SchedulerInvalidResourceRequestException {
     // Check sizing exists
     if (newSchedulingRequest.getResourceSizing() == null
         || newSchedulingRequest.getResourceSizing().getResources() == null) {
@@ -327,6 +309,8 @@ public class SingleConstraintAppPlacementAllocator<N extends SchedulerNode>
     // Deduct pending #allocations by 1
     ResourceSizing sizing = schedulingRequest.getResourceSizing();
     sizing.setNumAllocations(sizing.getNumAllocations() - 1);
+
+    appSchedulingInfo.decPendingResource(targetNodePartition, sizing.getResources());
   }
 
   @Override

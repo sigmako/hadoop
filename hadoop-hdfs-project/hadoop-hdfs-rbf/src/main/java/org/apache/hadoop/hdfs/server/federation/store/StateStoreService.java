@@ -53,7 +53,7 @@ import org.apache.hadoop.util.Time;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 
 /**
  * A service to initialize a
@@ -64,6 +64,12 @@ import com.google.common.annotations.VisibleForTesting;
  * <li>File {@link
  * org.apache.hadoop.hdfs.server.federation.store.driver.impl.StateStoreFileImpl
  * StateStoreFileImpl}
+ * <li>FileSystem {@link
+ * org.apache.hadoop.hdfs.server.federation.store.driver.impl.StateStoreFileSystemImpl
+ * StateStoreFileSystemImpl}
+ * <li>MySQL {@link
+ * org.apache.hadoop.hdfs.server.federation.store.driver.impl.StateStoreMySQLImpl
+ * StateStoreMySQLImpl}
  * <li>ZooKeeper {@link
  * org.apache.hadoop.hdfs.server.federation.store.driver.impl.StateStoreZooKeeperImpl
  * StateStoreZooKeeperImpl}
@@ -126,13 +132,15 @@ public class StateStoreService extends CompositeService {
     // Caches to maintain
     this.cachesToUpdateInternal = new ArrayList<>();
     this.cachesToUpdateExternal = new ArrayList<>();
+
+    this.cacheLastUpdateTime = 0;
   }
 
   /**
    * Initialize the State Store and the connection to the back-end.
    *
    * @param config Configuration for the State Store.
-   * @throws IOException Cannot create driver for the State Store.
+   * @throws Exception Cannot create driver for the State Store.
    */
   @Override
   protected void serviceInit(Configuration config) throws Exception {
@@ -233,7 +241,6 @@ public class StateStoreService extends CompositeService {
    *
    * @param <T> Type of the records stored.
    * @param clazz Class of the record store to track.
-   * @return New record store.
    * @throws ReflectiveOperationException
    */
   private <T extends RecordStore<?>> void addRecordStore(
@@ -257,6 +264,7 @@ public class StateStoreService extends CompositeService {
    * Get the record store in this State Store for a given interface.
    *
    * @param recordStoreClass Class of the record store.
+   * @param <T> The type of the record store.
    * @return Registered record store or null if not found.
    */
   public <T extends RecordStore<?>> T getRegisteredRecordStore(
@@ -270,6 +278,17 @@ public class StateStoreService extends CompositeService {
       }
     }
     return null;
+  }
+
+  /**
+   * Get the list of all RecordStores.
+   *
+   * @param <T> The type of the record stores that are returned.
+   * @return a list of each RecordStore.
+   */
+  @SuppressWarnings("unchecked")
+  public <T extends RecordStore<? extends BaseRecord>> List<T> getRecordStores() {
+    return new ArrayList<>((Collection<T>) recordStores.values());
   }
 
   /**
@@ -331,7 +350,7 @@ public class StateStoreService extends CompositeService {
   }
 
   /**
-   * Fetch a unique identifier for this state store instance. Typically it is
+   * Fetch a unique identifier for this state store instance. Typically, it is
    * the address of the router.
    *
    * @return Unique identifier for this store.
@@ -410,7 +429,6 @@ public class StateStoreService extends CompositeService {
           result = cachedStore.loadCache(force);
         } catch (IOException e) {
           LOG.error("Error updating cache for {}", cacheName, e);
-          result = false;
         }
         if (!result) {
           success = false;
@@ -423,7 +441,7 @@ public class StateStoreService extends CompositeService {
     }
     if (success) {
       // Uses local time, not driver time.
-      this.cacheLastUpdateTime = Time.now();
+      this.cacheLastUpdateTime = Time.monotonicNow();
     }
   }
 

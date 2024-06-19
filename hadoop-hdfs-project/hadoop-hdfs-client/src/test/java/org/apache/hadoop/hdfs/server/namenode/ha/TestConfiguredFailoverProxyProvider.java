@@ -23,6 +23,7 @@ import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.net.MockDomainNameResolver;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.Time;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -34,7 +35,6 @@ import org.mockito.stubbing.Answer;
 import org.slf4j.event.Level;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -44,6 +44,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -60,6 +61,7 @@ public class TestConfiguredFailoverProxyProvider {
   private URI ns1Uri;
   private URI ns2Uri;
   private URI ns3Uri;
+  private URI ns4Uri;
   private String ns1;
   private String ns1nn1Hostname = "machine1.foo.bar";
   private InetSocketAddress ns1nn1 =
@@ -79,6 +81,9 @@ public class TestConfiguredFailoverProxyProvider {
       new InetSocketAddress(ns2nn3Hostname, rpcPort);
   private String ns3;
   private static final int NUM_ITERATIONS = 50;
+  private String ns4;
+  private String ns4nn1Hostname = "localhost";
+  private String ns4nn2Hostname = "127.0.0.1";
 
   @Rule
   public final ExpectedException exception = ExpectedException.none();
@@ -133,8 +138,11 @@ public class TestConfiguredFailoverProxyProvider {
     ns3 = "mycluster-3-" + Time.monotonicNow();
     ns3Uri = new URI("hdfs://" + ns3);
 
+    ns4 = "mycluster-4-" + Time.monotonicNow();
+    ns4Uri = new URI("hdfs://" + ns4);
+
     conf.set(HdfsClientConfigKeys.DFS_NAMESERVICES,
-        String.join(",", ns1, ns2, ns3));
+        String.join(",", ns1, ns2, ns3, ns4));
     conf.set("fs.defaultFS", "hdfs://" + ns1);
   }
 
@@ -168,6 +176,33 @@ public class TestConfiguredFailoverProxyProvider {
         HdfsClientConfigKeys.Failover.RESOLVE_ADDRESS_TO_FQDN + "." + ns3,
         useFQDN
     );
+  }
+
+  /**
+   * Add more LazyResolved related settings to the passed in configuration.
+   */
+  private void addLazyResolvedSettings(Configuration config, boolean isLazy) {
+    config.set(
+        HdfsClientConfigKeys.DFS_HA_NAMENODES_KEY_PREFIX + "." + ns4,
+        "nn1,nn2,nn3");
+    config.set(
+        HdfsClientConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY + "." + ns4 + ".nn1",
+        ns4nn1Hostname + ":" + rpcPort);
+    config.set(
+        HdfsClientConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY + "." + ns4 + ".nn2",
+        ns4nn2Hostname + ":" + rpcPort);
+    config.set(
+        HdfsClientConfigKeys.Failover.PROXY_PROVIDER_KEY_PREFIX + "." + ns4,
+        ConfiguredFailoverProxyProvider.class.getName());
+    if (isLazy) {
+      // Set  dfs.client.failover.lazy.resolved=true (default false).
+      config.setBoolean(
+          HdfsClientConfigKeys.Failover.DFS_CLIENT_LAZY_RESOLVED,
+          true);
+    }
+    config.setBoolean(
+        HdfsClientConfigKeys.Failover.RANDOM_ORDER + "." + ns4,
+        false);
   }
 
   /**
@@ -292,12 +327,22 @@ public class TestConfiguredFailoverProxyProvider {
         MockDomainNameResolver.FQDN_2 : "/" + MockDomainNameResolver.ADDR_2;
     // Check we got the proper addresses
     assertEquals(2, proxyResults.size());
-    assertTrue(
-        "nn1 wasn't returned: " + proxyResults,
-        proxyResults.containsKey(resolvedHost1 + ":8020"));
-    assertTrue(
-        "nn2 wasn't returned: " + proxyResults,
-        proxyResults.containsKey(resolvedHost2 + ":8020"));
+    if (Shell.isJavaVersionAtLeast(14) && useFQDN) {
+      // JDK-8225499. The string format of unresolved address has been changed.
+      assertTrue(
+          "nn1 wasn't returned: " + proxyResults,
+          proxyResults.containsKey(resolvedHost1 + "/<unresolved>:8020"));
+      assertTrue(
+          "nn2 wasn't returned: " + proxyResults,
+          proxyResults.containsKey(resolvedHost2 + "/<unresolved>:8020"));
+    } else {
+      assertTrue(
+          "nn1 wasn't returned: " + proxyResults,
+          proxyResults.containsKey(resolvedHost1 + ":8020"));
+      assertTrue(
+          "nn2 wasn't returned: " + proxyResults,
+          proxyResults.containsKey(resolvedHost2 + ":8020"));
+    }
 
     // Check that the Namenodes were invoked
     assertEquals(NUM_ITERATIONS, nn1Count.get() + nn2Count.get());
@@ -318,6 +363,51 @@ public class TestConfiguredFailoverProxyProvider {
     testResolveDomainNameUsingDNS(false);
     // test resolving to FQDN
     testResolveDomainNameUsingDNS(true);
+  }
+
+  @Test
+  public void testLazyResolved() throws IOException {
+    // Not lazy resolved.
+    testLazyResolved(false);
+    // Lazy resolved.
+    testLazyResolved(true);
+  }
+
+  private void testLazyResolved(boolean isLazy) throws IOException {
+    Configuration lazyResolvedConf = new Configuration(conf);
+    addLazyResolvedSettings(lazyResolvedConf, isLazy);
+    Map<InetSocketAddress, ClientProtocol> proxyMap = new HashMap<>();
+
+    InetSocketAddress ns4nn1 = new InetSocketAddress(ns4nn1Hostname, rpcPort);
+    InetSocketAddress ns4nn2 = new InetSocketAddress(ns4nn2Hostname, rpcPort);
+
+    // Mock ClientProtocol
+    final ClientProtocol nn1Mock = mock(ClientProtocol.class);
+    when(nn1Mock.getStats()).thenReturn(new long[]{0});
+    proxyMap.put(ns4nn1, nn1Mock);
+
+    final ClientProtocol nn2Mock = mock(ClientProtocol.class);
+    when(nn1Mock.getStats()).thenReturn(new long[]{0});
+    proxyMap.put(ns4nn2, nn2Mock);
+
+    ConfiguredFailoverProxyProvider<ClientProtocol> provider =
+        new ConfiguredFailoverProxyProvider<>(lazyResolvedConf, ns4Uri,
+            ClientProtocol.class, createFactory(proxyMap));
+    assertEquals(2, provider.proxies.size());
+    for (AbstractNNFailoverProxyProvider.NNProxyInfo proxyInfo : provider.proxies) {
+      if (isLazy) {
+        // If lazy resolution is used, and the proxy is not used at this time,
+        // so the host is not resolved.
+        assertTrue(proxyInfo.getAddress().isUnresolved());
+      }else {
+        assertFalse(proxyInfo.getAddress().isUnresolved());
+      }
+    }
+
+    // When the host is used to process the request, the host is resolved.
+    ClientProtocol proxy = provider.getProxy().proxy;
+    proxy.getStats();
+    assertFalse(provider.proxies.get(0).getAddress().isUnresolved());
   }
 
   @Test

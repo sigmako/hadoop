@@ -18,8 +18,13 @@
 
 package org.apache.hadoop.hdfs.server.federation.router;
 
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_CALLER_CONTEXT_SEPARATOR_DEFAULT;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_CALLER_CONTEXT_SEPARATOR_KEY;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_MAX_RETRIES_ON_SOCKET_TIMEOUTS_KEY;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_TIMEOUT_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_IP_PROXY_USERS;
+import static org.apache.hadoop.hdfs.server.federation.fairness.RouterRpcFairnessConstants.CONCURRENT_NS;
+import static org.apache.hadoop.hdfs.server.federation.metrics.FederationRPCPerformanceMonitor.CONCURRENT;
 
 import java.io.EOFException;
 import java.io.FileNotFoundException;
@@ -29,10 +34,12 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
+import java.net.SocketException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -43,6 +50,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -50,6 +58,8 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.LongAccumulator;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -58,24 +68,33 @@ import org.apache.hadoop.hdfs.NameNodeProxiesClient.ProxyAndInfo;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.SnapshotException;
+import org.apache.hadoop.hdfs.server.federation.fairness.RouterRpcFairnessPolicyController;
 import org.apache.hadoop.hdfs.server.federation.resolver.ActiveNamenodeResolver;
 import org.apache.hadoop.hdfs.server.federation.resolver.FederationNamenodeContext;
 import org.apache.hadoop.hdfs.server.federation.resolver.FederationNamenodeServiceState;
 import org.apache.hadoop.hdfs.server.federation.resolver.RemoteLocation;
+import org.apache.hadoop.hdfs.server.namenode.ha.ReadOnly;
 import org.apache.hadoop.io.retry.RetryPolicies;
 import org.apache.hadoop.io.retry.RetryPolicy;
 import org.apache.hadoop.io.retry.RetryPolicy.RetryAction.RetryDecision;
+import org.apache.hadoop.ipc.CallerContext;
+import org.apache.hadoop.ipc.ObserverRetryOnActiveException;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.ipc.RetriableException;
+import org.apache.hadoop.ipc.Server;
+import org.apache.hadoop.ipc.Server.Call;
 import org.apache.hadoop.ipc.StandbyException;
 import org.apache.hadoop.net.ConnectTimeoutException;
+import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.util.StringUtils;
+import org.apache.hadoop.util.Time;
 import org.eclipse.jetty.util.ajax.JSON;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.apache.hadoop.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 /**
  * A client proxy for Router to NN communication using the NN ClientProtocol.
@@ -114,29 +133,57 @@ public class RouterRpcClient {
   private final RetryPolicy retryPolicy;
   /** Optional perf monitor. */
   private final RouterRpcMonitor rpcMonitor;
+  /** Field separator of CallerContext. */
+  private final String contextFieldSeparator;
+  /** Observer read enabled. Default for all nameservices. */
+  private final boolean observerReadEnabledDefault;
+  /** Nameservice specific overrides of the default setting for enabling observer reads. */
+  private HashSet<String> observerReadEnabledOverrides = new HashSet<>();
+  /**
+   * Period to refresh namespace stateID using active namenode.
+   * This ensures the namespace stateID is fresh even when an
+   * observer is trailing behind.
+   */
+  private long activeNNStateIdRefreshPeriodMs;
+  /** Last msync times for each namespace. */
+  private final ConcurrentHashMap<String, LongAccumulator> lastActiveNNRefreshTimes;
 
   /** Pattern to parse a stack trace line. */
   private static final Pattern STACK_TRACE_PATTERN =
       Pattern.compile("\\tat (.*)\\.(.*)\\((.*):(\\d*)\\)");
 
+  /** Fairness manager to control handlers assigned per NS. */
+  private volatile RouterRpcFairnessPolicyController routerRpcFairnessPolicyController;
+  private Map<String, LongAdder> rejectedPermitsPerNs = new ConcurrentHashMap<>();
+  private Map<String, LongAdder> acceptedPermitsPerNs = new ConcurrentHashMap<>();
+
+  private final boolean enableProxyUser;
 
   /**
    * Create a router RPC client to manage remote procedure calls to NNs.
    *
-   * @param conf Hdfs Configuation.
+   * @param conf Hdfs Configuration.
    * @param router A router using this RPC client.
    * @param resolver A NN resolver to determine the currently active NN in HA.
    * @param monitor Optional performance monitor.
+   * @param routerStateIdContext the router state context object to hold the state ids for all
+   * namespaces.
    */
   public RouterRpcClient(Configuration conf, Router router,
-      ActiveNamenodeResolver resolver, RouterRpcMonitor monitor) {
+      ActiveNamenodeResolver resolver, RouterRpcMonitor monitor,
+      RouterStateIdContext routerStateIdContext) {
     this.router = router;
 
     this.namenodeResolver = resolver;
 
     Configuration clientConf = getClientConfiguration(conf);
-    this.connectionManager = new ConnectionManager(clientConf);
+    this.contextFieldSeparator =
+        clientConf.get(HADOOP_CALLER_CONTEXT_SEPARATOR_KEY,
+            HADOOP_CALLER_CONTEXT_SEPARATOR_DEFAULT);
+    this.connectionManager = new ConnectionManager(clientConf, routerStateIdContext);
     this.connectionManager.start();
+    this.routerRpcFairnessPolicyController =
+        FederationUtil.newFairnessPolicyController(conf);
 
     int numThreads = conf.getInt(
         RBFConfigKeys.DFS_ROUTER_CLIENT_THREADS_SIZE,
@@ -172,6 +219,30 @@ public class RouterRpcClient {
     this.retryPolicy = RetryPolicies.failoverOnNetworkException(
         RetryPolicies.TRY_ONCE_THEN_FAIL, maxFailoverAttempts, maxRetryAttempts,
         failoverSleepBaseMillis, failoverSleepMaxMillis);
+    String[] ipProxyUsers = conf.getStrings(DFS_NAMENODE_IP_PROXY_USERS);
+    this.enableProxyUser = ipProxyUsers != null && ipProxyUsers.length > 0;
+    this.observerReadEnabledDefault = conf.getBoolean(
+        RBFConfigKeys.DFS_ROUTER_OBSERVER_READ_DEFAULT_KEY,
+        RBFConfigKeys.DFS_ROUTER_OBSERVER_READ_DEFAULT_VALUE);
+    String[] observerReadOverrides =
+        conf.getStrings(RBFConfigKeys.DFS_ROUTER_OBSERVER_READ_OVERRIDES);
+    if (observerReadOverrides != null) {
+      observerReadEnabledOverrides.addAll(Arrays.asList(observerReadOverrides));
+    }
+    if (this.observerReadEnabledDefault) {
+      LOG.info("Observer read is enabled for router.");
+    }
+    this.activeNNStateIdRefreshPeriodMs = conf.getTimeDuration(
+        RBFConfigKeys.DFS_ROUTER_OBSERVER_STATE_ID_REFRESH_PERIOD_KEY,
+        RBFConfigKeys.DFS_ROUTER_OBSERVER_STATE_ID_REFRESH_PERIOD_DEFAULT,
+        TimeUnit.SECONDS, TimeUnit.MILLISECONDS);
+    if (activeNNStateIdRefreshPeriodMs < 0) {
+      LOG.info("Periodic stateId freshness check is disabled"
+              + " since '{}' is {}ms, which is less than 0.",
+          RBFConfigKeys.DFS_ROUTER_OBSERVER_STATE_ID_REFRESH_PERIOD_KEY,
+          activeNNStateIdRefreshPeriodMs);
+    }
+    this.lastActiveNNRefreshTimes = new ConcurrentHashMap<>();
   }
 
   /**
@@ -217,6 +288,9 @@ public class RouterRpcClient {
     if (this.executorService != null) {
       this.executorService.shutdownNow();
     }
+    if (this.routerRpcFairnessPolicyController != null) {
+      this.routerRpcFairnessPolicyController.shutdown();
+    }
   }
 
   /**
@@ -235,6 +309,24 @@ public class RouterRpcClient {
    */
   public int getNumActiveConnections() {
     return this.connectionManager.getNumActiveConnections();
+  }
+
+  /**
+   * Total number of idle sockets between the router and NNs.
+   *
+   * @return Number of namenode clients.
+   */
+  public int getNumIdleConnections() {
+    return this.connectionManager.getNumIdleConnections();
+  }
+
+  /**
+   * Total number of active sockets between the router and NNs.
+   *
+   * @return Number of recently active namenode clients.
+   */
+  public int getNumActiveConnectionsRecently() {
+    return this.connectionManager.getNumActiveConnectionsRecently();
   }
 
   /**
@@ -279,6 +371,23 @@ public class RouterRpcClient {
   }
 
   /**
+   * JSON representation of the rejected permits for each nameservice.
+   *
+   * @return String representation of the rejected permits for each nameservice.
+   */
+  public String getRejectedPermitsPerNsJSON() {
+    return JSON.toString(rejectedPermitsPerNs);
+  }
+
+  /**
+   * JSON representation of the accepted permits for each nameservice.
+   *
+   * @return String representation of the accepted permits for each nameservice.
+   */
+  public String getAcceptedPermitsPerNsJSON() {
+    return JSON.toString(acceptedPermitsPerNs);
+  }
+  /**
    * Get ClientProtocol proxy client for a NameNode. Each combination of user +
    * NN must use a unique proxy client. Previously created clients are cached
    * and stored in a connection pool by the ConnectionManager.
@@ -303,13 +412,13 @@ public class RouterRpcClient {
 
       // TODO Add tokens from the federated UGI
       UserGroupInformation connUGI = ugi;
-      if (UserGroupInformation.isSecurityEnabled()) {
+      if (UserGroupInformation.isSecurityEnabled() || this.enableProxyUser) {
         UserGroupInformation routerUser = UserGroupInformation.getLoginUser();
         connUGI = UserGroupInformation.createProxyUser(
             ugi.getUserName(), routerUser);
       }
       connection = this.connectionManager.getConnection(
-          connUGI, rpcAddress, proto);
+          connUGI, rpcAddress, proto, nsId);
       LOG.debug("User {} NN {} is using connection {}",
           ugi.getUserName(), rpcAddress, connection);
     } catch (Exception ex) {
@@ -348,14 +457,17 @@ public class RouterRpcClient {
    * @param ioe IOException reported.
    * @param retryCount Number of retries.
    * @param nsId Nameservice ID.
+   * @param namenode namenode context.
+   * @param listObserverFirst Observer read case, observer NN will be ranked first.
    * @return Retry decision.
-   * @throws NoNamenodesAvailableException Exception that the retry policy
-   *         generates for no available namenodes.
+   * @throws IOException An IO Error occurred.
    */
-  private RetryDecision shouldRetry(final IOException ioe, final int retryCount,
-      final String nsId) throws IOException {
+  private RetryDecision shouldRetry(
+      final IOException ioe, final int retryCount, final String nsId,
+      final FederationNamenodeContext namenode,
+      final boolean listObserverFirst) throws IOException {
     // check for the case of cluster unavailable state
-    if (isClusterUnAvailable(nsId)) {
+    if (isClusterUnAvailable(nsId, namenode, listObserverFirst)) {
       // we allow to retry once if cluster is unavailable
       if (retryCount == 0) {
         return RetryDecision.RETRY;
@@ -378,23 +490,27 @@ public class RouterRpcClient {
    * Invokes a method against the ClientProtocol proxy server. If a standby
    * exception is generated by the call to the client, retries using the
    * alternate server.
-   *
+   * <p>
    * Re-throws exceptions generated by the remote RPC call as either
    * RemoteException or IOException.
    *
    * @param ugi User group information.
    * @param namenodes A prioritized list of namenodes within the same
    *                  nameservice.
-   * @param method Remote ClientProtcol method to invoke.
+   * @param useObserver Whether to use observer namenodes.
+   * @param protocol the protocol of the connection.
+   * @param method Remote ClientProtocol method to invoke.
    * @param params Variable list of parameters matching the method.
    * @return The result of invoking the method.
    * @throws ConnectException If it cannot connect to any Namenode.
    * @throws StandbyException If all Namenodes are in Standby.
    * @throws IOException If it cannot invoke the method.
    */
-  private Object invokeMethod(
+  @VisibleForTesting
+  public Object invokeMethod(
       final UserGroupInformation ugi,
       final List<? extends FederationNamenodeContext> namenodes,
+      boolean useObserver,
       final Class<?> protocol, final Method method, final Object... params)
           throws ConnectException, StandbyException, IOException {
 
@@ -404,13 +520,19 @@ public class RouterRpcClient {
           + router.getRouterId());
     }
 
+    addClientInfoToCallerContext(ugi);
+
     Object ret = null;
     if (rpcMonitor != null) {
       rpcMonitor.proxyOp();
     }
     boolean failover = false;
+    boolean shouldUseObserver = useObserver;
     Map<FederationNamenodeContext, IOException> ioes = new LinkedHashMap<>();
     for (FederationNamenodeContext namenode : namenodes) {
+      if (!shouldUseObserver && (namenode.getState() == FederationNamenodeServiceState.OBSERVER)) {
+        continue;
+      }
       ConnectionContext connection = null;
       String nsId = namenode.getNameserviceId();
       String rpcAddress = namenode.getRpcAddress();
@@ -419,32 +541,45 @@ public class RouterRpcClient {
         ProxyAndInfo<?> client = connection.getClient();
         final Object proxy = client.getProxy();
 
-        ret = invoke(nsId, 0, method, proxy, params);
-        if (failover) {
+        ret = invoke(nsId, namenode, useObserver, 0, method, proxy, params);
+        if (failover &&
+            FederationNamenodeServiceState.OBSERVER != namenode.getState()) {
           // Success on alternate server, update
           InetSocketAddress address = client.getAddress();
           namenodeResolver.updateActiveNamenode(nsId, address);
         }
         if (this.rpcMonitor != null) {
-          this.rpcMonitor.proxyOpComplete(true);
+          this.rpcMonitor.proxyOpComplete(true, nsId, namenode.getState());
+        }
+        if (this.router.getRouterClientMetrics() != null) {
+          this.router.getRouterClientMetrics().incInvokedMethod(method);
         }
         return ret;
       } catch (IOException ioe) {
         ioes.put(namenode, ioe);
-        if (ioe instanceof StandbyException) {
+        if (ioe instanceof ObserverRetryOnActiveException) {
+          LOG.info("Encountered ObserverRetryOnActiveException from {}."
+                  + " Retry active namenode directly.", namenode);
+          shouldUseObserver = false;
+        } else if (ioe instanceof StandbyException) {
           // Fail over indicated by retry policy and/or NN
           if (this.rpcMonitor != null) {
-            this.rpcMonitor.proxyOpFailureStandby();
+            this.rpcMonitor.proxyOpFailureStandby(nsId);
           }
           failover = true;
         } else if (isUnavailableException(ioe)) {
           if (this.rpcMonitor != null) {
-            this.rpcMonitor.proxyOpFailureCommunicate();
+            this.rpcMonitor.proxyOpFailureCommunicate(nsId);
           }
-          failover = true;
+          if (FederationNamenodeServiceState.OBSERVER == namenode.getState()) {
+            namenodeResolver.updateUnavailableNamenode(nsId,
+                NetUtils.createSocketAddr(namenode.getRpcAddress()));
+          } else {
+            failover = true;
+          }
         } else if (ioe instanceof RemoteException) {
           if (this.rpcMonitor != null) {
-            this.rpcMonitor.proxyOpComplete(true);
+            this.rpcMonitor.proxyOpComplete(true, nsId, namenode.getState());
           }
           RemoteException re = (RemoteException) ioe;
           ioe = re.unwrapRemoteException();
@@ -453,7 +588,7 @@ public class RouterRpcClient {
           throw ioe;
         } else if (ioe instanceof ConnectionNullException) {
           if (this.rpcMonitor != null) {
-            this.rpcMonitor.proxyOpFailureCommunicate();
+            this.rpcMonitor.proxyOpFailureCommunicate(nsId);
           }
           LOG.error("Get connection for {} {} error: {}", nsId, rpcAddress,
               ioe.getMessage());
@@ -462,19 +597,24 @@ public class RouterRpcClient {
           se.initCause(ioe);
           throw se;
         } else if (ioe instanceof NoNamenodesAvailableException) {
+          IOException cause = (IOException) ioe.getCause();
           if (this.rpcMonitor != null) {
-            this.rpcMonitor.proxyOpNoNamenodes();
+            this.rpcMonitor.proxyOpNoNamenodes(nsId);
           }
           LOG.error("Cannot get available namenode for {} {} error: {}",
               nsId, rpcAddress, ioe.getMessage());
+          // Rotate cache so that client can retry the next namenode in the cache
+          if (shouldRotateCache(cause)) {
+            this.namenodeResolver.rotateCache(nsId, namenode, useObserver);
+          }
           // Throw RetriableException so that client can retry
           throw new RetriableException(ioe);
         } else {
           // Other communication error, this is a failure
           // Communication retries are handled by the retry policy
           if (this.rpcMonitor != null) {
-            this.rpcMonitor.proxyOpFailureCommunicate();
-            this.rpcMonitor.proxyOpComplete(false);
+            this.rpcMonitor.proxyOpFailureCommunicate(nsId);
+            this.rpcMonitor.proxyOpComplete(false, nsId, namenode.getState());
           }
           throw ioe;
         }
@@ -485,7 +625,7 @@ public class RouterRpcClient {
       }
     }
     if (this.rpcMonitor != null) {
-      this.rpcMonitor.proxyOpComplete(false);
+      this.rpcMonitor.proxyOpComplete(false, null, null);
     }
 
     // All namenodes were unavailable or in standby
@@ -519,9 +659,50 @@ public class RouterRpcClient {
   }
 
   /**
+   * For tracking some information about the actual client.
+   * It adds trace info "clientIp:ip", "clientPort:port",
+   * "clientId:id", "clientCallId:callId" and "realUser:userName"
+   * in the caller context, removing the old values if they were
+   * already present.
+   */
+  private void addClientInfoToCallerContext(UserGroupInformation ugi) {
+    CallerContext ctx = CallerContext.getCurrent();
+    String origContext = ctx == null ? null : ctx.getContext();
+    byte[] origSignature = ctx == null ? null : ctx.getSignature();
+    String realUser = null;
+    if (ugi.getRealUser() != null) {
+      realUser = ugi.getRealUser().getUserName();
+    }
+    CallerContext.Builder builder =
+        new CallerContext.Builder("", contextFieldSeparator)
+            .append(CallerContext.CLIENT_IP_STR, Server.getRemoteAddress())
+            .append(CallerContext.CLIENT_PORT_STR,
+                Integer.toString(Server.getRemotePort()))
+            .append(CallerContext.CLIENT_ID_STR,
+                StringUtils.byteToHexString(Server.getClientId()))
+            .append(CallerContext.CLIENT_CALL_ID_STR,
+                Integer.toString(Server.getCallId()))
+            .append(CallerContext.REAL_USER_STR, realUser)
+            .setSignature(origSignature);
+    // Append the original caller context
+    if (origContext != null) {
+      for (String part : origContext.split(contextFieldSeparator)) {
+        String[] keyValue =
+            part.split(CallerContext.Builder.KEY_VALUE_SEPARATOR, 2);
+        if (keyValue.length == 2) {
+          builder.appendIfAbsent(keyValue[0], keyValue[1]);
+        } else if (keyValue.length == 1) {
+          builder.append(keyValue[0]);
+        }
+      }
+    }
+    CallerContext.setCurrent(builder.build());
+  }
+
+  /**
    * Invokes a method on the designated object. Catches exceptions specific to
    * the invocation.
-   *
+   * <p>
    * Re-throws exceptions generated by the remote RPC call as either
    * RemoteException or IOException.
    *
@@ -531,17 +712,15 @@ public class RouterRpcClient {
    * @param obj Target object for the method
    * @param params Variable parameters
    * @return Response from the remote server
-   * @throws IOException
-   * @throws InterruptedException
+   * @throws IOException If error occurs.
    */
-  private Object invoke(String nsId, int retryCount, final Method method,
+  private Object invoke(
+      String nsId, FederationNamenodeContext namenode, Boolean listObserverFirst,
+      int retryCount, final Method method,
       final Object obj, final Object... params) throws IOException {
     try {
       return method.invoke(obj, params);
-    } catch (IllegalAccessException e) {
-      LOG.error("Unexpected exception while proxying API", e);
-      return null;
-    } catch (IllegalArgumentException e) {
+    } catch (IllegalAccessException | IllegalArgumentException e) {
       LOG.error("Unexpected exception while proxying API", e);
       return null;
     } catch (InvocationTargetException e) {
@@ -550,14 +729,14 @@ public class RouterRpcClient {
         IOException ioe = (IOException) cause;
 
         // Check if we should retry.
-        RetryDecision decision = shouldRetry(ioe, retryCount, nsId);
+        RetryDecision decision = shouldRetry(ioe, retryCount, nsId, namenode, listObserverFirst);
         if (decision == RetryDecision.RETRY) {
           if (this.rpcMonitor != null) {
             this.rpcMonitor.proxyOpRetries();
           }
 
           // retry
-          return invoke(nsId, ++retryCount, method, obj, params);
+          return invoke(nsId, namenode, listObserverFirst, ++retryCount, method, obj, params);
         } else if (decision == RetryDecision.FAILOVER_AND_RETRY) {
           // failover, invoker looks for standby exceptions for failover.
           if (ioe instanceof StandbyException) {
@@ -582,9 +761,9 @@ public class RouterRpcClient {
    * @return If the exception comes from an unavailable subcluster.
    */
   public static boolean isUnavailableException(IOException ioe) {
-    if (ioe instanceof ConnectException ||
-        ioe instanceof ConnectTimeoutException ||
+    if (ioe instanceof ConnectTimeoutException ||
         ioe instanceof EOFException ||
+        ioe instanceof SocketException ||
         ioe instanceof StandbyException) {
       return true;
     }
@@ -599,14 +778,25 @@ public class RouterRpcClient {
 
   /**
    * Check if the cluster of given nameservice id is available.
+   *
    * @param nsId nameservice ID.
-   * @return
-   * @throws IOException
+   * @param namenode namenode context.
+   * @param listObserverFirst Observer read case, observer NN will be ranked first.
+   * @return true if the cluster with given nameservice id is available.
+   * @throws IOException if error occurs.
    */
-  private boolean isClusterUnAvailable(String nsId) throws IOException {
+  private boolean isClusterUnAvailable(
+      String nsId, FederationNamenodeContext namenode,
+      boolean listObserverFirst) throws IOException {
+    // If the operation is an observer read
+    // and the namenode that caused the exception is an observer,
+    // false is returned so that the observer can be marked as unavailable,so other observers
+    // or active namenode which is standby in the cache of the router can be retried.
+    if (listObserverFirst && namenode.getState() == FederationNamenodeServiceState.OBSERVER) {
+      return false;
+    }
     List<? extends FederationNamenodeContext> nnState = this.namenodeResolver
-        .getNamenodesForNameserviceId(nsId);
-
+        .getNamenodesForNameserviceId(nsId, listObserverFirst);
     if (nnState != null) {
       for (FederationNamenodeContext nnContext : nnState) {
         // Once we find one NN is in active state, we assume this
@@ -684,27 +874,50 @@ public class RouterRpcClient {
   }
 
   /**
+   * Try to get the remote location whose bpId is same with the input bpId from the input locations.
+   * @param locations the input RemoteLocations.
+   * @param bpId the input bpId.
+   * @return the remote location whose bpId is same with the input.
+   * @throws IOException
+   */
+  private RemoteLocation getLocationWithBPID(List<RemoteLocation> locations, String bpId)
+      throws IOException {
+    String nsId = getNameserviceForBlockPoolId(bpId);
+    for (RemoteLocation l : locations) {
+      if (l.getNameserviceId().equals(nsId)) {
+        return l;
+      }
+    }
+
+    LOG.debug("Can't find remote location for the {} from {}", bpId, locations);
+    return new RemoteLocation(nsId, "/", "/");
+  }
+
+  /**
    * Invokes a ClientProtocol method. Determines the target nameservice via a
    * provided block.
-   *
+   * <p>
    * Re-throws exceptions generated by the remote RPC call as either
    * RemoteException or IOException.
    *
    * @param block Block used to determine appropriate nameservice.
    * @param method The remote method and parameters to invoke.
+   * @param locations The remote locations will be used.
+   * @param clazz Class for the return type.
+   * @param <T> The type of the remote method return.
    * @return The result of invoking the method.
    * @throws IOException If the invoke generated an error.
    */
-  public Object invokeSingle(final ExtendedBlock block, RemoteMethod method)
-      throws IOException {
-    String bpId = block.getBlockPoolId();
-    return invokeSingleBlockPool(bpId, method);
+  public <T> T invokeSingle(final ExtendedBlock block, RemoteMethod method,
+      final List<RemoteLocation> locations, Class<T> clazz) throws IOException {
+    RemoteLocation location = getLocationWithBPID(locations, block.getBlockPoolId());
+    return invokeSingle(location, method, clazz);
   }
 
   /**
    * Invokes a ClientProtocol method. Determines the target nameservice using
    * the block pool id.
-   *
+   * <p>
    * Re-throws exceptions generated by the remote RPC call as either
    * RemoteException or IOException.
    *
@@ -721,7 +934,7 @@ public class RouterRpcClient {
 
   /**
    * Invokes a ClientProtocol method against the specified namespace.
-   *
+   * <p>
    * Re-throws exceptions generated by the remote RPC call as either
    * RemoteException or IOException.
    *
@@ -733,18 +946,24 @@ public class RouterRpcClient {
   public Object invokeSingle(final String nsId, RemoteMethod method)
       throws IOException {
     UserGroupInformation ugi = RouterRpcServer.getRemoteUser();
-    List<? extends FederationNamenodeContext> nns =
-        getNamenodesForNameservice(nsId);
-    RemoteLocationContext loc = new RemoteLocation(nsId, "/", "/");
-    Class<?> proto = method.getProtocol();
-    Method m = method.getMethod();
-    Object[] params = method.getParams(loc);
-    return invokeMethod(ugi, nns, proto, m, params);
+    RouterRpcFairnessPolicyController controller = getRouterRpcFairnessPolicyController();
+    acquirePermit(nsId, ugi, method, controller);
+    try {
+      boolean isObserverRead = isObserverReadEligible(nsId, method.getMethod());
+      List<? extends FederationNamenodeContext> nns = getOrderedNamenodes(nsId, isObserverRead);
+      RemoteLocationContext loc = new RemoteLocation(nsId, "/", "/");
+      Class<?> proto = method.getProtocol();
+      Method m = method.getMethod();
+      Object[] params = method.getParams(loc);
+      return invokeMethod(ugi, nns, isObserverRead, proto, m, params);
+    } finally {
+      releasePermit(nsId, ugi, method, controller);
+    }
   }
 
   /**
    * Invokes a remote method against the specified namespace.
-   *
+   * <p>
    * Re-throws exceptions generated by the remote RPC call as either
    * RemoteException or IOException.
    *
@@ -764,7 +983,7 @@ public class RouterRpcClient {
 
   /**
    * Invokes a remote method against the specified extendedBlock.
-   *
+   * <p>
    * Re-throws exceptions generated by the remote RPC call as either
    * RemoteException or IOException.
    *
@@ -785,12 +1004,14 @@ public class RouterRpcClient {
 
   /**
    * Invokes a single proxy call for a single location.
-   *
+   * <p>
    * Re-throws exceptions generated by the remote RPC call as either
    * RemoteException or IOException.
    *
    * @param location RemoteLocation to invoke.
    * @param remoteMethod The remote method and parameters to invoke.
+   * @param clazz Class for the return type.
+   * @param <T> The type of the remote method return.
    * @return The result of invoking the method if successful.
    * @throws IOException If the invoke generated an error.
    */
@@ -808,12 +1029,13 @@ public class RouterRpcClient {
    *
    * @param locations List of locations/nameservices to call concurrently.
    * @param remoteMethod The remote method and parameters to invoke.
+   * @param <T> The type of the remote method return.
    * @return The result of the first successful call, or if no calls are
-   *         successful, the result of the last RPC call executed.
+   * successful, the result of the last RPC call executed.
    * @throws IOException if the success condition is not met and one of the RPC
-   *           calls generated a remote exception.
+   * calls generated a remote exception.
    */
-  public Object invokeSequential(
+  public <T> T invokeSequential(
       final List<? extends RemoteLocationContext> locations,
       final RemoteMethod remoteMethod) throws IOException {
     return invokeSequential(locations, remoteMethod, null, null);
@@ -849,7 +1071,47 @@ public class RouterRpcClient {
       final List<? extends RemoteLocationContext> locations,
       final RemoteMethod remoteMethod, Class<T> expectedResultClass,
       Object expectedResultValue) throws IOException {
+    return (T) invokeSequential(remoteMethod, locations, expectedResultClass,
+        expectedResultValue).getResult();
+  }
 
+  /**
+   * Invokes sequential proxy calls to different locations. Continues to invoke
+   * calls until the success condition is met, or until all locations have been
+   * attempted.
+   *
+   * The success condition may be specified by:
+   * <ul>
+   * <li>An expected result class
+   * <li>An expected result value
+   * </ul>
+   *
+   * If no expected result class/values are specified, the success condition is
+   * a call that does not throw a remote exception.
+   *
+   * This returns RemoteResult, which contains the invoked location as well
+   * as the result.
+   *
+   * @param <R> The type of the remote location.
+   * @param <T> The type of the remote method return.
+   * @param remoteMethod The remote method and parameters to invoke.
+   * @param locations List of locations/nameservices to call concurrently.
+   * @param expectedResultClass In order to be considered a positive result, the
+   *          return type must be of this class.
+   * @param expectedResultValue In order to be considered a positive result, the
+   *          return value must equal the value of this object.
+   * @return The result of the first successful call, or if no calls are
+   *         successful, the result of the first RPC call executed, along with
+   *         the invoked location in form of RemoteResult.
+   * @throws IOException if the success condition is not met, return the first
+   *                     remote exception generated.
+   */
+  public <R extends RemoteLocationContext, T> RemoteResult invokeSequential(
+      final RemoteMethod remoteMethod, final List<R> locations,
+      Class<T> expectedResultClass, Object expectedResultValue)
+      throws IOException {
+
+    RouterRpcFairnessPolicyController controller = getRouterRpcFairnessPolicyController();
     final UserGroupInformation ugi = RouterRpcServer.getRemoteUser();
     final Method m = remoteMethod.getMethod();
     List<IOException> thrownExceptions = new ArrayList<>();
@@ -857,19 +1119,22 @@ public class RouterRpcClient {
     // Invoke in priority order
     for (final RemoteLocationContext loc : locations) {
       String ns = loc.getNameserviceId();
+      boolean isObserverRead = isObserverReadEligible(ns, m);
       List<? extends FederationNamenodeContext> namenodes =
-          getNamenodesForNameservice(ns);
+          getOrderedNamenodes(ns, isObserverRead);
+      acquirePermit(ns, ugi, remoteMethod, controller);
       try {
         Class<?> proto = remoteMethod.getProtocol();
         Object[] params = remoteMethod.getParams(loc);
-        Object result = invokeMethod(ugi, namenodes, proto, m, params);
+        Object result = invokeMethod(
+            ugi, namenodes, isObserverRead, proto, m, params);
         // Check if the result is what we expected
         if (isExpectedClass(expectedResultClass, result) &&
             isExpectedValue(expectedResultValue, result)) {
           // Valid result, stop here
-          @SuppressWarnings("unchecked")
-          T ret = (T)result;
-          return ret;
+          @SuppressWarnings("unchecked") R location = (R) loc;
+          @SuppressWarnings("unchecked") T ret = (T) result;
+          return new RemoteResult<>(location, ret);
         }
         if (firstResult == null) {
           firstResult = result;
@@ -884,12 +1149,14 @@ public class RouterRpcClient {
       } catch (Exception e) {
         // Unusual error, ClientProtocol calls always use IOException (or
         // RemoteException). Re-wrap in IOException for compatibility with
-        // ClientProtcol.
+        // ClientProtocol.
         LOG.error("Unexpected exception {} proxying {} to {}",
             e.getClass(), m.getName(), ns, e);
         IOException ioe = new IOException(
             "Unexpected exception proxying API " + e.getMessage(), e);
         thrownExceptions.add(ioe);
+      } finally {
+        releasePermit(ns, ugi, remoteMethod, controller);
       }
     }
 
@@ -907,9 +1174,8 @@ public class RouterRpcClient {
       throw thrownExceptions.get(0);
     }
     // Return the first result, whether it is the value or not
-    @SuppressWarnings("unchecked")
-    T ret = (T)firstResult;
-    return ret;
+    @SuppressWarnings("unchecked") T ret = (T) firstResult;
+    return new RemoteResult<>(locations.get(0), ret);
   }
 
   /**
@@ -1017,31 +1283,23 @@ public class RouterRpcClient {
    * Invoke method in all locations and return success if any succeeds.
    *
    * @param <T> The type of the remote location.
-   * @param <R> The type of the remote method return.
    * @param locations List of remote locations to call concurrently.
    * @param method The remote method and parameters to invoke.
    * @return If the call succeeds in any location.
    * @throws IOException If any of the calls return an exception.
    */
-  public <T extends RemoteLocationContext, R> boolean invokeAll(
+  public <T extends RemoteLocationContext> boolean invokeAll(
       final Collection<T> locations, final RemoteMethod method)
-          throws IOException {
-    boolean anyResult = false;
+      throws IOException {
     Map<T, Boolean> results =
         invokeConcurrent(locations, method, false, false, Boolean.class);
-    for (Boolean value : results.values()) {
-      boolean result = value.booleanValue();
-      if (result) {
-        anyResult = true;
-      }
-    }
-    return anyResult;
+    return results.containsValue(true);
   }
 
   /**
    * Invoke multiple concurrent proxy calls to different clients. Returns an
    * array of results.
-   *
+   * <p>
    * Re-throws exceptions generated by the remote RPC call as either
    * RemoteException or IOException.
    *
@@ -1060,14 +1318,15 @@ public class RouterRpcClient {
   /**
    * Invoke multiple concurrent proxy calls to different clients. Returns an
    * array of results.
-   *
+   * <p>
    * Re-throws exceptions generated by the remote RPC call as either
    * RemoteException or IOException.
    *
-   * @param <T> The type of the remote location.
-   * @param <R> The type of the remote method return.
    * @param locations List of remote locations to call concurrently.
    * @param method The remote method and parameters to invoke.
+   * @param clazz Type of the remote return type.
+   * @param <T> The type of the remote location.
+   * @param <R> The type of the remote method return.
    * @return Result of invoking the method per subcluster: nsId to result.
    * @throws IOException If all the calls throw an exception.
    */
@@ -1080,7 +1339,7 @@ public class RouterRpcClient {
   /**
    * Invoke multiple concurrent proxy calls to different clients. Returns an
    * array of results.
-   *
+   * <p>
    * Re-throws exceptions generated by the remote RPC call as either
    * RemoteException or IOException.
    *
@@ -1103,7 +1362,7 @@ public class RouterRpcClient {
   /**
    * Invokes multiple concurrent proxy calls to different clients. Returns an
    * array of results.
-   *
+   * <p>
    * Re-throws exceptions generated by the remote RPC call as either
    * RemoteException or IOException.
    *
@@ -1131,7 +1390,7 @@ public class RouterRpcClient {
   /**
    * Invokes multiple concurrent proxy calls to different clients. Returns an
    * array of results.
-   *
+   * <p>
    * Re-throws exceptions generated by the remote RPC call as either
    * RemoteException or IOException.
    *
@@ -1193,7 +1452,7 @@ public class RouterRpcClient {
   /**
    * Invokes multiple concurrent proxy calls to different clients. Returns an
    * array of results.
-   *
+   * <p>
    * Re-throws exceptions generated by the remote RPC call as either
    * RemoteException or IOException.
    *
@@ -1223,26 +1482,36 @@ public class RouterRpcClient {
       // Shortcut, just one call
       T location = locations.iterator().next();
       String ns = location.getNameserviceId();
+      boolean isObserverRead = isObserverReadEligible(ns, m);
       final List<? extends FederationNamenodeContext> namenodes =
-          getNamenodesForNameservice(ns);
+          getOrderedNamenodes(ns, isObserverRead);
+      RouterRpcFairnessPolicyController controller = getRouterRpcFairnessPolicyController();
+      acquirePermit(ns, ugi, method, controller);
       try {
         Class<?> proto = method.getProtocol();
         Object[] paramList = method.getParams(location);
-        R result = (R) invokeMethod(ugi, namenodes, proto, m, paramList);
+        R result = (R) invokeMethod(
+            ugi, namenodes, isObserverRead, proto, m, paramList);
         RemoteResult<T, R> remoteResult = new RemoteResult<>(location, result);
         return Collections.singletonList(remoteResult);
       } catch (IOException ioe) {
         // Localize the exception
         throw processException(ioe, location);
+      } finally {
+        releasePermit(ns, ugi, method, controller);
       }
     }
 
     List<T> orderedLocations = new ArrayList<>();
     List<Callable<Object>> callables = new ArrayList<>();
+    // transfer originCall & callerContext to worker threads of executor.
+    final Call originCall = Server.getCurCall().get();
+    final CallerContext originContext = CallerContext.getCurrent();
     for (final T location : locations) {
       String nsId = location.getNameserviceId();
+      boolean isObserverRead = isObserverReadEligible(nsId, m);
       final List<? extends FederationNamenodeContext> namenodes =
-          getNamenodesForNameservice(nsId);
+          getOrderedNamenodes(nsId, isObserverRead);
       final Class<?> proto = method.getProtocol();
       final Object[] paramList = method.getParams(location);
       if (standby) {
@@ -1256,19 +1525,34 @@ public class RouterRpcClient {
             nnLocation = (T)new RemoteLocation(nsId, nnId, location.getDest());
           }
           orderedLocations.add(nnLocation);
-          callables.add(() -> invokeMethod(ugi, nnList, proto, m, paramList));
+          callables.add(
+              () -> {
+                transferThreadLocalContext(originCall, originContext);
+                return invokeMethod(
+                    ugi, nnList, isObserverRead, proto, m, paramList);
+              });
         }
       } else {
         // Call the objectGetter in order of nameservices in the NS list
         orderedLocations.add(location);
-        callables.add(() ->  invokeMethod(ugi, namenodes, proto, m, paramList));
+        callables.add(
+            () -> {
+              transferThreadLocalContext(originCall, originContext);
+              return invokeMethod(
+                  ugi, namenodes, isObserverRead, proto, m, paramList);
+            });
       }
     }
 
     if (rpcMonitor != null) {
       rpcMonitor.proxyOp();
     }
+    if (this.router.getRouterClientMetrics() != null) {
+      this.router.getRouterClientMetrics().incInvokedConcurrent(m);
+    }
 
+    RouterRpcFairnessPolicyController controller = getRouterRpcFairnessPolicyController();
+    acquirePermit(CONCURRENT_NS, ugi, method, controller);
     try {
       List<Future<Object>> futures = null;
       if (timeOutMs > 0) {
@@ -1293,7 +1577,7 @@ public class RouterRpcClient {
           results.add(new RemoteResult<>(location, ioe));
         } catch (ExecutionException ex) {
           Throwable cause = ex.getCause();
-          LOG.debug("Canot execute {} in {}: {}",
+          LOG.debug("Cannot execute {} in {}: {}",
               m.getName(), location, cause.getMessage());
 
           // Convert into IOException if needed
@@ -1309,7 +1593,9 @@ public class RouterRpcClient {
           results.add(new RemoteResult<>(location, ioe));
         }
       }
-
+      if (rpcMonitor != null) {
+        rpcMonitor.proxyOpComplete(true, CONCURRENT, null);
+      }
       return results;
     } catch (RejectedExecutionException e) {
       if (rpcMonitor != null) {
@@ -1325,28 +1611,23 @@ public class RouterRpcClient {
       LOG.error("Unexpected error while invoking API: {}", ex.getMessage());
       throw new IOException(
           "Unexpected error while invoking API " + ex.getMessage(), ex);
+    } finally {
+      releasePermit(CONCURRENT_NS, ugi, method, controller);
     }
   }
 
   /**
-   * Get a prioritized list of NNs that share the same nameservice ID (in the
-   * same namespace). NNs that are reported as ACTIVE will be first in the list.
+   * Transfer origin thread local context which is necessary to current
+   * worker thread when invoking method concurrently by executor service.
    *
-   * @param nsId The nameservice ID for the namespace.
-   * @return A prioritized list of NNs to use for communication.
-   * @throws IOException If a NN cannot be located for the nameservice ID.
+   * @param originCall origin Call required for getting remote client ip.
+   * @param originContext origin CallerContext which should be transferred
+   *                      to server side.
    */
-  private List<? extends FederationNamenodeContext> getNamenodesForNameservice(
-      final String nsId) throws IOException {
-
-    final List<? extends FederationNamenodeContext> namenodes =
-        namenodeResolver.getNamenodesForNameserviceId(nsId);
-
-    if (namenodes == null || namenodes.isEmpty()) {
-      throw new IOException("Cannot locate a registered namenode for " + nsId +
-          " from " + router.getRouterId());
-    }
-    return namenodes;
+  private void transferThreadLocalContext(
+      final Call originCall, final CallerContext originContext) {
+    Server.getCurCall().set(originCall);
+    CallerContext.setCurrent(originContext);
   }
 
   /**
@@ -1383,5 +1664,208 @@ public class RouterRpcClient {
         getNamenodesForBlockPoolId(bpId);
     FederationNamenodeContext namenode = namenodes.get(0);
     return namenode.getNameserviceId();
+  }
+
+  /**
+   * Acquire permit to continue processing the request for specific nsId.
+   *
+   * @param nsId Identifier of the block pool.
+   * @param ugi UserGroupIdentifier associated with the user.
+   * @param m Remote method that needs to be invoked.
+   * @param controller fairness policy controller to acquire permit from
+   * @throws IOException If permit could not be acquired for the nsId.
+   */
+  private void acquirePermit(final String nsId, final UserGroupInformation ugi,
+      final RemoteMethod m, RouterRpcFairnessPolicyController controller)
+      throws IOException {
+    if (controller != null) {
+      if (!controller.acquirePermit(nsId)) {
+        // Throw StandByException,
+        // Clients could fail over and try another router.
+        if (rpcMonitor != null) {
+          rpcMonitor.proxyOpPermitRejected(nsId);
+        }
+        incrRejectedPermitForNs(nsId);
+        LOG.debug("Permit denied for ugi: {} for method: {}",
+            ugi, m.getMethodName());
+        String msg =
+            "Router " + router.getRouterId() +
+                " is overloaded for NS: " + nsId;
+        throw new StandbyException(msg);
+      }
+      if (rpcMonitor != null) {
+        rpcMonitor.proxyOpPermitAccepted(nsId);
+      }
+      incrAcceptedPermitForNs(nsId);
+    }
+  }
+
+  /**
+   * Release permit for specific nsId after processing against downstream
+   * nsId is completed.
+   *  @param nsId Identifier of the block pool.
+   * @param ugi UserGroupIdentifier associated with the user.
+   * @param m Remote method that needs to be invoked.
+   * @param controller fairness policy controller to release permit from
+   */
+  private void releasePermit(final String nsId, final UserGroupInformation ugi,
+      final RemoteMethod m, RouterRpcFairnessPolicyController controller) {
+    if (controller != null) {
+      controller.releasePermit(nsId);
+      LOG.trace("Permit released for ugi: {} for method: {}", ugi,
+          m.getMethodName());
+    }
+  }
+
+  public RouterRpcFairnessPolicyController
+      getRouterRpcFairnessPolicyController() {
+    return routerRpcFairnessPolicyController;
+  }
+
+  private void incrRejectedPermitForNs(String ns) {
+    rejectedPermitsPerNs.computeIfAbsent(ns, k -> new LongAdder()).increment();
+  }
+
+  public Long getRejectedPermitForNs(String ns) {
+    return rejectedPermitsPerNs.containsKey(ns) ?
+        rejectedPermitsPerNs.get(ns).longValue() : 0L;
+  }
+
+  private void incrAcceptedPermitForNs(String ns) {
+    acceptedPermitsPerNs.computeIfAbsent(ns, k -> new LongAdder()).increment();
+  }
+
+  public Long getAcceptedPermitForNs(String ns) {
+    return acceptedPermitsPerNs.containsKey(ns) ?
+        acceptedPermitsPerNs.get(ns).longValue() : 0L;
+  }
+
+  /**
+   * Refreshes/changes the fairness policy controller implementation if possible
+   * and returns the controller class name.
+   * @param conf Configuration
+   * @return New controller class name if successfully refreshed, else old controller class name
+   */
+  public synchronized String refreshFairnessPolicyController(Configuration conf) {
+    RouterRpcFairnessPolicyController newController;
+    try {
+      newController = FederationUtil.newFairnessPolicyController(conf);
+    } catch (RuntimeException e) {
+      LOG.error("Failed to create router fairness policy controller", e);
+      return getCurrentFairnessPolicyControllerClassName();
+    }
+
+    if (newController != null) {
+      if (routerRpcFairnessPolicyController != null) {
+        routerRpcFairnessPolicyController.shutdown();
+      }
+      routerRpcFairnessPolicyController = newController;
+    }
+    return getCurrentFairnessPolicyControllerClassName();
+  }
+
+  private String getCurrentFairnessPolicyControllerClassName() {
+    if (routerRpcFairnessPolicyController != null) {
+      return routerRpcFairnessPolicyController.getClass().getCanonicalName();
+    }
+    return null;
+  }
+
+  /**
+   * Get a prioritized list of NNs that share the same nameservice ID (in the
+   * same namespace).
+   * In observer read case, OBSERVER NNs will be first in the list.
+   * Otherwise, ACTIVE NNs will be first in the list.
+   *
+   * @param nsId The nameservice ID for the namespace.
+   * @param isObserverRead Read on observer namenode.
+   * @return A prioritized list of NNs to use for communication.
+   * @throws IOException If a NN cannot be located for the nameservice ID.
+   */
+  private List<? extends FederationNamenodeContext> getOrderedNamenodes(String nsId,
+      boolean isObserverRead) throws IOException {
+    final List<? extends FederationNamenodeContext> namenodes;
+
+    boolean listObserverNamenodesFirst = isObserverRead
+        && isNamespaceStateIdFresh(nsId)
+        && (RouterStateIdContext.getClientStateIdFromCurrentCall(nsId) > Long.MIN_VALUE);
+    namenodes = namenodeResolver.getNamenodesForNameserviceId(nsId, listObserverNamenodesFirst);
+    if (!listObserverNamenodesFirst) {
+      // Refresh time of last call to active NameNode.
+      getTimeOfLastCallToActive(nsId).accumulate(Time.monotonicNow());
+    }
+
+    if (namenodes == null || namenodes.isEmpty()) {
+      throw new IOException("Cannot locate a registered namenode for " + nsId +
+          " from " + router.getRouterId());
+    }
+    return namenodes;
+  }
+
+  private boolean isObserverReadEligible(String nsId, Method method) {
+    return isReadCall(method) && isNamespaceObserverReadEligible(nsId);
+  }
+
+  /**
+   * Check if a namespace is eligible for observer reads.
+   * @param nsId namespaceID
+   * @return whether the 'namespace' has observer reads enabled.
+   */
+  boolean isNamespaceObserverReadEligible(String nsId) {
+    return observerReadEnabledDefault != observerReadEnabledOverrides.contains(nsId);
+  }
+
+  /**
+   * Check if a method is read-only.
+   * @return whether the 'method' is a read-only operation.
+   */
+  private static boolean isReadCall(Method method) {
+    if (method == null) {
+      return false;
+    }
+    if (!method.isAnnotationPresent(ReadOnly.class)) {
+      return false;
+    }
+    return !method.getAnnotationsByType(ReadOnly.class)[0].activeOnly();
+  }
+
+  /**
+   * Checks and sets last refresh time for a namespace's stateId.
+   * Returns true if refresh time is newer than threshold.
+   * Otherwise, return false and call should be handled by active namenode.
+   * @param nsId namespaceID
+   */
+  @VisibleForTesting
+  boolean isNamespaceStateIdFresh(String nsId) {
+    if (activeNNStateIdRefreshPeriodMs < 0) {
+      return true;
+    }
+    long timeSinceRefreshMs = Time.monotonicNow() - getTimeOfLastCallToActive(nsId).get();
+    return (timeSinceRefreshMs <= activeNNStateIdRefreshPeriodMs);
+  }
+
+  private LongAccumulator getTimeOfLastCallToActive(String namespaceId) {
+    return lastActiveNNRefreshTimes
+        .computeIfAbsent(namespaceId, key -> new LongAccumulator(Math::max, 0));
+  }
+
+  /**
+   * Determine whether router rotated cache is required when NoNamenodesAvailableException occurs.
+   *
+   * @param ioe cause of the NoNamenodesAvailableException.
+   * @return true if NoNamenodesAvailableException occurs due to
+   * {@link RouterRpcClient#isUnavailableException(IOException) unavailable exception},
+   * otherwise false.
+   */
+  private boolean shouldRotateCache(IOException ioe) {
+    if (isUnavailableException(ioe)) {
+      return true;
+    }
+    if (ioe instanceof  RemoteException) {
+      RemoteException re = (RemoteException) ioe;
+      ioe = re.unwrapRemoteException();
+      ioe = getCleanException(ioe);
+    }
+    return isUnavailableException(ioe);
   }
 }

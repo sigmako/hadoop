@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Set;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.util.Sets;
 import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
 import org.apache.hadoop.yarn.api.records.ContainerExitStatus;
 import org.apache.hadoop.yarn.api.records.ContainerId;
@@ -54,14 +55,14 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Sets;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ImmutableMap;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ImmutableSet;
 
 public class TestCapacitySchedulerNodeLabelUpdate {
   private final int GB = 1024;
 
   private YarnConfiguration conf;
+  private static final QueuePath ROOT = new QueuePath(CapacitySchedulerConfiguration.ROOT);
   
   RMNodeLabelsManager mgr;
 
@@ -79,17 +80,18 @@ public class TestCapacitySchedulerNodeLabelUpdate {
         new CapacitySchedulerConfiguration(config);
     
     // Define top-level queues
-    conf.setQueues(CapacitySchedulerConfiguration.ROOT, new String[] {"a"});
-    conf.setCapacityByLabel(CapacitySchedulerConfiguration.ROOT, "x", 100);
-    conf.setCapacityByLabel(CapacitySchedulerConfiguration.ROOT, "y", 100);
-    conf.setCapacityByLabel(CapacitySchedulerConfiguration.ROOT, "z", 100);
+    conf.setQueues(ROOT, new String[] {"a"});
+    conf.setCapacityByLabel(ROOT, "x", 100);
+    conf.setCapacityByLabel(ROOT, "y", 100);
+    conf.setCapacityByLabel(ROOT, "z", 100);
 
-    final String A = CapacitySchedulerConfiguration.ROOT + ".a";
-    conf.setCapacity(A, 100);
-    conf.setAccessibleNodeLabels(A, ImmutableSet.of("x", "y", "z"));
-    conf.setCapacityByLabel(A, "x", 100);
-    conf.setCapacityByLabel(A, "y", 100);
-    conf.setCapacityByLabel(A, "z", 100);
+    final String aPath = CapacitySchedulerConfiguration.ROOT + ".a";
+    final QueuePath a = new QueuePath(aPath);
+    conf.setCapacity(a, 100);
+    conf.setAccessibleNodeLabels(a, ImmutableSet.of("x", "y", "z"));
+    conf.setCapacityByLabel(a, "x", 100);
+    conf.setCapacityByLabel(a, "y", 100);
+    conf.setCapacityByLabel(a, "z", 100);
     
     return conf;
   }
@@ -100,17 +102,25 @@ public class TestCapacitySchedulerNodeLabelUpdate {
         new CapacitySchedulerConfiguration(config);
 
     // Define top-level queues
-    conf2.setQueues(CapacitySchedulerConfiguration.ROOT,
+    conf2.setQueues(ROOT,
         new String[] {"a", "b"});
-    conf2.setCapacityByLabel(CapacitySchedulerConfiguration.ROOT, "x", 100);
-    conf2.setCapacityByLabel(CapacitySchedulerConfiguration.ROOT, "y", 100);
+    conf2.setCapacityByLabel(ROOT, "x", 100);
+    conf2.setCapacityByLabel(ROOT, "y", 100);
 
-    final String a = CapacitySchedulerConfiguration.ROOT + ".a";
-    final String b = CapacitySchedulerConfiguration.ROOT + ".b";
-    final String aa1 = a + ".a1";
-    final String aa2 = a + ".a2";
-    final String aa3 = a + ".a3";
-    final String aa4 = a + ".a4";
+    final String aPath = CapacitySchedulerConfiguration.ROOT + ".a";
+    final String bPath = CapacitySchedulerConfiguration.ROOT + ".b";
+    final String aa1Path = aPath + ".a1";
+    final String aa2Path = aPath + ".a2";
+    final String aa3Path = aPath + ".a3";
+    final String aa4Path = aPath + ".a4";
+
+    final QueuePath a = new QueuePath(aPath);
+    final QueuePath b = new QueuePath(bPath);
+    final QueuePath aa1 = new QueuePath(aa1Path);
+    final QueuePath aa2 = new QueuePath(aa2Path);
+    final QueuePath aa3= new QueuePath(aa3Path);
+    final QueuePath aa4 = new QueuePath(aa4Path);
+
     conf2.setQueues(a, new String[] {"a1", "a2", "a3", "a4"});
     conf2.setCapacity(a, 50);
     conf2.setCapacity(b, 50);
@@ -492,7 +502,7 @@ public class TestCapacitySchedulerNodeLabelUpdate {
     } catch (Exception e) {
       Assert.assertTrue("Yarn Exception should be thrown",
           e instanceof YarnException);
-      Assert.assertEquals("Specified queue=a2 can't satisfy "
+      Assert.assertEquals("Specified queue=root.a.a2 can't satisfy "
           + "following apps label expressions =[x] accessible "
           + "node labels =[y]", e.getMessage());
     }
@@ -674,6 +684,7 @@ public class TestCapacitySchedulerNodeLabelUpdate {
     checkAMResourceLimit(rm, "a", 640, "y");
     checkAMResourceLimit(rm, "a", 0, "z");
     checkAMResourceLimit(rm, "a", 0, "");
+    rm.stop();
   }
 
   @Test(timeout = 60000)
@@ -952,5 +963,6 @@ public class TestCapacitySchedulerNodeLabelUpdate {
     // Last node with label x is replaced by CLI or REST.
     Assert.assertEquals(0,
         waitForNodeLabelSchedulerEventUpdate(rm, "x", 0, 3000L));
+    rm.stop();
   }
 }

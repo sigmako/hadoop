@@ -17,14 +17,13 @@
  */
 package org.apache.hadoop.fs;
 
-import com.google.common.base.Preconditions;
+import org.apache.hadoop.util.Preconditions;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem.Statistics;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.LambdaTestUtils;
-import org.apache.hadoop.test.Whitebox;
 import org.apache.hadoop.util.StringUtils;
 
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IO_FILE_BUFFER_SIZE_DEFAULT;
@@ -33,6 +32,7 @@ import static org.apache.hadoop.fs.FileSystemTestHelper.*;
 
 import java.io.*;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.EnumSet;
@@ -40,6 +40,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.apache.hadoop.test.PlatformAssumptions.assumeNotWindows;
@@ -75,15 +76,10 @@ public class TestLocalFileSystem {
   private LocalFileSystem fileSys;
 
   /**
-   * standard test timeout: {@value}.
-   */
-  public static final int DEFAULT_TEST_TIMEOUT = 60 * 1000;
-
-  /**
    * Set the timeout for every test.
    */
   @Rule
-  public Timeout testTimeout = new Timeout(DEFAULT_TEST_TIMEOUT);
+  public Timeout testTimeout = new Timeout(60, TimeUnit.SECONDS);
 
   private void cleanupFile(FileSystem fs, Path name) throws IOException {
     assertTrue(fs.exists(name));
@@ -168,7 +164,7 @@ public class TestLocalFileSystem {
   public void testSyncable() throws IOException {
     FileSystem fs = fileSys.getRawFileSystem();
     Path file = new Path(TEST_ROOT_DIR, "syncable");
-    FSDataOutputStream out = fs.create(file);;
+    FSDataOutputStream out = fs.create(file);
     final int bytesWritten = 1;
     byte[] expectedBuf = new byte[] {'0', '1', '2', '3'};
     try {
@@ -312,7 +308,7 @@ public class TestLocalFileSystem {
         .new LocalFSFileInputStream(path), 1024);
       assertNotNull(bis.getFileDescriptor());
     } finally {
-      IOUtils.cleanup(null, bis);
+      IOUtils.cleanupWithLogger(null, bis);
     }
   }
 
@@ -654,7 +650,8 @@ public class TestLocalFileSystem {
     RawLocalFileSystem fs = spy(origFs);
     Configuration conf = mock(Configuration.class);
     fs.setConf(conf);
-    Whitebox.setInternalState(fs, "useDeprecatedFileStatus", false);
+
+    RawLocalFileSystem.setUseDeprecatedFileStatus(false);
     Path path = new Path("/foo");
     File pipe = mock(File.class);
     when(pipe.isFile()).thenReturn(false);
@@ -677,7 +674,7 @@ public class TestLocalFileSystem {
           fileSys.createFile(path).recursive();
       FSDataOutputStream out = builder.build();
       String content = "Create with a generic type of createFile!";
-      byte[] contentOrigin = content.getBytes("UTF8");
+      byte[] contentOrigin = content.getBytes(StandardCharsets.UTF_8);
       out.write(contentOrigin);
       out.close();
 
